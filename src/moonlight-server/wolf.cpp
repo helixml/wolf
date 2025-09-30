@@ -19,6 +19,7 @@
 #include <rtsp/net.hpp>
 #include <state/config.hpp>
 #include <streaming/streaming.hpp>
+#include <streaming/screenshot.hpp>
 #include <vector>
 
 namespace ba = boost::asio;
@@ -425,6 +426,12 @@ auto setup_sessions_handlers(const immer::box<state::AppState> &app_state,
                                            ping_ev->client_ip,
                                            ping_ev->client_port,
                                            ping_ev->video_socket.get());
+        }).detach();
+
+        // Start screenshot pipeline (runs alongside Moonlight streaming)
+        std::thread([sess, ev_bus]() {
+          logs::log(logs::info, "[WOLF] Starting screenshot pipeline for session {}", sess->session_id);
+          streaming::ScreenshotManager::start_screenshot_pipeline(sess->session_id, ev_bus);
         }).detach();
       }));
 

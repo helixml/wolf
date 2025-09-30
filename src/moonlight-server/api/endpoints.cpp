@@ -3,6 +3,7 @@
 #include <rtp/udp-ping.hpp>
 #include <state/config.hpp>
 #include <state/sessions.hpp>
+#include <streaming/screenshot.hpp>
 
 namespace wolf::api {
 
@@ -286,6 +287,95 @@ void UnixSocketServer::endpoint_StreamSessionHandleInput(const HTTPRequest &req,
   } else {
     logs::log(logs::warning, "[API] Invalid event: {} - {}", req.body, input_request.error().what());
     send_http(socket, 500, rfl::json::write(GenericErrorResponse{.error = input_request.error().what()}));
+  }
+}
+
+void UnixSocketServer::endpoint_StreamSessionScreenshot(const HTTPRequest &req, std::shared_ptr<UnixSocket> socket) {
+  // Extract session_id or app_id from query string
+  auto query = req.query_string;
+
+  // Parse query string for session_id parameter
+  std::string session_id_str;
+  auto session_id_pos = query.find("session_id=");
+  if (session_id_pos != std::string::npos) {
+    auto start = session_id_pos + 11; // length of "session_id="
+    auto end = query.find('&', start);
+    if (end == std::string::npos) {
+      end = query.length();
+    }
+    session_id_str = query.substr(start, end - start);
+  }
+
+  // If no session_id, try app_id
+  std::string app_id_str;
+  if (session_id_str.empty()) {
+    auto app_id_pos = query.find("app_id=");
+    if (app_id_pos != std::string::npos) {
+      auto start = app_id_pos + 7; // length of "app_id="
+      auto end = query.find('&', start);
+      if (end == std::string::npos) {
+        end = query.length();
+      }
+      app_id_str = query.substr(start, end - start);
+    }
+  }
+
+  // Must have either session_id or app_id
+  if (session_id_str.empty() && app_id_str.empty()) {
+    logs::log(logs::warning, "[API] Missing session_id or app_id query parameter");
+    send_http(socket, 400, rfl::json::write(GenericErrorResponse{.error = "Missing session_id or app_id query parameter"}));
+    return;
+  }
+
+  try {
+    std::size_t session_id = 0;
+
+    // If app_id provided, look up the session_id
+    if (!app_id_str.empty()) {
+      logs::log(logs::debug, "[API] Looking up session for app_id {}", app_id_str);
+
+      // Get all active sessions and find one matching the app_id
+      auto sessions = state_->app_state->running_sessions->load();
+      bool found = false;
+
+      for (const auto &session : sessions.get()) {
+        if (session.app && session.app->base.id == app_id_str) {
+          session_id = session.session_id;
+          found = true;
+          logs::log(logs::debug, "[API] Found session {} for app_id {}", session_id, app_id_str);
+          break;
+        }
+      }
+
+      if (!found) {
+        logs::log(logs::warning, "[API] No active session found for app_id {}", app_id_str);
+        send_http(socket, 404, rfl::json::write(GenericErrorResponse{.error = "No active session for this app"}));
+        return;
+      }
+    } else {
+      // Use provided session_id
+      session_id = std::stoul(session_id_str);
+    }
+
+    logs::log(logs::debug, "[API] Screenshot request for session {}", session_id);
+
+    // Get latest screenshot (will return test card if none available)
+    auto png_data = streaming::ScreenshotManager::get_latest_screenshot(session_id);
+
+    if (png_data.empty()) {
+      logs::log(logs::warning, "[API] Failed to generate screenshot for session {}", session_id);
+      send_http(socket, 500, rfl::json::write(GenericErrorResponse{.error = "Failed to generate screenshot"}));
+      return;
+    }
+
+    // Send PNG image with correct content type
+    std::string png_str(png_data.begin(), png_data.end());
+    send_http(socket, 200, {{"Content-Type: image/png"}}, png_str);
+
+    logs::log(logs::debug, "[API] Sent screenshot for session {} ({} bytes)", session_id, png_data.size());
+  } catch (const std::exception &e) {
+    logs::log(logs::warning, "[API] Error processing screenshot request: {}", e.what());
+    send_http(socket, 404, rfl::json::write(GenericErrorResponse{.error = "Invalid request"}));
   }
 }
 
