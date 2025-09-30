@@ -428,11 +428,12 @@ auto setup_sessions_handlers(const immer::box<state::AppState> &app_state,
                                            ping_ev->video_socket.get());
         }).detach();
 
-        // Start screenshot pipeline (runs alongside Moonlight streaming)
-        std::thread([sess, ev_bus]() {
-          logs::log(logs::info, "[WOLF] Starting screenshot pipeline for session {}", sess->session_id);
-          streaming::ScreenshotManager::start_screenshot_pipeline(sess->session_id, ev_bus);
-        }).detach();
+        // TODO: Re-enable when DMA-BUF caps negotiation is fixed
+        // Screenshot pipeline disabled - using grim-based screenshot server in containers instead
+        // std::thread([sess, ev_bus]() {
+        //   logs::log(logs::info, "[WOLF] Starting screenshot pipeline for session {}", sess->session_id);
+        //   streaming::ScreenshotManager::start_screenshot_pipeline(sess->session_id, ev_bus);
+        // }).detach();
       }));
 
   handlers.push_back(app_state->event_bus->register_handler<immer::box<events::AudioSession>>(
