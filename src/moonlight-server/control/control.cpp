@@ -175,8 +175,11 @@ void run_control(int port,
         case ENET_EVENT_TYPE_DISCONNECT:
           logs::log(logs::debug, "[ENET] disconnected client: {}:{}", client_ip, client_port);
           connected_clients.update([peer = event.peer](const enet_clients_map &m) { return m.erase(peer); });
-          event_bus->fire_event(
-              immer::box<PauseStreamEvent>(PauseStreamEvent{.session_id = client_session->session_id}));
+          // HELIX MODIFICATION: Don't fire PauseStreamEvent to allow parallel sessions
+          // Client disconnect should not stop the session - it should keep running for reconnection
+          logs::log(logs::info, "[ENET] Client disconnected from session {} but keeping session alive (parallel sessions enabled)", client_session->session_id);
+          // event_bus->fire_event(
+          //     immer::box<PauseStreamEvent>(PauseStreamEvent{.session_id = client_session->session_id}));
           break;
         case ENET_EVENT_TYPE_RECEIVE:
           enet_packet packet = {event.packet, enet_packet_destroy};
@@ -203,8 +206,12 @@ void run_control(int port,
                         crypto::str_to_hex(decrypted));
 
               if (sub_type == TERMINATION) {
-                event_bus->fire_event(
-                    immer::box<PauseStreamEvent>(PauseStreamEvent{.session_id = client_session->session_id}));
+                // HELIX MODIFICATION: Don't fire PauseStreamEvent to allow parallel sessions
+                // Moonlight client sends TERMINATION when user quits (Ctrl+Shift+Alt+Q)
+                // but we want sessions to keep running
+                logs::log(logs::info, "[ENET] Ignoring TERMINATION packet for session {} (parallel sessions enabled)", client_session->session_id);
+                // event_bus->fire_event(
+                //     immer::box<PauseStreamEvent>(PauseStreamEvent{.session_id = client_session->session_id}));
               } else if (sub_type == INPUT_DATA) {
                 immer::box<std::shared_ptr<ENetPeer>> enet_client = {to_shared_ptr(event.peer)};
                 handle_input(client_session.value(), enet_client, (INPUT_PKT *)decrypted.data());
