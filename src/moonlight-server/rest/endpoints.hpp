@@ -466,6 +466,18 @@ void launch(const std::shared_ptr<typename SimpleWeb::Server<SimpleWeb::HTTPS>::
     server_error<SimpleWeb::HTTPS>(response);
     return;
   }
+
+  // HELIX MODIFICATION: Check for existing session with same client+app to prevent duplicates
+  // Since we hide sessions from serverinfo, client will call /launch instead of /resume
+  auto existing_session = state::get_session_by_client(state->running_sessions->load(), current_client);
+  if (existing_session && existing_session->app->base.id == app.value()->base.id) {
+    logs::log(logs::info, "[HTTPS] Client already has active session for app {}, reusing (parallel sessions mode)", app.value()->base.id);
+    auto rtsp_ip = get_rtsp_ip_string(get_host_ip<SimpleWeb::HTTPS>(request, state), *existing_session);
+    auto xml = moonlight::launch_success(rtsp_ip, std::to_string(get_port(state::RTSP_SETUP_PORT)));
+    send_xml<SimpleWeb::HTTPS>(response, SimpleWeb::StatusCode::success_ok, xml);
+    return;
+  }
+
   auto client_ip = get_client_ip<SimpleWeb::HTTPS>(request);
   auto new_session = create_run_session(request->parse_query_string(), client_ip, current_client, state, app.value());
   state->event_bus->fire_event(immer::box<events::StreamSession>(*new_session));
