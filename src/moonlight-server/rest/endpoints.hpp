@@ -519,15 +519,21 @@ void cancel(const std::shared_ptr<typename SimpleWeb::Server<SimpleWeb::HTTPS>::
 
   auto client_session = state::get_session_by_client(state->running_sessions->load(), current_client);
   if (client_session) {
-    state->event_bus->fire_event(
-        immer::box<events::StopStreamEvent>(events::StopStreamEvent{.session_id = client_session->session_id}));
+    // HELIX MODIFICATION: Don't fire StopStreamEvent to allow session persistence
+    // Moonlight protocol /cancel is client-initiated (user canceling launch or quitting)
+    // Sessions should keep running for reconnection. Use Wolf internal API to cleanup.
+    logs::log(logs::info, "[HTTPS] Ignoring /cancel request for session {} (parallel sessions enabled)", client_session->session_id);
 
-    state->running_sessions->update([&client_session](const immer::vector<events::StreamSession> &ses_v) {
-      return state::remove_session(ses_v, client_session.value());
-    });
+    // state->event_bus->fire_event(
+    //     immer::box<events::StopStreamEvent>(events::StopStreamEvent{.session_id = client_session->session_id}));
+
+    // Note: We also don't remove from running_sessions to keep session alive
+    // state->running_sessions->update([&client_session](const immer::vector<events::StreamSession> &ses_v) {
+    //   return state::remove_session(ses_v, client_session.value());
+    // });
   } else {
     auto client_ip = get_client_ip<SimpleWeb::HTTPS>(request);
-    logs::log(logs::warning, "[HTTPS] Received resume event from an unregistered session, ip: {}", client_ip);
+    logs::log(logs::warning, "[HTTPS] Received cancel event from an unregistered session, ip: {}", client_ip);
   }
 
   XML xml;
