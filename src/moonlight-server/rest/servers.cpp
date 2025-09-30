@@ -122,8 +122,10 @@ void startServer(HttpsServer *server, const immer::box<state::AppState> state, i
 
   server->resource["^/serverinfo$"]["GET"] = [&state](auto resp, auto req) {
     if (auto client = get_client_if_paired(state, req)) {
-      auto client_session = state::get_session_by_client(state->running_sessions->load(), client.value());
-      endpoints::serverinfo<SimpleWeb::HTTPS>(resp, req, client_session, state);
+      // HELIX MODIFICATION: Always report server as not busy to enable parallel sessions
+      // Wolf still tracks sessions internally, but Moonlight client won't try to stop them
+      // auto client_session = state::get_session_by_client(state->running_sessions->load(), client.value());
+      endpoints::serverinfo<SimpleWeb::HTTPS>(resp, req, std::nullopt, state);
     } else {
       reply_unauthorized(req, resp);
     }
