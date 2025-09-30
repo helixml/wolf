@@ -249,11 +249,17 @@ void UnixSocketServer::endpoint_StreamSessionStop(const HTTPRequest &req, std::s
   if (session) {
     auto sessions = state_->app_state->running_sessions->load();
     auto session_id = std::stoul(session.value().session_id);
-    if (state::get_session_by_id(sessions.get(), session_id)) {
+    if (auto session_to_stop = state::get_session_by_id(sessions.get(), session_id)) {
       // HELIX NOTE: This API endpoint is for explicit session cleanup (Helix deleting PDEs)
       // Client-side disconnects are handled in control.cpp and don't stop sessions
       this->state_->app_state->event_bus->fire_event(
           immer::box<events::StopStreamEvent>(events::StopStreamEvent{.session_id = session_id}));
+
+      // Remove session from running_sessions to stop tracking it
+      state_->app_state->running_sessions->update([&session_to_stop](const immer::vector<events::StreamSession> &ses_v) {
+        return state::remove_session(ses_v, session_to_stop.value());
+      });
+
       auto res = GenericSuccessResponse{.success = true};
       send_http(socket, 200, rfl::json::write(res));
       return;
