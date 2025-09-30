@@ -250,12 +250,10 @@ void UnixSocketServer::endpoint_StreamSessionStop(const HTTPRequest &req, std::s
     auto sessions = state_->app_state->running_sessions->load();
     auto session_id = std::stoul(session.value().session_id);
     if (state::get_session_by_id(sessions.get(), session_id)) {
-      // HELIX MODIFICATION: Make session stop a no-op to allow multiple parallel sessions
-      // Moonlight client automatically stops sessions before starting new ones (gaming behavior)
-      // but we want to run multiple Personal Dev Environments in parallel
-      logs::log(logs::info, "[API] Ignoring stop request for session {} (parallel sessions enabled)", session_id);
-
-      // Return success without firing StopStreamEvent
+      // HELIX NOTE: This API endpoint is for explicit session cleanup (Helix deleting PDEs)
+      // Client-side disconnects are handled in control.cpp and don't stop sessions
+      this->state_->app_state->event_bus->fire_event(
+          immer::box<events::StopStreamEvent>(events::StopStreamEvent{.session_id = session_id}));
       auto res = GenericSuccessResponse{.success = true};
       send_http(socket, 200, rfl::json::write(res));
       return;
