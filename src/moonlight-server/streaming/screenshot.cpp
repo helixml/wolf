@@ -80,23 +80,18 @@ static void configure_screenshot_appsink(GstElement *appsink, ScreenshotSink *si
 
 void ScreenshotManager::start_screenshot_pipeline(std::size_t session_id,
                                                    const std::shared_ptr<events::EventBusType> &event_bus) {
-  // Screenshot pipeline: consume from interpipe, convert DMA-BUF->GL->CPU, throttle to 1 FPS, convert to PNG
-  // CRITICAL: Throttle to 1 FPS in GL memory BEFORE expensive gldownload to CPU
-  // This way we only do GPU->CPU transfer once per second, not 60+ times per second
+  // Screenshot pipeline: Convert DMA-BUF first, then process
+  // videoconvert handles DMA-BUF → system memory automatically
   auto pipeline = fmt::format(
       "interpipesrc listen-to={session_id}_video is-live=true stream-sync=restart-ts "
-      "max-bytes=0 max-buffers=1 leaky-type=downstream ! "
-      "glupload ! "                                             // Upload DMA-BUF to GL memory (zero-copy)
-      "glcolorconvert ! "                                       // Color conversion in GPU
-      "video/x-raw(memory:GLMemory),format=RGBA ! "            // Convert to RGBA in GL memory
-      "videorate drop-only=true ! "                            // **Throttle in GL memory FIRST** (60 FPS -> 1 FPS)
-      "video/x-raw(memory:GLMemory),framerate=1/1 ! "          // Now only 1 frame per second in GL memory
-      "gldownload ! "                                           // **Only transfer 1 frame/sec to CPU** (expensive operation)
-      "video/x-raw,format=RGBA ! "                             // Now in CPU memory (1 FPS)
-      "videoscale ! "                                           // Scale down to reduce size (CPU)
-      "video/x-raw,format=RGB,width=640,height=480 ! "         // Fixed size screenshots (CPU)
-      "videoconvert ! "                                         // Final format conversion (CPU)
-      "pngenc compression-level=6 ! "                           // Encode as PNG (CPU)
+      "max-bytes=0 max-buffers=1 leaky-type=downstream accept-events=true accept-eos-event=true ! "
+      "videoconvert ! "                                         // Convert DMA-BUF to system memory first
+      "videorate drop-only=true ! "                             // Throttle to 1 FPS in system memory
+      "video/x-raw,framerate=1/1 ! "                            // Only 1 frame per second
+      "videoscale ! "                                           // Scale down to reduce size
+      "video/x-raw,width=640,height=480 ! "                     // Fixed size screenshots
+      "videoconvert ! "                                         // Final format conversion for PNG
+      "pngenc compression-level=6 ! "                           // Encode as PNG
       "appsink name=screenshot_sink sync=false max-buffers=1 drop=true", // Capture PNG data
       fmt::arg("session_id", session_id));
 
@@ -121,7 +116,7 @@ void ScreenshotManager::start_screenshot_pipeline(std::size_t session_id,
     auto stop_handler = event_bus->register_handler<immer::box<events::StopStreamEvent>>(
         [session_id, loop](const immer::box<events::StopStreamEvent> &ev) {
           if (ev->session_id == session_id) {
-            logs::log(logs::info, "[SCREENSHOT] Stopping screenshot pipeline for session {}", session_id);
+            logs::log(logs::info, "[SCREENSHOT] Stopping screenshot pipeline for session {} due to StopStreamEvent", session_id);
             g_main_loop_quit(loop.get());
 
             // Clean up screenshot data
@@ -138,6 +133,20 @@ void ScreenshotManager::start_screenshot_pipeline(std::size_t session_id,
 
 std::vector<uint8_t> ScreenshotManager::get_latest_screenshot(std::size_t session_id) {
   std::lock_guard<std::mutex> lock(screenshot_mutex_);
+
+  // Debug: Log all available sessions
+  logs::log(logs::debug, "[SCREENSHOT] Total sessions with screenshots: {}", screenshots_.size());
+  for (const auto &[sid, data] : screenshots_) {
+    auto now = std::chrono::steady_clock::now();
+    auto age = std::chrono::duration_cast<std::chrono::seconds>(now - data.timestamp).count();
+    logs::log(logs::debug,
+              "[SCREENSHOT] Available session {} ({}x{}, {} bytes, age: {}s)",
+              sid,
+              data.width,
+              data.height,
+              data.png_data.size(),
+              age);
+  }
 
   auto it = screenshots_.find(session_id);
   if (it != screenshots_.end()) {
