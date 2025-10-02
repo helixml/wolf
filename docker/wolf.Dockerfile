@@ -40,9 +40,9 @@ RUN <<_GST_WAYLAND_DISPLAY
     #!/bin/bash
     set -e
 
-    git clone https://github.com/games-on-whales/gst-wayland-display
+    git clone https://github.com/helixml/gst-wayland-display
     cd gst-wayland-display
-    git checkout 412d26ae19cc4e729fda36ee0fb6a2dc38fec0ef
+    git checkout fix/smithay-gl-cleanup-leak
     cargo install cargo-c
     cargo cinstall -p gst-plugin-wayland-display --prefix=/usr/local/lib/x86_64-linux-gnu/ --libdir=/usr/local/lib/x86_64-linux-gnu/gstreamer-1.0
 _GST_WAYLAND_DISPLAY
