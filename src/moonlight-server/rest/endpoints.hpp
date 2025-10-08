@@ -247,6 +247,20 @@ void pair(const std::shared_ptr<typename SimpleWeb::Server<SimpleWeb::HTTP>::Res
     return;
   }
 
+  // PHASE 5 (also supported over HTTP for compatibility)
+  // Check this BEFORE cache lookup since cache is removed after Phase 4
+  auto phrase = get_header(headers, "phrase");
+  logs::log(logs::debug, "Checking Phase 5: phrase={}, uniqueid={}",
+            phrase ? phrase.value() : "none",
+            client_id ? client_id.value() : "none");
+  if (phrase && phrase.value() == "pairchallenge") {
+    XML xml;
+    xml.put("root.paired", 1);
+    xml.put("root.<xmlattr>.status_code", 200);
+    send_xml<SimpleWeb::HTTP>(response, SimpleWeb::StatusCode::success_ok, xml);
+    return;
+  }
+
   auto client_cache_it = state->pairing_cache->load()->find(cache_key);
   if (client_cache_it == nullptr) {
     send_xml<SimpleWeb::HTTP>(
