@@ -72,20 +72,29 @@ void startServer(HttpServer *server, const immer::box<state::AppState> state, in
 
   auto pair_handler = state->event_bus->register_handler<immer::box<events::PairSignal>>(
       [pairing_atom](const immer::box<events::PairSignal> pair_sig) {
-        pairing_atom->update([&pair_sig](const immer::map<std::string, immer::box<events::PairSignal>> &m) {
-          auto secret = crypto::str_to_hex(crypto::random(8));
-          logs::log(logs::info, "Insert pin at http://{}:47989/pin/#{}", pair_sig->host_ip, secret);
-          // filter out any other (dangling) pair request from the same client
-          auto t_map = m.transient();
-          for (auto [key, value] : m) {
-            if (value->client_ip == pair_sig->client_ip) {
-              t_map.erase(key);
+        // Check if auto-pairing PIN is set via environment variable
+        auto auto_pin_env = utils::get_env("MOONLIGHT_INTERNAL_PAIRING_PIN", "");
+        std::string auto_pin(auto_pin_env);
+        if (!auto_pin.empty()) {
+          logs::log(logs::info, "Auto-pairing enabled with PIN from MOONLIGHT_INTERNAL_PAIRING_PIN");
+          // Automatically fulfill the PIN promise
+          pair_sig->user_pin->set_value(auto_pin);
+        } else {
+          pairing_atom->update([&pair_sig](const immer::map<std::string, immer::box<events::PairSignal>> &m) {
+            auto secret = crypto::str_to_hex(crypto::random(8));
+            logs::log(logs::info, "Insert pin at http://{}:47989/pin/#{}", pair_sig->host_ip, secret);
+            // filter out any other (dangling) pair request from the same client
+            auto t_map = m.transient();
+            for (auto [key, value] : m) {
+              if (value->client_ip == pair_sig->client_ip) {
+                t_map.erase(key);
+              }
             }
-          }
-          // insert the new pair request
-          t_map.set(secret, pair_sig);
-          return t_map.persistent();
-        });
+            // insert the new pair request
+            t_map.set(secret, pair_sig);
+            return t_map.persistent();
+          });
+        }
       });
 
   // Start server
