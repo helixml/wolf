@@ -302,7 +302,10 @@ void start_streaming_video(immer::box<events::VideoSession> video_session,
     auto pause_handler = event_bus->register_handler<immer::box<events::PauseStreamEvent>>(
         [sess_id = video_session->session_id, pipeline](const immer::box<events::PauseStreamEvent> &ev) {
           if (ev->session_id == sess_id) {
-            logs::log(logs::debug, "[GSTREAMER] Pausing pipeline: {}", sess_id);
+            auto state = GST_STATE(pipeline.get());
+            auto pending = GST_STATE_PENDING(pipeline.get());
+            logs::log(logs::warning, "[HANG_DEBUG] Video PauseStreamEvent for session {}, pipeline state: {} → {}",
+                     sess_id, gst_element_state_get_name(state), gst_element_state_get_name(pending));
 
             /**
              * Unfortunately here we can't just pause the pipeline,
@@ -324,17 +327,22 @@ void start_streaming_video(immer::box<events::VideoSession> video_session,
         [sess_id = video_session->session_id,
          pipeline](const immer::box<events::SwitchStreamProducerEvents> &switch_ev) {
           if (switch_ev->session_id == sess_id) {
-            logs::log(logs::debug,
-                      "[GSTREAMER] Switching video producer pipeline for {} to {}",
+            auto state = GST_STATE(pipeline.get());
+            logs::log(logs::warning,
+                      "[HANG_DEBUG] Video SwitchStreamProducerEvents: session {} switching to {}, pipeline state: {}",
                       sess_id,
-                      switch_ev->interpipe_src_id);
+                      switch_ev->interpipe_src_id,
+                      gst_element_state_get_name(state));
             /* Grab a reference to the interpipesrc */
             auto pipe_name = fmt::format("interpipesrc_{}_video", sess_id);
             if (auto src = gst_bin_get_by_name(GST_BIN(pipeline.get()), pipe_name.c_str())) {
               /* Perform the switch */
               auto video_interpipe = fmt::format("{}_video", switch_ev->interpipe_src_id);
+              logs::log(logs::warning, "[HANG_DEBUG] Switching interpipesrc listen-to: {} → {}", pipe_name, video_interpipe);
               g_object_set(src, "listen-to", video_interpipe.c_str(), nullptr);
+              logs::log(logs::warning, "[HANG_DEBUG] Unrefing interpipesrc element");
               gst_object_unref(src);
+              logs::log(logs::warning, "[HANG_DEBUG] Switch complete for session {}", sess_id);
             } else {
               logs::log(logs::error, "[GSTREAMER] Failed to get video interpipesrc for {}", sess_id);
             }
@@ -401,7 +409,10 @@ void start_streaming_audio(immer::box<events::AudioSession> audio_session,
     auto pause_handler = event_bus->register_handler<immer::box<events::PauseStreamEvent>>(
         [session_id, pipeline](const immer::box<events::PauseStreamEvent> &ev) {
           if (ev->session_id == session_id) {
-            logs::log(logs::debug, "[GSTREAMER] Pausing pipeline: {}", session_id);
+            auto state = GST_STATE(pipeline.get());
+            auto pending = GST_STATE_PENDING(pipeline.get());
+            logs::log(logs::warning, "[HANG_DEBUG] Audio PauseStreamEvent for session {}, pipeline state: {} → {}",
+                     session_id, gst_element_state_get_name(state), gst_element_state_get_name(pending));
 
             /**
              * Unfortunately here we can't just pause the pipeline,
