@@ -75,8 +75,12 @@ void startServer(HttpServer *server, const immer::box<state::AppState> state, in
         // Check if auto-pairing PIN is set via environment variable
         auto auto_pin_env = utils::get_env("MOONLIGHT_INTERNAL_PAIRING_PIN", "");
         std::string auto_pin(auto_pin_env);
-        if (!auto_pin.empty()) {
-          logs::log(logs::info, "Auto-pairing enabled with PIN from MOONLIGHT_INTERNAL_PAIRING_PIN");
+
+        // Only auto-pair for clients from docker bridge network (172.x.x.x)
+        bool is_local_client = pair_sig->client_ip.rfind("172.", 0) == 0;
+
+        if (!auto_pin.empty() && is_local_client) {
+          logs::log(logs::info, "Auto-pairing client {} with PIN from MOONLIGHT_INTERNAL_PAIRING_PIN", pair_sig->client_ip);
           // Automatically fulfill the PIN promise
           pair_sig->user_pin->set_value(auto_pin);
         } else {
