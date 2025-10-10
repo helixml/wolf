@@ -282,6 +282,9 @@ void start_streaming_video(immer::box<events::VideoSession> video_session,
       gst_object_unref(app_sink_el);
     }
 
+    // Guard against duplicate pause events
+    auto pause_sent = std::make_shared<bool>(false);
+
     /*
      * The force IDR event will be triggered by the control stream.
      * We have to pass this back into the gstreamer pipeline
@@ -300,8 +303,15 @@ void start_streaming_video(immer::box<events::VideoSession> video_session,
         });
 
     auto pause_handler = event_bus->register_handler<immer::box<events::PauseStreamEvent>>(
-        [sess_id = video_session->session_id, pipeline](const immer::box<events::PauseStreamEvent> &ev) {
+        [sess_id = video_session->session_id, pipeline, pause_sent](const immer::box<events::PauseStreamEvent> &ev) {
           if (ev->session_id == sess_id) {
+            // Guard against duplicate pause events (bug fix for upstream issue)
+            if (*pause_sent) {
+              logs::log(logs::warning, "[HANG_DEBUG] Video PauseStreamEvent DUPLICATE IGNORED for session {}", sess_id);
+              return;
+            }
+            *pause_sent = true;
+
             auto state = GST_STATE(pipeline.get());
             auto pending = GST_STATE_PENDING(pipeline.get());
             logs::log(logs::warning, "[HANG_DEBUG] Video PauseStreamEvent for session {}, pipeline state: {} → {}",
@@ -406,9 +416,19 @@ void start_streaming_audio(immer::box<events::AudioSession> audio_session,
       gst_object_unref(app_sink_el);
     }
 
+    // Guard against duplicate pause events
+    auto pause_sent = std::make_shared<bool>(false);
+
     auto pause_handler = event_bus->register_handler<immer::box<events::PauseStreamEvent>>(
-        [session_id, pipeline](const immer::box<events::PauseStreamEvent> &ev) {
+        [session_id, pipeline, pause_sent](const immer::box<events::PauseStreamEvent> &ev) {
           if (ev->session_id == session_id) {
+            // Guard against duplicate pause events (bug fix for upstream issue)
+            if (*pause_sent) {
+              logs::log(logs::warning, "[HANG_DEBUG] Audio PauseStreamEvent DUPLICATE IGNORED for session {}", session_id);
+              return;
+            }
+            *pause_sent = true;
+
             auto state = GST_STATE(pipeline.get());
             auto pending = GST_STATE_PENDING(pipeline.get());
             logs::log(logs::warning, "[HANG_DEBUG] Audio PauseStreamEvent for session {}, pipeline state: {} → {}",
