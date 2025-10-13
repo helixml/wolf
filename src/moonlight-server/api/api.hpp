@@ -174,6 +174,31 @@ struct DockerPullImageResponse {
   bool success = true;
 };
 
+struct LobbyMemoryUsage {
+  std::string lobby_id;
+  std::string lobby_name;
+  std::string resolution;
+  size_t client_count;
+  size_t memory_bytes;
+};
+
+struct ClientConnectionInfo {
+  size_t session_id;
+  std::string client_ip;
+  std::string resolution;
+  std::optional<std::string> lobby_id;
+  size_t memory_bytes;
+};
+
+struct SystemMemoryResponse {
+  bool success = true;
+  size_t process_rss_bytes;
+  size_t gstreamer_buffer_bytes;
+  size_t total_memory_bytes;
+  std::vector<LobbyMemoryUsage> lobbies;
+  std::vector<ClientConnectionInfo> clients;
+};
+
 struct UnixSocket {
   boost::asio::local::stream_protocol::socket socket;
   bool is_alive = true;
@@ -224,6 +249,7 @@ private:
   void endpoint_GetIcon(const HTTPRequest &req, std::shared_ptr<UnixSocket> socket);
   void endpoint_DockerInspectImage(const HTTPRequest &req, std::shared_ptr<UnixSocket> socket);
   void endpoint_DockerPullImage(const HTTPRequest &req, std::shared_ptr<UnixSocket> socket);
+  void endpoint_SystemMemory(const HTTPRequest &req, std::shared_ptr<UnixSocket> socket);
 
   void sse_broadcast(const std::string &payload);
   void sse_keepalive(const boost::system::error_code &e);

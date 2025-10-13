@@ -96,6 +96,19 @@ struct Profile {
  */
 constexpr std::string_view MOONLIGHT_PROFILE_ID = "moonlight-profile-id";
 
+struct VideoSettings {
+  int width;
+  int height;
+  int refresh_rate;
+  std::string wayland_render_node;
+  std::string runner_render_node;
+  std::string video_producer_buffer_caps;
+};
+
+struct AudioSettings {
+  int channel_count;
+};
+
 struct Lobby {
   const std::string id;
   const std::string name;
@@ -113,6 +126,11 @@ struct Lobby {
    * The app that is currently running in the lobby
    */
   std::shared_ptr<Runner> runner;
+
+  /**
+   * Video settings for this lobby (resolution, refresh rate, render nodes)
+   */
+  VideoSettings video_settings;
 
   /**
    * A list of all currently connected sessions by their session_id
@@ -136,19 +154,6 @@ struct Lobby {
    * A queue of devices that will be plugged into the runner when ready
    */
   std::shared_ptr<events::devices_atom_queue> plugged_devices_queue = std::make_shared<events::devices_atom_queue>();
-};
-
-struct VideoSettings {
-  int width;
-  int height;
-  int refresh_rate;
-  std::string wayland_render_node;
-  std::string runner_render_node;
-  std::string video_producer_buffer_caps;
-};
-
-struct AudioSettings {
-  int channel_count;
 };
 
 struct CreateLobbyEvent {

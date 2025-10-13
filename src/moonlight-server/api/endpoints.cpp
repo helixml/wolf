@@ -5,6 +5,8 @@
 #include <state/config.hpp>
 #include <state/sessions.hpp>
 #include <state/utils.hpp>
+#include <fstream>
+#include <sstream>
 
 namespace wolf::api {
 
@@ -609,6 +611,105 @@ void UnixSocketServer::endpoint_DockerPullImage(const HTTPRequest &req, std::sha
       }
     }).detach();
   }
+}
+
+void UnixSocketServer::endpoint_SystemMemory(const HTTPRequest &req, std::shared_ptr<UnixSocket> socket) {
+  auto res = SystemMemoryResponse{};
+
+  // Read process RSS memory from /proc/self/status
+  std::ifstream status_file("/proc/self/status");
+  std::string line;
+  size_t rss_kb = 0;
+
+  while (std::getline(status_file, line)) {
+    if (line.find("VmRSS:") == 0) {
+      // Extract RSS value in kB
+      std::istringstream iss(line);
+      std::string label;
+      iss >> label >> rss_kb; // Format: "VmRSS:     123456 kB"
+      break;
+    }
+  }
+
+  res.process_rss_bytes = rss_kb * 1024; // Convert kB to bytes
+
+  // Get lobbies and calculate per-lobby memory breakdown
+  immer::vector<events::Lobby> lobbies = state_->app_state->lobbies->load();
+  size_t total_lobby_memory = 0;
+
+  for (const events::Lobby &lobby : lobbies) {
+    auto connected_sessions = lobby.connected_sessions->load();
+    size_t client_count = connected_sessions.get().size();
+
+    // Estimate memory per lobby based on resolution and client count
+    // Formula: base overhead + (width * height * bytes_per_pixel * buffer_count) + (client_count * transcoding_overhead)
+    // Rough estimates:
+    // - Base overhead per lobby: ~50 MB (wayland display, audio sink, runner state)
+    // - Video buffer: width * height * 4 bytes (RGBA) * 3 buffers
+    // - Per-client transcoding: ~20 MB per client (encoder state, RTP buffers)
+
+    size_t base_overhead = 50 * 1024 * 1024; // 50 MB
+
+    // Get actual video settings from lobby
+    int width = lobby.video_settings.width;
+    int height = lobby.video_settings.height;
+    int fps = lobby.video_settings.refresh_rate;
+
+    size_t video_buffers = width * height * 4 * 3; // RGBA * 3 buffers
+    size_t client_overhead = client_count * 20 * 1024 * 1024; // 20 MB per client
+
+    size_t lobby_memory = base_overhead + video_buffers + client_overhead;
+    total_lobby_memory += lobby_memory;
+
+    std::string resolution_str = std::to_string(width) + "x" + std::to_string(height) + "@" + std::to_string(fps);
+
+    res.lobbies.push_back(LobbyMemoryUsage{
+      .lobby_id = lobby.id,
+      .lobby_name = lobby.name,
+      .resolution = resolution_str,
+      .client_count = client_count,
+      .memory_bytes = lobby_memory
+    });
+  }
+
+  // Iterate over ALL client connections (StreamSessions) for leak detection
+  immer::vector<events::StreamSession> sessions = state_->app_state->running_sessions->load();
+  for (const events::StreamSession &session : sessions) {
+    // Estimate memory per client connection
+    // - Base client overhead: ~10 MB (session state, buffers)
+    // - Video encoder state: ~15 MB
+    // - Audio encoder state: ~5 MB
+    // - Per-client total: ~30 MB
+    size_t client_memory = 30 * 1024 * 1024;
+
+    // Check if this client is connected to a lobby
+    std::optional<std::string> lobby_id;
+    auto lobby = state::get_lobby_by_connected_session(lobbies, std::to_string(session.session_id));
+    if (lobby) {
+      lobby_id = lobby->id;
+    }
+
+    // Get client resolution from display_mode
+    std::string client_resolution = std::to_string(session.display_mode.width) + "x" +
+                                   std::to_string(session.display_mode.height) + "@" +
+                                   std::to_string(session.display_mode.refreshRate);
+
+    res.clients.push_back(ClientConnectionInfo{
+      .session_id = session.session_id,
+      .client_ip = session.ip,
+      .resolution = client_resolution,
+      .lobby_id = lobby_id,
+      .memory_bytes = client_memory
+    });
+  }
+
+  // GStreamer buffer estimate (rough approximation)
+  // This includes interpipe buffers, encoder buffers, RTP buffers
+  res.gstreamer_buffer_bytes = total_lobby_memory / 2; // Rough estimate: ~50% of lobby memory is GStreamer buffers
+
+  res.total_memory_bytes = res.process_rss_bytes;
+
+  send_http(socket, 200, rfl::json::write(res));
 }
 
 } // namespace wolf::api

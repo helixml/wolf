@@ -83,7 +83,8 @@ setup_lobbies_handlers(const immer::box<state::AppState> &app_state,
                           .multi_user = lobby_settings->multi_user,
                           .pin = lobby_settings->pin,
                           .stop_when_everyone_leaves = lobby_settings->stop_when_everyone_leaves,
-                          .runner = lobby_settings->runner});
+                          .runner = lobby_settings->runner,
+                          .video_settings = lobby_settings->video_settings});
         app_state->lobbies->update(
             [lobby](const immer::vector<events::Lobby> &lobbies) { return lobbies.push_back(*lobby); });
 
