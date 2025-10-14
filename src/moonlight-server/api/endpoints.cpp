@@ -101,14 +101,33 @@ void UnixSocketServer::endpoint_Apps(const HTTPRequest &req, std::shared_ptr<Uni
 void UnixSocketServer::endpoint_AddApp(const HTTPRequest &req, std::shared_ptr<UnixSocket> socket) {
   auto app = rfl::json::read<rfl::Reflector<events::App>::ReflType>(req.body);
   if (app) {
+    // Compute pipeline defaults if not provided in request
+    // This ensures API apps get correct pipelines based on GPU vendor and WOLF_USE_ZERO_COPY
+    auto defaults = state::compute_pipeline_defaults(this->state_->app_state->config->config_source);
+
+    // Apply defaults to empty pipeline fields
+    auto app_with_defaults = app.value();
+    if (app_with_defaults.h264_gst_pipeline.empty()) {
+      app_with_defaults.h264_gst_pipeline = defaults.h264_gst_pipeline;
+    }
+    if (app_with_defaults.hevc_gst_pipeline.empty()) {
+      app_with_defaults.hevc_gst_pipeline = defaults.hevc_gst_pipeline;
+    }
+    if (app_with_defaults.av1_gst_pipeline.empty()) {
+      app_with_defaults.av1_gst_pipeline = defaults.av1_gst_pipeline;
+    }
+    if (app_with_defaults.opus_gst_pipeline.empty()) {
+      app_with_defaults.opus_gst_pipeline = defaults.opus_gst_pipeline;
+    }
+
     auto profiles = state_->app_state->config->profiles->load().get();
     state::update_profiles(
         state_->app_state->config,
         profiles | //
-            ranges::views::transform([app = app.value(), this](const immer::box<events::Profile> &profile) {
+            ranges::views::transform([app_with_defaults, this](const immer::box<events::Profile> &profile) {
               if (profile->id == events::MOONLIGHT_PROFILE_ID) {
-                profile->apps->update([app, this](auto &apps) {
-                  return apps.push_back(rfl::Reflector<events::App>::to(app, this->state_->app_state->event_bus));
+                profile->apps->update([app_with_defaults, this](auto &apps) {
+                  return apps.push_back(rfl::Reflector<events::App>::to(app_with_defaults, this->state_->app_state->event_bus));
                 });
               }
               return profile;
