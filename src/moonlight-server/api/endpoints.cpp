@@ -652,6 +652,23 @@ void UnixSocketServer::endpoint_SystemMemory(const HTTPRequest &req, std::shared
 
   res.process_rss_bytes = rss_kb * 1024; // Convert kB to bytes
 
+  // Get apps from moonlight profile for backwards compatibility with stable-moonlight-web frontend
+  auto moonlight_profile = state::get_moonlight_profile(state_->app_state->config);
+  if (moonlight_profile) {
+    immer::vector<immer::box<events::App>> apps = moonlight_profile.value()->apps->load();
+    for (const immer::box<events::App> &app_box : apps) {
+      const events::App &app = *app_box;
+      // Apps don't have streaming sessions directly in lobbies mode, so set client_count to 0
+      res.apps.push_back(AppMemoryUsage{
+        .app_id = app.base.id,
+        .app_name = app.base.title,
+        .resolution = "N/A", // Apps don't stream directly in lobbies mode
+        .client_count = 0,
+        .memory_bytes = 0
+      });
+    }
+  }
+
   // Get lobbies and calculate per-lobby memory breakdown
   immer::vector<events::Lobby> lobbies = state_->app_state->lobbies->load();
   size_t total_lobby_memory = 0;
@@ -713,11 +730,18 @@ void UnixSocketServer::endpoint_SystemMemory(const HTTPRequest &req, std::shared
                                    std::to_string(session.display_mode.height) + "@" +
                                    std::to_string(session.display_mode.refreshRate);
 
+    // For compatibility: provide both lobby_id (wolf-ui) and app_id (stable-moonlight-web)
+    std::optional<std::string> app_id;
+    if (session.app) {
+      app_id = session.app->base.id;
+    }
+
     res.clients.push_back(ClientConnectionInfo{
       .session_id = session.session_id,
       .client_ip = session.ip,
       .resolution = client_resolution,
       .lobby_id = lobby_id,
+      .app_id = app_id,
       .memory_bytes = client_memory
     });
   }

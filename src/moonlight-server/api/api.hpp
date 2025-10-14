@@ -174,6 +174,14 @@ struct DockerPullImageResponse {
   bool success = true;
 };
 
+struct AppMemoryUsage {
+  std::string app_id;
+  std::string app_name;
+  std::string resolution;
+  size_t client_count;
+  size_t memory_bytes;
+};
+
 struct LobbyMemoryUsage {
   std::string lobby_id;
   std::string lobby_name;
@@ -187,6 +195,7 @@ struct ClientConnectionInfo {
   std::string client_ip;
   std::string resolution;
   std::optional<std::string> lobby_id;
+  std::optional<std::string> app_id;
   size_t memory_bytes;
 };
 
@@ -195,6 +204,7 @@ struct SystemMemoryResponse {
   size_t process_rss_bytes;
   size_t gstreamer_buffer_bytes;
   size_t total_memory_bytes;
+  std::vector<AppMemoryUsage> apps;
   std::vector<LobbyMemoryUsage> lobbies;
   std::vector<ClientConnectionInfo> clients;
 };
