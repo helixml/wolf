@@ -3,6 +3,8 @@
 #include <rtp/udp-ping.hpp>
 #include <state/config.hpp>
 #include <state/sessions.hpp>
+#include <fstream>
+#include <sstream>
 
 namespace wolf::api {
 
@@ -96,14 +98,18 @@ void UnixSocketServer::endpoint_AddApp(const HTTPRequest &req, std::shared_ptr<U
       auto runner =
           state::get_runner(app.runner, this->state_->app_state->event_bus, this->state_->app_state->running_sessions);
       return apps.push_back(events::App{
-          .base =
-              {.title = app.title, .id = app.id, .support_hdr = app.support_hdr, .icon_png_path = app.icon_png_path},
-          .h264_gst_pipeline = app.h264_gst_pipeline,
-          .hevc_gst_pipeline = app.hevc_gst_pipeline,
-          .av1_gst_pipeline = app.av1_gst_pipeline,
-          .render_node = app.render_node,
-          .opus_gst_pipeline = app.opus_gst_pipeline,
-          .start_virtual_compositor = app.start_virtual_compositor,
+          .base = {.title = app.title,
+                   .id = app.id,
+                   .support_hdr = app.support_hdr.value_or(false), // Default to false
+                   .icon_png_path = app.icon_png_path},
+          .video_producer_buffer_caps = app.video_producer_buffer_caps.value_or("video/x-raw(memory:DMABuf)"), // Default for NVIDIA GPU zero-copy
+          .h264_gst_pipeline = app.h264_gst_pipeline.value_or("interpipesrc listen-to={session_id}_video is-live=true stream-sync=restart-ts max-bytes=0 max-buffers=1 leaky-type=downstream ! video/x-raw, width={width}, height={height}, framerate={fps}/1 ! nvh264enc preset=low-latency-hq zerolatency=true gop-size=0 rc-mode=cbr-ld-hq bitrate={bitrate} aud=false ! h264parse ! video/x-h264, profile=main, stream-format=byte-stream ! rtpmoonlightpay_video name=moonlight_pay payload_size={payload_size} fec_percentage={fec_percentage} min_required_fec_packets={min_required_fec_packets} ! appsink sync=false name=wolf_udp_sink"),
+          .hevc_gst_pipeline = app.hevc_gst_pipeline.value_or(""),  // Empty when HEVC not available (matches TOML)
+          .av1_gst_pipeline = app.av1_gst_pipeline.value_or(""),    // Empty when AV1 not available (matches TOML)
+          .render_node = app.render_node.value_or("/dev/dri/renderD128"),  // Use system default
+          .opus_gst_pipeline = app.opus_gst_pipeline.value_or("interpipesrc listen-to={session_id}_audio is-live=true stream-sync=restart-ts max-bytes=0 max-buffers=3 block=false ! queue max-size-buffers=3 leaky=downstream ! audiorate ! audioconvert ! opusenc bitrate={bitrate} bitrate-type=cbr frame-size={packet_duration} bandwidth=fullband audio-type=restricted-lowdelay max-payload-size=1400 ! rtpmoonlightpay_audio name=moonlight_pay packet_duration={packet_duration} encrypt={encrypt} aes_key=\"{aes_key}\" aes_iv=\"{aes_iv}\" ! appsink name=wolf_udp_sink"),
+          .start_virtual_compositor = app.start_virtual_compositor.value_or(true), // Default to true
+          .start_audio_server = app.start_audio_server.value_or(true), // Default to true
           .runner = runner,
       });
     });
@@ -345,6 +351,85 @@ void UnixSocketServer::endpoint_UpdateClientSettings(const HTTPRequest &req, std
   update_client_settings(this->state_->app_state->config, std::stoull(payload.client_id.value()), merged_client);
 
   auto res = GenericSuccessResponse{.success = true};
+  send_http(socket, 200, rfl::json::write(res));
+}
+
+void UnixSocketServer::endpoint_SystemMemory(const HTTPRequest &req, std::shared_ptr<UnixSocket> socket) {
+  auto res = SystemMemoryResponse{};
+
+  // Read process RSS memory from /proc/self/status
+  std::ifstream status_file("/proc/self/status");
+  std::string line;
+  size_t rss_kb = 0;
+
+  while (std::getline(status_file, line)) {
+    if (line.find("VmRSS:") == 0) {
+      std::istringstream iss(line);
+      std::string label;
+      iss >> label >> rss_kb;
+      break;
+    }
+  }
+
+  res.process_rss_bytes = rss_kb * 1024;
+
+  // Get apps and calculate per-app memory
+  immer::vector<immer::box<events::App>> apps = state_->app_state->config->apps->load();
+  immer::vector<events::StreamSession> sessions = state_->app_state->running_sessions->load();
+  size_t total_app_memory = 0;
+
+  for (const immer::box<events::App> &app_box : apps) {
+    const events::App &app = *app_box;
+    size_t client_count = 0;
+    for (const events::StreamSession &session : sessions) {
+      if (session.app && session.app->base.id == app.base.id) {
+        client_count++;
+      }
+    }
+
+    size_t base_overhead = 50 * 1024 * 1024;
+    int width = 1920;
+    int height = 1080;
+    int fps = 60;
+
+    size_t video_buffers = width * height * 4 * 3;
+    size_t client_overhead = client_count * 20 * 1024 * 1024;
+    size_t app_memory = base_overhead + video_buffers + client_overhead;
+    total_app_memory += app_memory;
+
+    res.apps.push_back(AppMemoryUsage{
+      .app_id = app.base.id,
+      .app_name = app.base.title,
+      .resolution = std::to_string(width) + "x" + std::to_string(height) + "@" + std::to_string(fps),
+      .client_count = client_count,
+      .memory_bytes = app_memory
+    });
+  }
+
+  // Track all client connections
+  for (const events::StreamSession &session : sessions) {
+    size_t client_memory = 30 * 1024 * 1024;
+    std::string client_resolution = std::to_string(session.display_mode.width) + "x" +
+                                   std::to_string(session.display_mode.height) + "@" +
+                                   std::to_string(session.display_mode.refreshRate);
+
+    std::optional<std::string> app_id_opt;
+    if (session.app) {
+      app_id_opt = session.app->base.id;
+    }
+
+    res.clients.push_back(ClientConnectionInfo{
+      .session_id = session.session_id,
+      .client_ip = session.ip,
+      .resolution = client_resolution,
+      .app_id = app_id_opt,
+      .memory_bytes = client_memory
+    });
+  }
+
+  res.gstreamer_buffer_bytes = total_app_memory / 2;
+  res.total_memory_bytes = res.process_rss_bytes;
+
   send_http(socket, 200, rfl::json::write(res));
 }
 

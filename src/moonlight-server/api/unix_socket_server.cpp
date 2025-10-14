@@ -205,6 +205,19 @@ UnixSocketServer::UnixSocketServer(boost::asio::io_context &io_context,
                    });
 
   /**
+   * System debugging API
+   */
+
+  state_->http.add(HTTPMethod::GET,
+                   "/api/v1/system/memory",
+                   {
+                       .summary = "Get system memory usage",
+                       .description = "Returns Wolf process memory, GStreamer buffer estimates, per-app breakdown, and client connections for debugging",
+                       .response_description = {{200, {.json_schema = rfl::json::to_schema<SystemMemoryResponse>()}}},
+                       .handler = [this](auto req, auto socket) { endpoint_SystemMemory(req, socket); },
+                   });
+
+  /**
    * OpenAPI schema
    */
 
