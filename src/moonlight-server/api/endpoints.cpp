@@ -98,44 +98,24 @@ void UnixSocketServer::endpoint_AddApp(const HTTPRequest &req, std::shared_ptr<U
       auto runner =
           state::get_runner(app.runner, this->state_->app_state->event_bus, this->state_->app_state->running_sessions);
 
-      // Respect WOLF_USE_ZERO_COPY environment variable for API-created apps
-      // This matches the behavior of TOML-loaded apps in configTOML.cpp
-      bool use_zero_copy = utils::get_env("WOLF_USE_ZERO_COPY", "") != std::string("FALSE");
-
-      // Build pipeline defaults based on zero-copy mode (matching config.include.toml)
-      std::string default_video_producer_buffer_caps;
-      std::string default_h264_pipeline;
-      std::string default_hevc_pipeline;
-      std::string default_av1_pipeline;
-      std::string default_opus_pipeline;
-
-      if (use_zero_copy) {
-        // Zero-copy mode: DMABuf with GL upload (matching config.include.toml zero-copy)
-        default_video_producer_buffer_caps = "video/x-raw(memory:DMABuf)";
-        default_h264_pipeline = "interpipesrc listen-to={session_id}_video is-live=true stream-sync=restart-ts max-bytes=0 max-buffers=1 leaky-type=downstream ! glupload ! glcolorconvert ! video/x-raw(memory:GLMemory),format=NV12, width={width}, height={height}, chroma-site={color_range}, colorimetry={color_space}, pixel-aspect-ratio=1/1 ! nvh264enc preset=low-latency-hq zerolatency=true gop-size=0 rc-mode=cbr-ld-hq bitrate={bitrate} aud=false ! h264parse ! video/x-h264, profile=main, stream-format=byte-stream ! rtpmoonlightpay_video name=moonlight_pay payload_size={payload_size} fec_percentage={fec_percentage} min_required_fec_packets={min_required_fec_packets} ! appsink sync=false name=wolf_udp_sink";
-        default_hevc_pipeline = ""; // Not commonly used
-        default_av1_pipeline = "";  // Not commonly used
-        default_opus_pipeline = "interpipesrc listen-to={session_id}_audio is-live=true stream-sync=restart-ts max-bytes=0 max-buffers=3 block=false ! queue max-size-buffers=3 leaky=downstream ! audiorate ! audioconvert ! opusenc bitrate={bitrate} bitrate-type=cbr frame-size={packet_duration} bandwidth=fullband audio-type=restricted-lowdelay max-payload-size=1400 ! rtpmoonlightpay_audio name=moonlight_pay packet_duration={packet_duration} encrypt={encrypt} aes_key=\"{aes_key}\" aes_iv=\"{aes_iv}\" ! appsink name=wolf_udp_sink";
-      } else {
-        // Non-zero-copy mode: Plain raw with CUDA upload (matching config.include.toml non-zero-copy)
-        default_video_producer_buffer_caps = "video/x-raw";
-        default_h264_pipeline = "interpipesrc listen-to={session_id}_video is-live=true stream-sync=restart-ts max-bytes=0 max-buffers=1 leaky-type=downstream ! cudaupload ! cudaconvertscale ! video/x-raw(memory:CUDAMemory), width={width}, height={height}, chroma-site={color_range}, format=NV12, colorimetry={color_space}, pixel-aspect-ratio=1/1 ! nvh264enc preset=low-latency-hq zerolatency=true gop-size=0 rc-mode=cbr-ld-hq bitrate={bitrate} aud=false ! h264parse ! video/x-h264, profile=main, stream-format=byte-stream ! rtpmoonlightpay_video name=moonlight_pay payload_size={payload_size} fec_percentage={fec_percentage} min_required_fec_packets={min_required_fec_packets} ! appsink sync=false name=wolf_udp_sink";
-        default_hevc_pipeline = ""; // Not commonly used
-        default_av1_pipeline = "";  // Not commonly used
-        default_opus_pipeline = "interpipesrc listen-to={session_id}_audio is-live=true stream-sync=restart-ts max-bytes=0 max-buffers=3 block=false ! queue max-size-buffers=3 leaky=downstream ! audiorate ! audioconvert ! opusenc bitrate={bitrate} bitrate-type=cbr frame-size={packet_duration} bandwidth=fullband audio-type=restricted-lowdelay max-payload-size=1400 ! rtpmoonlightpay_audio name=moonlight_pay packet_duration={packet_duration} encrypt={encrypt} aes_key=\"{aes_key}\" aes_iv=\"{aes_iv}\" ! appsink name=wolf_udp_sink";
-      }
+      // Compute pipeline defaults using SHARED logic from config.hpp/configTOML.cpp
+      // This ensures API apps get the EXACT SAME pipelines as TOML apps based on:
+      // - GPU vendor detection (NVIDIA/Intel/AMD)
+      // - WOLF_USE_ZERO_COPY environment variable
+      // - config.include.toml encoder definitions
+      auto defaults = state::compute_pipeline_defaults(this->state_->app_state->config->config_source);
 
       return apps.push_back(events::App{
           .base = {.title = app.title,
                    .id = app.id,
                    .support_hdr = app.support_hdr.value_or(false), // Default to false
                    .icon_png_path = app.icon_png_path},
-          .video_producer_buffer_caps = app.video_producer_buffer_caps.value_or(default_video_producer_buffer_caps),
-          .h264_gst_pipeline = app.h264_gst_pipeline.value_or(default_h264_pipeline),
-          .hevc_gst_pipeline = app.hevc_gst_pipeline.value_or(default_hevc_pipeline),
-          .av1_gst_pipeline = app.av1_gst_pipeline.value_or(default_av1_pipeline),
+          .video_producer_buffer_caps = app.video_producer_buffer_caps.value_or(defaults.video_producer_buffer_caps),
+          .h264_gst_pipeline = app.h264_gst_pipeline.value_or(defaults.h264_gst_pipeline),
+          .hevc_gst_pipeline = app.hevc_gst_pipeline.value_or(defaults.hevc_gst_pipeline),
+          .av1_gst_pipeline = app.av1_gst_pipeline.value_or(defaults.av1_gst_pipeline),
           .render_node = app.render_node.value_or("/dev/dri/renderD128"),  // Use system default
-          .opus_gst_pipeline = app.opus_gst_pipeline.value_or(default_opus_pipeline),
+          .opus_gst_pipeline = app.opus_gst_pipeline.value_or(defaults.opus_gst_pipeline),
           .start_virtual_compositor = app.start_virtual_compositor.value_or(true), // Default to true
           .start_audio_server = app.start_audio_server.value_or(true), // Default to true
           .runner = runner,
