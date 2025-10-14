@@ -16,6 +16,31 @@ using namespace wolf::core;
 using namespace wolf::config;
 
 /**
+ * @brief Holds the computed default GStreamer pipelines based on GPU vendor and zero-copy mode
+ *
+ * This struct encapsulates all pipeline defaults to avoid duplication between
+ * TOML-loaded apps (configTOML.cpp) and API-created apps (endpoints.cpp)
+ */
+struct PipelineDefaults {
+  std::string video_producer_buffer_caps;
+  std::string h264_gst_pipeline;
+  std::string hevc_gst_pipeline;
+  std::string av1_gst_pipeline;
+  std::string opus_gst_pipeline;
+};
+
+/**
+ * @brief Computes default GStreamer pipelines based on config, GPU vendor, and zero-copy mode
+ *
+ * This function encapsulates the complex logic for selecting appropriate encoders and
+ * building GStreamer pipeline strings. Used by both TOML loading and API endpoint.
+ *
+ * @param config_source Path to config.toml file (for reading gstreamer settings)
+ * @return PipelineDefaults struct with all computed pipeline strings
+ */
+PipelineDefaults compute_pipeline_defaults(const std::string &config_source);
+
+/**
  * @brief Will load a configuration from the given source.
  *
  * If the source is not present, it'll provide some sensible defaults
