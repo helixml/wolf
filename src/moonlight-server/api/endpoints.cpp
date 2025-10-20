@@ -85,9 +85,12 @@ void UnixSocketServer::endpoint_UnpairClient(const HTTPRequest &req, std::shared
 void UnixSocketServer::endpoint_Apps(const HTTPRequest &req, std::shared_ptr<UnixSocket> socket) {
   auto res = AppListResponse{.success = true};
   auto apps = state_->app_state->config->apps->load();
+  logs::log(logs::debug, "[API] endpoint_Apps: Loaded {} apps from state", apps->size());
   for (const auto &app : apps.get()) {
+    logs::log(logs::debug, "[API] endpoint_Apps: Adding app id={}, title={}", app->base.id, app->base.title);
     res.apps.push_back(rfl::Reflector<events::App>::from(app));
   }
+  logs::log(logs::info, "[API] endpoint_Apps: Returning {} apps", res.apps.size());
   send_http(socket, 200, rfl::json::write(res));
 }
 
@@ -99,7 +102,7 @@ void UnixSocketServer::endpoint_AddApp(const HTTPRequest &req, std::shared_ptr<U
 
     // Get current app count before adding
     auto apps_before = state_->app_state->config->apps->load();
-    logs::log(logs::debug, "[API] Apps before add: {}", apps_before.size());
+    logs::log(logs::debug, "[API] Apps before add: {}", apps_before->size());
 
     state_->app_state->config->apps->update([app = app.value(), this](auto &apps) {
       logs::log(logs::debug, "[API] Inside update lambda, apps.size()={}", apps.size());
@@ -134,7 +137,7 @@ void UnixSocketServer::endpoint_AddApp(const HTTPRequest &req, std::shared_ptr<U
 
     // Verify app was added
     auto apps_after = state_->app_state->config->apps->load();
-    logs::log(logs::info, "[API] Apps after add: {} (was {})", apps_after.size(), apps_before.size());
+    logs::log(logs::info, "[API] Apps after add: {} (was {})", apps_after->size(), apps_before->size());
     logs::log(logs::info, "[API] App {} ({}) added successfully", app.value().id, app.value().title);
 
     auto res = GenericSuccessResponse{.success = true};
