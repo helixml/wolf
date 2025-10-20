@@ -92,9 +92,17 @@ void UnixSocketServer::endpoint_Apps(const HTTPRequest &req, std::shared_ptr<Uni
 }
 
 void UnixSocketServer::endpoint_AddApp(const HTTPRequest &req, std::shared_ptr<UnixSocket> socket) {
+  logs::log(logs::debug, "[API] endpoint_AddApp called, parsing request body");
   auto app = rfl::json::read<rfl::Reflector<events::App>::ReflType>(req.body);
   if (app) {
+    logs::log(logs::info, "[API] Successfully parsed app: id={}, title={}", app.value().id, app.value().title);
+
+    // Get current app count before adding
+    auto apps_before = state_->app_state->config->apps->load();
+    logs::log(logs::debug, "[API] Apps before add: {}", apps_before.size());
+
     state_->app_state->config->apps->update([app = app.value(), this](auto &apps) {
+      logs::log(logs::debug, "[API] Inside update lambda, apps.size()={}", apps.size());
       auto runner =
           state::get_runner(app.runner, this->state_->app_state->event_bus, this->state_->app_state->running_sessions);
 
@@ -105,7 +113,7 @@ void UnixSocketServer::endpoint_AddApp(const HTTPRequest &req, std::shared_ptr<U
       // - config.include.toml encoder definitions
       auto defaults = state::compute_pipeline_defaults(this->state_->app_state->config->config_source);
 
-      return apps.push_back(events::App{
+      auto new_apps = apps.push_back(events::App{
           .base = {.title = app.title,
                    .id = app.id,
                    .support_hdr = app.support_hdr.value_or(false), // Default to false
@@ -120,7 +128,15 @@ void UnixSocketServer::endpoint_AddApp(const HTTPRequest &req, std::shared_ptr<U
           .start_audio_server = app.start_audio_server.value_or(true), // Default to true
           .runner = runner,
       });
+      logs::log(logs::info, "[API] Added app to collection, new_apps.size()={}", new_apps.size());
+      return new_apps;
     });
+
+    // Verify app was added
+    auto apps_after = state_->app_state->config->apps->load();
+    logs::log(logs::info, "[API] Apps after add: {} (was {})", apps_after.size(), apps_before.size());
+    logs::log(logs::info, "[API] App {} ({}) added successfully", app.value().id, app.value().title);
+
     auto res = GenericSuccessResponse{.success = true};
     send_http(socket, 200, rfl::json::write(res));
   } else {
