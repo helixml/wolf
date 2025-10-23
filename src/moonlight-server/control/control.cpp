@@ -194,6 +194,17 @@ void run_control(int port,
           if (type == ENCRYPTED) {
             try {
               auto enc_pkt = (ControlEncryptedPacket *)(packet->data);
+
+              // Debug logging for decryption attempt
+              logs::log(logs::debug,
+                        "[ENET] Decrypting packet: session_id={}, client={}:{}, seq={}, size={}, aes_key_prefix={}",
+                        client_session->session_id,
+                        client_ip,
+                        client_port,
+                        boost::endian::little_to_native(enc_pkt->seq),
+                        packet->dataLength,
+                        client_session->aes_key.substr(0, 8));
+
               auto decrypted = decrypt_packet(*enc_pkt, client_session->aes_key);
               auto sub_type = ((ControlPacket *)decrypted.data())->type;
 
@@ -213,7 +224,12 @@ void run_control(int port,
                 event_bus->fire_event(immer::box<IDRRequestEvent>{ev});
               }
             } catch (std::runtime_error &e) {
-              logs::log(logs::warning, "[ENET] Unable to decrypt incoming packet: {}", e.what());
+              logs::log(logs::warning,
+                        "[ENET] Decryption failed: session_id={}, client={}:{}, error={}",
+                        client_session->session_id,
+                        client_ip,
+                        client_port,
+                        e.what());
             }
           } else {
             logs::log(logs::warning,
