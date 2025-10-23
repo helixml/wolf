@@ -337,6 +337,10 @@ void UnixSocketServer::endpoint_RunnerStart(const wolf::api::HTTPRequest &req, s
         events::StartRunner{.stop_stream_when_over = event.value().stop_stream_when_over,
                             .runner = runner,
                             .stream_session = std::make_shared<events::StreamSession>(*session)}));
+
+    // Send success response
+    auto res = GenericSuccessResponse{.success = true};
+    send_http(socket, 200, rfl::json::write(res));
   } else {
     logs::log(logs::warning, "[API] Invalid event: {} - {}", req.body, event.error().what());
     auto res = GenericErrorResponse{.error = event.error().what()};
