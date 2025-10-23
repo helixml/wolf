@@ -217,6 +217,15 @@ UnixSocketServer::UnixSocketServer(boost::asio::io_context &io_context,
                        .handler = [this](auto req, auto socket) { endpoint_SystemMemory(req, socket); },
                    });
 
+  state_->http.add(HTTPMethod::GET,
+                   "/api/v1/status",
+                   {
+                       .summary = "Get Wolf server status",
+                       .description = "Returns Wolf server uptime and boot timestamp for detecting restarts",
+                       .response_description = {{200, {.json_schema = rfl::json::to_schema<StatusResponse>()}}},
+                       .handler = [this](auto req, auto socket) { endpoint_Status(req, socket); },
+                   });
+
   /**
    * OpenAPI schema
    */

@@ -141,6 +141,13 @@ struct SystemMemoryResponse {
   std::vector<ClientConnectionInfo> clients;
 };
 
+struct StatusResponse {
+  bool success = true;
+  rfl::Description<"Uptime in seconds since Wolf process started", size_t> uptime_seconds;
+  rfl::Description<"Unix timestamp (seconds since epoch) when Wolf started", int64_t> boot_time_unix;
+  rfl::Description<"Wolf version", std::string> version = "1.0.0";
+};
+
 struct UnixSocket {
   boost::asio::local::stream_protocol::socket socket;
   bool is_alive = true;
@@ -179,6 +186,8 @@ private:
   void endpoint_UpdateClientSettings(const HTTPRequest &req, std::shared_ptr<UnixSocket> socket);
 
   void endpoint_SystemMemory(const HTTPRequest &req, std::shared_ptr<UnixSocket> socket);
+
+  void endpoint_Status(const HTTPRequest &req, std::shared_ptr<UnixSocket> socket);
 
   void sse_broadcast(const std::string &payload);
   void sse_keepalive(const boost::system::error_code &e);

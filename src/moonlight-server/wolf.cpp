@@ -96,13 +96,18 @@ auto initialize(std::string_view config_file, std::string_view pkey_filename, st
   auto config = load_config(config_file, event_bus, running_sessions);
 
   auto host = get_host_config(pkey_filename, cert_filename);
+
+  auto boot_time = std::chrono::duration_cast<std::chrono::seconds>(
+      std::chrono::system_clock::now().time_since_epoch());
+
   auto state = state::AppState{
       .config = config,
       .host = host,
       .pairing_cache = std::make_shared<immer::atom<immer::map<std::string, state::PairCache>>>(),
       .pairing_atom = std::make_shared<immer::atom<immer::map<std::string, immer::box<events::PairSignal>>>>(),
       .event_bus = event_bus,
-      .running_sessions = running_sessions};
+      .running_sessions = running_sessions,
+      .boot_time = boot_time};
   return immer::box<state::AppState>(state);
 }
 

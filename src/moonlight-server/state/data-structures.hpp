@@ -180,6 +180,11 @@ struct AppState {
    * A list of all currently running (and paused) streaming sessions
    */
   SessionsAtoms running_sessions;
+
+  /**
+   * Boot timestamp (Unix epoch in seconds) for detecting Wolf restarts
+   */
+  std::chrono::seconds boot_time;
 };
 
 const static immer::array<audio::AudioMode> AUDIO_CONFIGURATIONS = {

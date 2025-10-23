@@ -460,4 +460,19 @@ void UnixSocketServer::endpoint_SystemMemory(const HTTPRequest &req, std::shared
   send_http(socket, 200, rfl::json::write(res));
 }
 
+void UnixSocketServer::endpoint_Status(const HTTPRequest &req, std::shared_ptr<UnixSocket> socket) {
+  auto now = std::chrono::duration_cast<std::chrono::seconds>(
+      std::chrono::system_clock::now().time_since_epoch());
+  auto uptime = now - state_->app_state->boot_time;
+
+  auto res = StatusResponse{
+      .success = true,
+      .uptime_seconds = static_cast<size_t>(uptime.count()),
+      .boot_time_unix = state_->app_state->boot_time.count(),
+      .version = "1.0.0"
+  };
+
+  send_http(socket, 200, rfl::json::write(res));
+}
+
 } // namespace wolf::api
