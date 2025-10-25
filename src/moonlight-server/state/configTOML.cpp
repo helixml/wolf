@@ -174,7 +174,7 @@ PipelineDefaults compute_pipeline_defaults(const std::string &config_source) {
   if (use_zero_copy) {
     switch (video_encoder) {
     case NVIDIA: {
-      video_producer_buffer_caps = "video/x-raw(memory:DMABuf)";
+      video_producer_buffer_caps = "video/x-raw(memory:CUDAMemory)";
       break;
     }
     case VAAPI:
