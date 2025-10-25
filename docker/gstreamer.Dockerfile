@@ -4,7 +4,7 @@ ENV DEBIAN_FRONTEND=noninteractive
 ENV BUILD_ARCHITECTURE=amd64
 ENV DEB_BUILD_OPTIONS=noddebs
 
-ARG GSTREAMER_VERSION=1.26.2
+ARG GSTREAMER_VERSION=1.26.7
 ENV GSTREAMER_VERSION=$GSTREAMER_VERSION
 
 ENV SOURCE_PATH=/sources/
@@ -89,7 +89,7 @@ RUN <<_GSTREAMER_INSTALL
     dpkg -i gstreamer-wolf_${GSTREAMER_VERSION}_all.deb
 
     # Add GstInterpipe
-    git clone https://github.com/RidgeRun/gst-interpipe.git $SOURCE_PATH/gst-interpipe
+    git clone https://github.com/games-on-whales/gst-interpipe.git $SOURCE_PATH/gst-interpipe
     cd $SOURCE_PATH/gst-interpipe
     mkdir build
     meson build -Denable-gtk-doc=false

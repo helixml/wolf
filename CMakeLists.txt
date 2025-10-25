@@ -60,14 +60,15 @@ if (CCACHE_FOUND)
     set_property(GLOBAL PROPERTY RULE_LAUNCH_COMPILE ccache)
 endif (CCACHE_FOUND)
 
-
 # FetchContent added in CMake 3.11, downloads during the configure step
 include(FetchContent)
 set(CMAKE_MODULE_PATH ${CMAKE_MODULE_PATH} ${CMAKE_CURRENT_SOURCE_DIR}/cmake/)
 
+include(BoostLoader)
 include(TargetLinkLibrariesSystem)
 
 add_subdirectory(src/core)
+add_subdirectory(src/gst-video-context)
 
 if (UNIX AND NOT APPLE)
     add_subdirectory(src/fake-udev)

@@ -449,7 +449,7 @@ Config load_or_default(const std::string &source,
   if (use_zero_copy) {
     switch (video_encoder) {
     case NVIDIA: {
-      default_base_video.producer_buffer_caps = "video/x-raw(memory:DMABuf)";
+      default_base_video.producer_buffer_caps = "video/x-raw(memory:CUDAMemory)";
       break;
     }
     case VAAPI:

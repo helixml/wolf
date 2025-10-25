@@ -34,11 +34,16 @@ FetchContent_Declare(
 )
 FetchContent_MakeAvailable(tomlplusplus)
 
+# A nice little trick to disable warnings for external dependencies
+# see: https://stackoverflow.com/a/76128930
+get_directory_property(old_dir_compile_options COMPILE_OPTIONS)
+add_compile_options(-w)
+
 # Serialization
 FetchContent_Declare(
         reflect-cpp
         GIT_REPOSITORY https://github.com/getml/reflect-cpp
-        GIT_TAG c118963
+        GIT_TAG v0.21.0
 )
 set(REFLECTCPP_USE_VCPKG OFF)
 
@@ -52,13 +57,17 @@ set(REFLECTCPP_YAML OFF)
 
 FetchContent_MakeAvailable(reflect-cpp)
 target_link_libraries(wolf_runner PUBLIC reflectcpp)
+# Restore warnings
+set_directory_properties(PROPERTIES COMPILE_OPTIONS "${old_dir_compile_options}")
 
 
 # HTTP server library
 FetchContent_Declare(
         simplewebserver
-        GIT_REPOSITORY https://gitlab.com/eidheim/Simple-Web-Server.git
-        GIT_TAG 4abe349)
+        # Forked from https://gitlab.com/eidheim/Simple-Web-Server in order to support latest boost
+        # see: https://gitlab.com/eidheim/Simple-Web-Server/-/merge_requests/283
+        GIT_REPOSITORY https://gitlab.com/ReenigneArcher/Simple-Web-Server.git
+        GIT_TAG 546895a9)
 FetchContent_MakeAvailable(simplewebserver)
 target_link_libraries_system(wolf_runner PUBLIC simple-web-server)
 
@@ -106,7 +115,6 @@ FetchContent_MakeAvailable(cpptrace)
 find_package(Threads REQUIRED)
 find_package(OpenSSL REQUIRED)
 
-find_package(Boost 1.77 REQUIRED COMPONENTS log locale)
 include_directories(${Boost_INCLUDE_DIRS})
 
 target_link_libraries(
@@ -114,6 +122,7 @@ target_link_libraries(
         wolf::moonlight
         wolf::helpers
         wolf::core
+        gst-video::context
         cpptrace::cpptrace
         ${Boost_LIBRARIES}
         ${CMAKE_DL_LIBS}

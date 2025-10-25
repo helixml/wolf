@@ -125,7 +125,7 @@ template <typename T, typename F> T lazy_value_or(const std::optional<T> &opt, F
 
 namespace json = boost::json;
 inline json::value parse_json(std::string_view json) {
-  json::error_code ec;
+  boost::system::error_code ec;
   auto parsed = json::parse({json.data(), json.size()}, ec);
   if (!ec) {
     return parsed;

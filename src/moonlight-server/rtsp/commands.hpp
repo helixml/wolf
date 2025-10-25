@@ -219,6 +219,7 @@ announce(const RTSP_PACKET &req, const events::StreamSession &session) {
   events::VideoSession video = {
       .display_mode = {.width = display.width, .height = display.height, .refreshRate = display.refreshRate},
       .gst_pipeline = gst_pipeline,
+      .render_node = session.app->render_node,
 
       .session_id = session.session_id,
 

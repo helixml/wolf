@@ -1,6 +1,7 @@
 #include "platforms/hw.hpp"
 
 #include <control/control.hpp>
+#include <gst-video-context.hpp>
 #include <gstreamer-1.0/gst/app/gstappsink.h>
 #include <gstreamer-1.0/gst/app/gstappsrc.h>
 #include <immer/array.hpp>
@@ -44,6 +45,28 @@ static void application_message_handler(GstBus *bus, GstMessage *msg, gpointer d
   }
 }
 
+struct NeedContextData {
+  const std::string device_path;
+  std::shared_ptr<immer::atom<gst_video_context::gst_context_ptr>> gst_context;
+};
+
+static void need_context_handler(GstBus *bus, GstMessage *msg, gpointer data) {
+  auto ctx_data = static_cast<NeedContextData *>(data);
+  if (auto gst_context = ctx_data->gst_context->load().get()) {
+    logs::log(logs::debug, "Context already set, passing it to the pipeline.");
+    gst_video_context::set_context(gst_context, msg);
+  } else if (auto video_context = gst_video_context::need_context_for_device(ctx_data->device_path, msg)) {
+    ctx_data->gst_context->store(video_context);
+  }
+}
+
+static GstBusSyncReply bus_sync_handler(GstBus *bus, GstMessage *msg, gpointer data) {
+  if (GST_MESSAGE_TYPE(msg) == GST_MESSAGE_NEED_CONTEXT) {
+    need_context_handler(bus, msg, data);
+  }
+  return GST_BUS_PASS;
+}
+
 std::pair<std::string, std::string> get_color_params(immer::box<events::VideoSession> video_session) {
   std::string color_range = (video_session->color_range == events::ColorRange::JPEG) ? "jpeg" : "mpeg2";
   std::string color_space;
@@ -65,31 +88,23 @@ void start_video_producer(const std::string &session_id,
                           const std::string &buffer_format,
                           const std::string &render_node,
                           const wolf::core::virtual_display::DisplayMode &display_mode,
+                          std::shared_ptr<immer::atom<gst_video_context::gst_context_ptr>> video_context,
                           std::shared_ptr<boost::promise<WaylandDisplayReady>> on_ready,
                           std::shared_ptr<events::EventBusType> event_bus) {
-  auto pipeline_fix = "";
-  if (get_vendor(render_node) == NVIDIA && buffer_format != "video/x-raw") {
-    // We keep the OpenGL elements of the pipeline on the producer side so that:
-    //  1- The caps exchange happens early on and waylanddisplaysrc will settle on the right format
-    //  2- The OpenGL context doesn't get created multiple times downstream (and doesn't cause issues when it's
-    //  destroyed)
-    pipeline_fix = "glupload ! glcolorconvert ! video/x-raw(memory:GLMemory),format=NV12 ! ";
-  }
-
   auto pipeline = fmt::format("waylanddisplaysrc name=wolf_wayland_source render_node={render_node} ! "
-                              "{buffer_format}, width={width}, height={height}, framerate={fps}/1 ! \n" //
-                              "{pipeline_fix}"
+                              "{buffer_format}, width={width}, height={height}, framerate={fps}/1 ! \n"    //
                               "interpipesink sync=true async=false name={session_id}_video max-buffers=1", //
                               fmt::arg("buffer_format", buffer_format),
                               fmt::arg("render_node", render_node),
                               fmt::arg("session_id", session_id),
                               fmt::arg("width", display_mode.width),
                               fmt::arg("height", display_mode.height),
-                              fmt::arg("fps", display_mode.refreshRate),
-                              fmt::arg("pipeline_fix", pipeline_fix));
+                              fmt::arg("fps", display_mode.refreshRate));
   logs::log(logs::debug, "[GSTREAMER] Starting video producer: {}", pipeline);
   auto bus_data_ptr =
       std::make_shared<GstBusData>(GstBusData{.on_ready = std::move(on_ready), .wayland_plugin = nullptr});
+  std::shared_ptr<NeedContextData> ctx_data_ptr =
+      std::make_shared<NeedContextData>(NeedContextData{.device_path = render_node, .gst_context = video_context});
   run_pipeline(pipeline, [=](auto pipeline) {
     logs::log(logs::debug, "Setting up waylanddisplaysrc");
 
@@ -99,6 +114,7 @@ void start_video_producer(const std::string &session_id,
 
     auto bus = gst_pipeline_get_bus(GST_PIPELINE(pipeline.get()));
     g_signal_connect(bus, "message::application", G_CALLBACK(application_message_handler), bus_data_ptr.get());
+    gst_bus_set_sync_handler(bus, bus_sync_handler, ctx_data_ptr.get(), nullptr);
     gst_object_unref(bus);
 
     auto stop_handler = event_bus->register_handler<immer::box<events::StopStreamEvent>>(
@@ -250,6 +266,7 @@ void start_streaming_video(immer::box<events::VideoSession> video_session,
                            const std::shared_ptr<events::EventBusType> &event_bus,
                            std::string client_ip,
                            unsigned short client_port,
+                           std::shared_ptr<immer::atom<gst_video_context::gst_context_ptr>> video_context,
                            std::shared_ptr<udp::socket> video_socket) {
   auto [color_range, color_space] = get_color_params(video_session);
 
@@ -273,14 +290,19 @@ void start_streaming_video(immer::box<events::VideoSession> video_session,
   std::shared_ptr<custom_sink::UDPSink> udp_sink = std::make_shared<custom_sink::UDPSink>(custom_sink::UDPSink{
       .socket = video_socket,
       .client_endpoint = std::make_shared<udp::endpoint>(boost::asio::ip::make_address(client_ip), client_port)});
-
-  run_pipeline(pipeline, [video_session, event_bus, udp_sink](auto pipeline) {
+  std::shared_ptr<NeedContextData> ctx_data_ptr = std::make_shared<NeedContextData>(
+      NeedContextData{.device_path = video_session->render_node, .gst_context = video_context});
+  run_pipeline(pipeline, [video_session, event_bus, udp_sink, ctx_data_ptr](auto pipeline) {
     if (auto app_sink_el = gst_bin_get_by_name(GST_BIN(pipeline.get()), "wolf_udp_sink")) {
       logs::log(logs::debug, "Setting up wolf_udp_sink");
       g_assert(GST_IS_APP_SINK(app_sink_el));
       configure_appsink(app_sink_el, udp_sink.get());
       gst_object_unref(app_sink_el);
     }
+
+    auto bus = gst_pipeline_get_bus(GST_PIPELINE(pipeline.get()));
+    gst_bus_set_sync_handler(bus, bus_sync_handler, ctx_data_ptr.get(), nullptr);
+    gst_object_unref(bus);
 
     // Guard against duplicate pause events
     auto pause_sent = std::make_shared<bool>(false);

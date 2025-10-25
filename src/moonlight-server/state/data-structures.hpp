@@ -1,5 +1,7 @@
 #pragma once
 
+#include "gst-video-context.hpp"
+
 #include <boost/asio.hpp>
 #include <chrono>
 #include <core/audio.hpp>
@@ -181,6 +183,12 @@ struct AppState {
   std::shared_ptr<events::EventBusType> event_bus;
 
   std::shared_ptr<immer::atom<immer::vector<events::Lobby>>> lobbies;
+
+  /**
+   * A single global Gstreamer video context shared with all the pipelines
+   */
+  std::shared_ptr<immer::atom<gst_video_context::gst_context_ptr>> gst_context =
+      std::make_shared<immer::atom<gst_video_context::gst_context_ptr>>();
 
   /**
    * A list of all currently running (and paused) streaming sessions

@@ -234,6 +234,7 @@ enum class ColorSpace : int {
 struct VideoSession {
   wolf::core::virtual_display::DisplayMode display_mode;
   std::string gst_pipeline;
+  std::string render_node;
 
   // A unique ID that identifies this session
   std::size_t session_id;

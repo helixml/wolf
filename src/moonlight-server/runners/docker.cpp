@@ -91,13 +91,13 @@ void RunDocker::run(std::string_view session_id,
       auto parsed_json = utils::parse_json(final_json_opts).as_object();
       auto default_gpu_config = boost::json::array{                    // [
                                                    boost::json::object{// {
-                                                                       {"Driver", "nvidia"},
                                                                        {"DeviceIDs", {"all"}},
                                                                        {"Capabilities", boost::json::array{{"gpu"}}}}};
       if (auto host_config_ptr = parsed_json.if_contains("HostConfig")) {
         auto host_config = host_config_ptr->as_object();
         if (host_config.find("DeviceRequests") == host_config.end()) {
           host_config["DeviceRequests"] = default_gpu_config;
+          host_config["Runtime"] = "nvidia";
           parsed_json["HostConfig"] = host_config;
           final_json_opts = boost::json::serialize(parsed_json);
         } else {
@@ -105,7 +105,7 @@ void RunDocker::run(std::string_view session_id,
         }
       } else {
         logs::log(logs::warning, "HostConfig not found in base_create_json.");
-        parsed_json["HostConfig"] = boost::json::object{{"DeviceRequests", default_gpu_config}};
+        parsed_json["HostConfig"] = boost::json::object{{"DeviceRequests", default_gpu_config}, {"Runtime", "nvidia"}};
         final_json_opts = boost::json::serialize(parsed_json);
       }
     }

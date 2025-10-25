@@ -23,15 +23,12 @@ FetchContent_Declare(
 FetchContent_MakeAvailable(fmtlib)
 target_link_libraries_system(wolf_helpers INTERFACE fmt::fmt-header-only)
 
-# Boost for logging
-find_package(Boost 1.77 REQUIRED COMPONENTS log container)
-include_directories(${Boost_INCLUDE_DIRS})
 target_link_libraries(wolf_helpers INTERFACE ${Boost_LIBRARIES})
 
 FetchContent_Declare(
         boost_json
         GIT_REPOSITORY https://github.com/boostorg/json.git
-        GIT_TAG "boost-1.75.0")
+        GIT_TAG "boost-1.77.0")
 set(BOOST_JSON_BUILD_TESTS OFF)
 FetchContent_MakeAvailable(boost_json)
 target_link_libraries(wolf_helpers INTERFACE Boost::json)

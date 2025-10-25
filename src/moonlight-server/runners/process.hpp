@@ -1,6 +1,6 @@
 #pragma once
 #include <boost/version.hpp>
-#if BOOST_VERSION < 108800
+#if BOOST_VERSION < 108700
 #include <boost/process.hpp>
 namespace bp = boost::process;
 #else
