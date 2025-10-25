@@ -178,32 +178,32 @@ struct AppMemoryUsage {
   std::string app_id;
   std::string app_name;
   std::string resolution;
-  size_t client_count;
-  size_t memory_bytes;
+  int64_t client_count;
+  int64_t memory_bytes;
 };
 
 struct LobbyMemoryUsage {
   std::string lobby_id;
   std::string lobby_name;
   std::string resolution;
-  size_t client_count;
-  size_t memory_bytes;
+  int64_t client_count;
+  int64_t memory_bytes;
 };
 
 struct ClientConnectionInfo {
-  size_t session_id;
+  size_t session_id; // Keep as size_t - Moonlight requires string serialization for session IDs
   std::string client_ip;
   std::string resolution;
   std::optional<std::string> lobby_id;
   std::optional<std::string> app_id;
-  size_t memory_bytes;
+  int64_t memory_bytes;
 };
 
 struct SystemMemoryResponse {
   bool success = true;
-  size_t process_rss_bytes;
-  size_t gstreamer_buffer_bytes;
-  size_t total_memory_bytes;
+  int64_t process_rss_bytes;
+  int64_t gstreamer_buffer_bytes;
+  int64_t total_memory_bytes;
   std::vector<AppMemoryUsage> apps;
   std::vector<LobbyMemoryUsage> lobbies;
   std::vector<ClientConnectionInfo> clients;
