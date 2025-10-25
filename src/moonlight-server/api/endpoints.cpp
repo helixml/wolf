@@ -107,6 +107,9 @@ void UnixSocketServer::endpoint_AddApp(const HTTPRequest &req, std::shared_ptr<U
 
     // Apply defaults to empty pipeline fields
     auto app_with_defaults = app.value();
+    if (!app_with_defaults.video_producer_buffer_caps || app_with_defaults.video_producer_buffer_caps->empty()) {
+      app_with_defaults.video_producer_buffer_caps = defaults.video_producer_buffer_caps;
+    }
     if (!app_with_defaults.h264_gst_pipeline || app_with_defaults.h264_gst_pipeline->empty()) {
       app_with_defaults.h264_gst_pipeline = defaults.h264_gst_pipeline;
     }
