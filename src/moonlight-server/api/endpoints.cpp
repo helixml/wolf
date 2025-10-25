@@ -107,16 +107,16 @@ void UnixSocketServer::endpoint_AddApp(const HTTPRequest &req, std::shared_ptr<U
 
     // Apply defaults to empty pipeline fields
     auto app_with_defaults = app.value();
-    if (app_with_defaults.h264_gst_pipeline.empty()) {
+    if (!app_with_defaults.h264_gst_pipeline || app_with_defaults.h264_gst_pipeline->empty()) {
       app_with_defaults.h264_gst_pipeline = defaults.h264_gst_pipeline;
     }
-    if (app_with_defaults.hevc_gst_pipeline.empty()) {
+    if (!app_with_defaults.hevc_gst_pipeline || app_with_defaults.hevc_gst_pipeline->empty()) {
       app_with_defaults.hevc_gst_pipeline = defaults.hevc_gst_pipeline;
     }
-    if (app_with_defaults.av1_gst_pipeline.empty()) {
+    if (!app_with_defaults.av1_gst_pipeline || app_with_defaults.av1_gst_pipeline->empty()) {
       app_with_defaults.av1_gst_pipeline = defaults.av1_gst_pipeline;
     }
-    if (app_with_defaults.opus_gst_pipeline.empty()) {
+    if (!app_with_defaults.opus_gst_pipeline || app_with_defaults.opus_gst_pipeline->empty()) {
       app_with_defaults.opus_gst_pipeline = defaults.opus_gst_pipeline;
     }
 
