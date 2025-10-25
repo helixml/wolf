@@ -80,11 +80,11 @@ template <> struct Reflector<events::App> {
     auto runner = Reflector<events::Runner>::to(app.runner, ev_bus);
     return events::App{
         .base = {.title = app.title, .id = app.id, .support_hdr = app.support_hdr, .icon_png_path = app.icon_png_path},
-        .video_producer_buffer_caps = app.video_producer_buffer_caps.value_or(""),
+        .video_producer_buffer_caps = app.video_producer_buffer_caps.value_or("video/x-raw(memory:DMABuf)"),
         .h264_gst_pipeline = app.h264_gst_pipeline.value_or(""),
         .hevc_gst_pipeline = app.hevc_gst_pipeline.value_or(""),
         .av1_gst_pipeline = app.av1_gst_pipeline.value_or(""),
-        .render_node = app.render_node.value_or(""),
+        .render_node = app.render_node.value_or("/dev/dri/renderD128"),
         .opus_gst_pipeline = app.opus_gst_pipeline.value_or(""),
         .start_virtual_compositor = app.start_virtual_compositor.value_or(true),
         .start_audio_server = app.start_audio_server.value_or(true),
