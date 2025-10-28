@@ -383,7 +383,11 @@ void start_streaming_video(immer::box<events::VideoSession> video_session,
               /* Perform the switch */
               auto video_interpipe = fmt::format("{}_video", switch_ev->interpipe_src_id);
               logs::log(logs::warning, "[HANG_DEBUG] Switching interpipesrc listen-to: {} → {}", pipe_name, video_interpipe);
+
+              // Set allow-renegotiation to true to handle resolution changes
+              g_object_set(src, "allow-renegotiation", TRUE, nullptr);
               g_object_set(src, "listen-to", video_interpipe.c_str(), nullptr);
+
               logs::log(logs::warning, "[HANG_DEBUG] Unrefing interpipesrc element");
               gst_object_unref(src);
               logs::log(logs::warning, "[HANG_DEBUG] Switch complete for session {}", sess_id);
