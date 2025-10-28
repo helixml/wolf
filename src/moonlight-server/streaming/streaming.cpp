@@ -355,10 +355,18 @@ void start_streaming_video(immer::box<events::VideoSession> video_session,
           }
         });
 
+    // Guard against duplicate switch events (same as pause guard fix)
+    auto last_video_switch = std::make_shared<std::string>("");
+
     auto switch_producer_handler = event_bus->register_handler<immer::box<events::SwitchStreamProducerEvents>>(
         [sess_id = video_session->session_id,
-         pipeline](const immer::box<events::SwitchStreamProducerEvents> &switch_ev) {
+         pipeline, last_video_switch](const immer::box<events::SwitchStreamProducerEvents> &switch_ev) {
           if (switch_ev->session_id == sess_id) {
+            // Guard against duplicate switch events to same destination
+            if (*last_video_switch == switch_ev->interpipe_src_id) {
+              logs::log(logs::warning, "[HANG_DEBUG] Video SwitchStreamProducerEvents DUPLICATE IGNORED: session {} already switched to {}", sess_id, switch_ev->interpipe_src_id);
+              return;
+            }
             auto state = GST_STATE(pipeline.get());
             logs::log(logs::warning,
                       "[HANG_DEBUG] Video SwitchStreamProducerEvents: session {} switching to {}, pipeline state: {}",
@@ -374,6 +382,7 @@ void start_streaming_video(immer::box<events::VideoSession> video_session,
               g_object_set(src, "listen-to", video_interpipe.c_str(), nullptr);
               logs::log(logs::warning, "[HANG_DEBUG] Unrefing interpipesrc element");
               gst_object_unref(src);
+              *last_video_switch = switch_ev->interpipe_src_id;
               logs::log(logs::warning, "[HANG_DEBUG] Switch complete for session {}", sess_id);
             } else {
               logs::log(logs::error, "[GSTREAMER] Failed to get video interpipesrc for {}", sess_id);
@@ -472,9 +481,17 @@ void start_streaming_audio(immer::box<events::AudioSession> audio_session,
           }
         });
 
+    // Guard against duplicate switch events (same as pause guard fix)
+    auto last_audio_switch = std::make_shared<std::string>("");
+
     auto switch_producer_handler = event_bus->register_handler<immer::box<events::SwitchStreamProducerEvents>>(
-        [session_id, pipeline](const immer::box<events::SwitchStreamProducerEvents> &switch_ev) {
+        [session_id, pipeline, last_audio_switch](const immer::box<events::SwitchStreamProducerEvents> &switch_ev) {
           if (switch_ev->session_id == session_id) {
+            // Guard against duplicate switch events to same destination
+            if (*last_audio_switch == switch_ev->interpipe_src_id) {
+              logs::log(logs::warning, "[HANG_DEBUG] Audio SwitchStreamProducerEvents DUPLICATE IGNORED: session {} already switched to {}", session_id, switch_ev->interpipe_src_id);
+              return;
+            }
             logs::log(logs::debug,
                       "[GSTREAMER] Switching audio producer for {} to {}",
                       session_id,
@@ -485,6 +502,7 @@ void start_streaming_audio(immer::box<events::AudioSession> audio_session,
               /* Perform the switch */
               auto audio_interpipe = fmt::format("{}_audio", switch_ev->interpipe_src_id);
               g_object_set(src, "listen-to", audio_interpipe.c_str(), nullptr);
+              *last_audio_switch = switch_ev->interpipe_src_id;
               gst_object_unref(src);
             } else {
               logs::log(logs::error, "[GSTREAMER] Failed to get audio interpipesrc for {}", session_id);
