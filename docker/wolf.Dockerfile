@@ -108,6 +108,10 @@ ENV WOLF_CFG_FOLDER=/etc/wolf/cfg
 COPY --from=wolf-builder /wolf/wolf /wolf/wolf
 COPY --from=wolf-builder /wolf/fake-udev /wolf/fake-udev
 
+# Add Helix init script for Wolf config initialization
+COPY docker/init-wolf-config.sh /etc/cont-init.d/05-init-wolf-config.sh
+RUN chmod +x /etc/cont-init.d/05-init-wolf-config.sh
+
 ENV GST_GL_API=gles2 \
     GST_GL_PLATFORM=egl \
     GST_GL_WINDOW=surfaceless \
