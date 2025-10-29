@@ -9,3 +9,4 @@
 !docker/gstreamer.control
 !docker/startup.sh
 !docker/init-wolf-config.sh
+!docker/config.toml.template
