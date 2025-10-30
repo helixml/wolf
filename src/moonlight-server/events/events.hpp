@@ -412,6 +412,7 @@ struct StreamSession {
   // client info
   std::size_t session_id;
   std::string ip;
+  std::string client_unique_id;  // Moonlight uniqueid for secure session matching
 
   unsigned short video_stream_port;
   unsigned short audio_stream_port;
