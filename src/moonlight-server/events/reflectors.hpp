@@ -145,6 +145,7 @@ template <> struct Reflector<events::StreamSession> {
     std::string app_id;
     std::string client_id;
     std::string client_ip;
+    std::string client_unique_id;  // Moonlight uniqueid for secure session matching
 
     // gcm encryption keys
     std::string aes_key;
@@ -164,6 +165,7 @@ template <> struct Reflector<events::StreamSession> {
     return {.app_id = v.app->base.id,
             .client_id = std::to_string(v.session_id),
             .client_ip = v.ip,
+            .client_unique_id = v.client_unique_id,  // Expose uniqueid for secure auto-join
             .aes_key = v.aes_key,
             .aes_iv = v.aes_iv,
             .rtsp_fake_ip = v.rtsp_fake_ip,

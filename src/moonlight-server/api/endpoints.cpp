@@ -263,7 +263,7 @@ void UnixSocketServer::endpoint_StreamSessionAdd(const HTTPRequest &req, std::sh
         ss.audio_channel_count,
         ss.aes_key,
         ss.aes_iv,
-        ss.client_unique_id);
+        "");  // client_unique_id defaults to empty for Unix socket API (only HTTPS endpoints populate this)
     new_session->ip = ss.client_ip;
     new_session->rtsp_fake_ip = ss.rtsp_fake_ip;
 
