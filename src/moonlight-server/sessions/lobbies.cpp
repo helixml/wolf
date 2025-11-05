@@ -191,6 +191,35 @@ setup_lobbies_handlers(const immer::box<state::AppState> &app_state,
         }
         logs::log(logs::info, "[LOBBY] Session {} joining lobby {}", session->session_id, lobby->id);
 
+        // DEFENSIVE CHECK 1: Verify session isn't already in a different lobby
+        // This prevents GStreamer pipeline conflicts from switching between lobbies
+        for (const auto &existing_lobby : *lobbies) {
+          auto connected_sessions = existing_lobby.connected_sessions->load();
+          for (const auto &connected_session_id : *connected_sessions) {
+            if (std::to_string(session->session_id) == *connected_session_id) {
+              if (existing_lobby.id == lobby->id) {
+                // Already in target lobby - this is fine (idempotent join)
+                logs::log(logs::info,
+                          "[LOBBY] Session {} already in lobby {} - returning success (idempotent)",
+                          session->session_id,
+                          lobby->id);
+                join_lobby_event->error_message.get()->set_value("");
+                return;
+              } else {
+                // In different lobby - reject the join to prevent pipeline conflicts
+                logs::log(logs::error,
+                          "[LOBBY] DEFENSIVE CHECK FAILED: Session {} already in lobby {}, cannot join lobby {}",
+                          session->session_id,
+                          existing_lobby.id,
+                          lobby->id);
+                join_lobby_event->error_message.get()->set_value(
+                    "Session already in different lobby - leave first before joining another");
+                return;
+              }
+            }
+          }
+        }
+
         if (!lobby->multi_user && lobby->connected_sessions->load()->size() >= 1) {
           logs::log(logs::error, "[LOBBY] Lobby {} is full", lobby->id);
           join_lobby_event->error_message.get()->set_value("Lobby is full");

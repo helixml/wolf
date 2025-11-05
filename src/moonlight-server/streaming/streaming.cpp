@@ -93,7 +93,7 @@ void start_video_producer(const std::string &session_id,
                           std::shared_ptr<events::EventBusType> event_bus) {
   auto pipeline = fmt::format("waylanddisplaysrc name=wolf_wayland_source render_node={render_node} ! "
                               "{buffer_format}, width={width}, height={height}, framerate={fps}/1 ! \n"    //
-                              "interpipesink sync=true async=false name={session_id}_video max-buffers=1", //
+                              "interpipesink sync=true async=false name={session_id}_video max-buffers=5", //
                               fmt::arg("buffer_format", buffer_format),
                               fmt::arg("render_node", render_node),
                               fmt::arg("session_id", session_id),

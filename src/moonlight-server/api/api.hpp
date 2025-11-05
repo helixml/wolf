@@ -199,6 +199,28 @@ struct ClientConnectionInfo {
   int64_t memory_bytes;
 };
 
+struct GPUStats {
+  bool available = false;
+  std::string gpu_name;
+  int encoder_session_count = 0;
+  double encoder_average_fps = 0.0;
+  int encoder_average_latency_us = 0;
+  int encoder_utilization_percent = 0;
+  int gpu_utilization_percent = 0;
+  int memory_utilization_percent = 0;
+  int memory_used_mb = 0;
+  int memory_total_mb = 0;
+  int temperature_celsius = 0;
+  int query_duration_ms = 0; // Track how long nvidia-smi took
+  std::string error;
+};
+
+struct GStreamerPipelineStats {
+  int producer_pipelines = 0; // Video + audio producers (2 per lobby)
+  int consumer_pipelines = 0; // Video + audio consumers (2 per session)
+  int total_pipelines = 0;    // Sum of producers + consumers
+};
+
 struct SystemMemoryResponse {
   bool success = true;
   int64_t process_rss_bytes;
@@ -207,6 +229,8 @@ struct SystemMemoryResponse {
   std::vector<AppMemoryUsage> apps;
   std::vector<LobbyMemoryUsage> lobbies;
   std::vector<ClientConnectionInfo> clients;
+  std::optional<GPUStats> gpu_stats;                          // GPU encoder metrics via nvidia-smi
+  std::optional<GStreamerPipelineStats> gstreamer_pipelines; // Actual pipeline count from state
 };
 
 struct UnixSocket {

@@ -639,6 +639,103 @@ void UnixSocketServer::endpoint_DockerPullImage(const HTTPRequest &req, std::sha
   }
 }
 
+// Cache for GPU stats to prevent spamming nvidia-smi
+// nvidia-smi can be slow (50-200ms), so we cache for 2 seconds
+static std::optional<GPUStats> cached_gpu_stats;
+static std::chrono::steady_clock::time_point last_gpu_query_time;
+static const std::chrono::seconds GPU_CACHE_DURATION{2};
+
+GPUStats queryGPUStats() {
+  auto now = std::chrono::steady_clock::now();
+
+  // Return cached stats if less than 2 seconds old
+  if (cached_gpu_stats.has_value() &&
+      (now - last_gpu_query_time) < GPU_CACHE_DURATION) {
+    return *cached_gpu_stats;
+  }
+
+  GPUStats stats{};
+  auto query_start = std::chrono::steady_clock::now();
+
+  // Execute nvidia-smi to query GPU metrics
+  // Query: name,encoder.stats.sessionCount,encoder.stats.averageFps,encoder.stats.averageLatency,
+  //        utilization.encoder,utilization.gpu,utilization.memory,memory.used,memory.total,temperature.gpu
+  std::string cmd = "nvidia-smi --query-gpu=name,encoder.stats.sessionCount,encoder.stats.averageFps,"
+                    "encoder.stats.averageLatency,utilization.encoder,utilization.gpu,utilization.memory,"
+                    "memory.used,memory.total,temperature.gpu --format=csv,noheader,nounits";
+
+  std::array<char, 512> buffer{};
+  std::string result;
+
+  FILE* pipe = popen(cmd.c_str(), "r");
+  if (!pipe) {
+    stats.error = "Failed to execute nvidia-smi";
+    stats.available = false;
+    cached_gpu_stats = stats;
+    last_gpu_query_time = now;
+    return stats;
+  }
+
+  while (fgets(buffer.data(), buffer.size(), pipe) != nullptr) {
+    result += buffer.data();
+  }
+
+  int return_code = pclose(pipe);
+
+  auto query_end = std::chrono::steady_clock::now();
+  stats.query_duration_ms = std::chrono::duration_cast<std::chrono::milliseconds>(query_end - query_start).count();
+
+  if (return_code != 0) {
+    stats.error = fmt::format("nvidia-smi exited with code {}", return_code);
+    stats.available = false;
+    cached_gpu_stats = stats;
+    last_gpu_query_time = now;
+    return stats;
+  }
+
+  // Parse CSV output
+  std::istringstream iss(result);
+  std::string field;
+  std::vector<std::string> fields;
+
+  while (std::getline(iss, field, ',')) {
+    // Trim whitespace
+    field.erase(0, field.find_first_not_of(" \t\r\n"));
+    field.erase(field.find_last_not_of(" \t\r\n") + 1);
+    fields.push_back(field);
+  }
+
+  if (fields.size() != 10) {
+    stats.error = fmt::format("Unexpected nvidia-smi output: expected 10 fields, got {}", fields.size());
+    stats.available = false;
+    cached_gpu_stats = stats;
+    last_gpu_query_time = now;
+    return stats;
+  }
+
+  // Parse fields
+  stats.gpu_name = fields[0];
+  stats.encoder_session_count = std::stoi(fields[1]);
+  stats.encoder_average_fps = std::stod(fields[2]);
+  stats.encoder_average_latency_us = std::stoi(fields[3]);
+  stats.encoder_utilization_percent = std::stoi(fields[4]);
+  stats.gpu_utilization_percent = std::stoi(fields[5]);
+  stats.memory_utilization_percent = std::stoi(fields[6]);
+  stats.memory_used_mb = std::stoi(fields[7]);
+  stats.memory_total_mb = std::stoi(fields[8]);
+  stats.temperature_celsius = std::stoi(fields[9]);
+  stats.available = true;
+
+  logs::log(logs::debug, "[GPU] nvidia-smi query took {}ms: {} NVENC sessions active",
+            stats.query_duration_ms, stats.encoder_session_count);
+
+  // Cache the result
+  cached_gpu_stats = stats;
+  last_gpu_query_time = now;
+
+  return stats;
+}
+
 void UnixSocketServer::endpoint_SystemMemory(const HTTPRequest &req, std::shared_ptr<UnixSocket> socket) {
   auto res = SystemMemoryResponse{};
 
@@ -758,6 +855,18 @@ void UnixSocketServer::endpoint_SystemMemory(const HTTPRequest &req, std::shared
   res.gstreamer_buffer_bytes = total_lobby_memory / 2; // Rough estimate: ~50% of lobby memory is GStreamer buffers
 
   res.total_memory_bytes = res.process_rss_bytes;
+
+  // Count actual GStreamer pipelines from state (not estimated)
+  // Each lobby has 2 pipelines: video producer + audio producer
+  // Each session has 2 pipelines: video consumer + audio consumer
+  GStreamerPipelineStats pipeline_stats{};
+  pipeline_stats.producer_pipelines = lobbies.size() * 2;
+  pipeline_stats.consumer_pipelines = sessions.size() * 2;
+  pipeline_stats.total_pipelines = pipeline_stats.producer_pipelines + pipeline_stats.consumer_pipelines;
+  res.gstreamer_pipelines = pipeline_stats;
+
+  // Query GPU stats via nvidia-smi (with caching to prevent spam)
+  res.gpu_stats = queryGPUStats();
 
   send_http(socket, 200, rfl::json::write(res));
 }
