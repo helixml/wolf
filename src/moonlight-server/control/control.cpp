@@ -99,9 +99,12 @@ std::optional<events::StreamSession> get_current_session(const enet_clients_map 
                                                          std::string_view client_ip,
                                                          const ENetEvent &enet_event) {
   if (enet_event.type == ENET_EVENT_TYPE_CONNECT) {
+    logs::log(logs::info, "[ENET_MATCH] Connecting: enet_secret={} from IP {}", enet_event.data, client_ip);
     // A new connection, we should check if there's a session that matches the current client
     for (const StreamSession &session : *running_sessions->load()) {
+      logs::log(logs::info, "[ENET_MATCH] Checking session_id={} enet_secret={} ip={}", session.session_id, session.enet_secret_payload, session.ip);
       if (session.enet_secret_payload == enet_event.data) {
+        logs::log(logs::info, "[ENET_MATCH] ✅ FOUND MATCH session_id={}", session.session_id);
         return session;
       }
     }

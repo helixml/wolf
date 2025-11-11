@@ -1,0 +1,20 @@
+--- src/moonlight-server/state/config.hpp
++++ src/moonlight-server/state/config.hpp
+@@ -71,11 +71,17 @@ inline std::optional<PairedClient> get_client_via_ssl(const Config &cfg, x509::
+       [&client_cert](const immer::box<PairedClient> &pair_client) {
+         auto paired_cert = x509::cert_from_string(pair_client->client_cert);
+         auto verification_error = x509::verification_error(paired_cert, client_cert);
+         if (verification_error) {
+           logs::log(logs::trace, "X509 certificate verification error: {}", verification_error.value());
+           return false;
+         } else {
++          logs::log(logs::info,
++                    "[CERT_MATCH] Certificate matched! app_state_folder: {} (will use this for session_id)",
++                    pair_client->app_state_folder);
+           return true;
+         }
+       });
+   if (search_result != paired_clients->end()) {
++    logs::log(logs::info, 
++              "[CERT_MATCH] Returning paired client with app_state_folder: {}", 
++              (*search_result)->app_state_folder);

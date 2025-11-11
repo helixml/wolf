@@ -76,12 +76,10 @@ inline std::optional<PairedClient> get_client_via_ssl(const Config &cfg, x509::x
           logs::log(logs::trace, "X509 certificate verification error: {}", verification_error.value());
           return false;
         } else {
-          logs::log(logs::info, "[CERT_MATCH] ✅ Matched app_state_folder={}", pair_client->app_state_folder);
           return true;
         }
       });
   if (search_result != paired_clients->end()) {
-    logs::log(logs::info, "[CERT_MATCH] Returning client app_state_folder={}", (*search_result)->app_state_folder);
     return **search_result;
   } else {
     return std::nullopt;
@@ -117,7 +115,6 @@ inline std::optional<PairedClient> get_client_by_id(const Config &cfg, const std
                                     });
 
   if (search_result != paired_clients->end()) {
-    logs::log(logs::info, "[CERT_MATCH] Returning client app_state_folder={}", (*search_result)->app_state_folder);
     return **search_result;
   }
   return std::nullopt;
