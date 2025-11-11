@@ -105,14 +105,11 @@ std::optional<events::StreamSession> get_current_session(const enet_clients_map 
         return session;
       }
     }
-    logs::log(logs::warning,
-              "[ENET] Unable to find a session that matches the client secret {}, matching by IP",
-              enet_event.data);
-    for (const StreamSession &session : *running_sessions->load()) {
-      if (session.ip == client_ip) {
-        return session;
-      }
-    }
+    logs::log(logs::error,
+              "[ENET] Unable to find a session that matches the client secret {} from IP {}. Rejecting connection.",
+              enet_event.data,
+              client_ip);
+    return std::nullopt;  // Do not fall back to IP - causes AES key mismatch with multiple sessions from same IP
   } else {
     // The connection has already been established, we'll check for a match in our connected client map
     if (auto client = connected_clients.find(enet_event.peer)) {
