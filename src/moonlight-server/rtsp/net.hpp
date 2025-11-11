@@ -62,11 +62,13 @@ public:
       host_option = host->second;
     }
     for (const events::StreamSession &session : sessions) {
+    logs::log(logs::info, "[RTSP_MATCH] Searching: packet.uri.ip={} host_option={} user_ip={}", packet.request.uri.ip, host_option, user_ip);
       if (session.rtsp_fake_ip == packet.request.uri.ip || host_option == session.rtsp_fake_ip) {
-        logs::log(logs::debug, "[RTSP] found session by matching payload: {}", session.rtsp_fake_ip);
+      logs::log(logs::info, "[RTSP_MATCH] Checking session_id={} rtsp_fake_ip={} ip={}", session.session_id, session.rtsp_fake_ip, session.ip);
+        logs::log(logs::debug, "[RTSP] ✅ MATCHED by rtsp_fake_ip: {}", session.rtsp_fake_ip);
         return session;
       } else if ((host_option == "0.0.0.0" || host_option.empty()) && session.ip == user_ip) {
-        logs::log(logs::debug, "[RTSP] found session by matching IP: {}", session.ip);
+        logs::log(logs::debug, "[RTSP] ⚠️  FALLBACK to IP match (BUG!): {}", session.ip);
         return session;
       }
     }
