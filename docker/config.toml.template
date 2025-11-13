@@ -1,5 +1,5 @@
 # The name that will be displayed in Moonlight
-hostname = "Wolf"
+hostname = "Helix"
 # The version of this config file
 config_version = 6
 # A list of paired clients that will be allowed to stream
