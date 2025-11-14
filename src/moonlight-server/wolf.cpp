@@ -322,23 +322,27 @@ void run() {
 
   // HTTP APIs
   auto http_thread = std::thread([local_state]() {
+    wolf::monitoring::ScopedThreadMonitor thread_monitor("HTTP-Server");
     HttpServer server = HttpServer();
     HTTPServers::startServer(&server, local_state, state::get_port(state::HTTP_PORT));
   });
 
   // HTTPS APIs
   std::thread([local_state, p_key_file, p_cert_file]() {
+    wolf::monitoring::ScopedThreadMonitor thread_monitor("HTTPS-Server");
     HttpsServer server = HttpsServer(p_cert_file, p_key_file);
     HTTPServers::startServer(&server, local_state, state::get_port(state::HTTPS_PORT));
   }).detach();
 
   // RTSP
   std::thread([sessions = local_state->running_sessions]() {
+    wolf::monitoring::ScopedThreadMonitor thread_monitor("RTSP-Server");
     rtsp::run_server(state::get_port(state::RTSP_SETUP_PORT), sessions);
   }).detach();
 
   // Control
   std::thread([sessions = local_state->running_sessions, ev_bus = local_state->event_bus]() {
+    wolf::monitoring::ScopedThreadMonitor thread_monitor("Control-Server");
     control::run_control(state::get_port(state::CONTROL_PORT), sessions, ev_bus);
   }).detach();
 
@@ -346,8 +350,11 @@ void run() {
   rtp::start_rtp_ping(state::get_port(state::VIDEO_PING_PORT),
                       state::get_port(state::AUDIO_PING_PORT),
                       local_state->event_bus);
-  // Wolf API server
-  std::thread([local_state, runtime_dir]() { wolf::api::start_server(runtime_dir, local_state); }).detach();
+  // Wolf API server (Unix socket)
+  std::thread([local_state, runtime_dir]() {
+    wolf::monitoring::ScopedThreadMonitor thread_monitor("UnixSocket-API");
+    wolf::api::start_server(runtime_dir, local_state);
+  }).detach();
 
   // mDNS
   std::thread([hostname = local_state->config->hostname]() {
@@ -376,7 +383,15 @@ void run() {
   // Start watchdog thread for deadlock detection
   start_watchdog();
 
+  // Monitor main thread - parked on http_thread.join()
+  // If HTTP thread dies, main thread will unblock and exit
+  wolf::monitoring::ScopedThreadMonitor main_thread_monitor("Main-Thread");
+
   http_thread.join(); // Let's park the main thread over here
+
+  // If we reach here, HTTP thread died unexpectedly
+  logs::log(logs::fatal, "[MAIN] HTTP thread died - Wolf is shutting down");
+  exit(1);
 }
 
 int main(int argc, char *argv[]) try {

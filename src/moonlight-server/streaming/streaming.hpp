@@ -90,6 +90,14 @@ static bool run_pipeline(
   /* Let the calling thread set extra things */
   auto handlers = on_pipeline_ready(pipeline, loop);
 
+  /* Thread lifecycle logging and monitoring */
+  pid_t tid = syscall(SYS_gettid);
+  std::string pipeline_short = pipeline_desc.substr(0, 80);
+  logs::log(logs::info, "[THREAD_LIFECYCLE] Pipeline thread started: TID={} pipeline={}...", tid, pipeline_short);
+
+  // Register thread for heartbeat monitoring
+  wolf::monitoring::ScopedThreadMonitor thread_monitor("GStreamer-Pipeline", pipeline_short);
+
   /*
    * adds a watch for new message on our pipeline's message bus to
    * the default GLib main context, which is the main context that our
@@ -97,6 +105,15 @@ static bool run_pipeline(
    */
   auto bus = gst_pipeline_get_bus(GST_PIPELINE(pipeline.get()));
   gst_bus_add_signal_watch(bus);
+
+  // Heartbeat handler - updates on every bus message (proves thread is alive and processing)
+  // Use a lambda that captures thread_monitor by pointer (it's on the stack in this function)
+  auto heartbeat_data = new wolf::monitoring::ScopedThreadMonitor*(&thread_monitor);
+  g_signal_connect(bus, "message", G_CALLBACK(+[](GstBus*, GstMessage*, gpointer user_data) {
+    auto** monitor_ptr = static_cast<wolf::monitoring::ScopedThreadMonitor**>(user_data);
+    (*monitor_ptr)->heartbeat();
+  }), heartbeat_data);
+
   g_signal_connect(bus, "message::error", G_CALLBACK(gstreamer::pipeline_error_handler), loop.get());
   g_signal_connect(bus, "message::eos", G_CALLBACK(gstreamer::pipeline_eos_handler), loop.get());
   gst_object_unref(bus);
@@ -107,21 +124,8 @@ static bool run_pipeline(
                                     GST_DEBUG_GRAPH_SHOW_ALL,
                                     "pipeline-start");
 
-  /* Thread lifecycle logging and monitoring */
-  pid_t tid = syscall(SYS_gettid);
-  std::string pipeline_short = pipeline_desc.substr(0, 80);
-  logs::log(logs::info, "[THREAD_LIFECYCLE] Pipeline thread started: TID={} pipeline={}...", tid, pipeline_short);
-
-  // Register thread for heartbeat monitoring
-  wolf::monitoring::ScopedThreadMonitor thread_monitor("GStreamer-Pipeline", pipeline_short);
-
-  // Add periodic heartbeat callback (every 100ms during pipeline execution)
-  // This lets the watchdog detect stuck threads (>30s without heartbeat = deadlock)
-  g_timeout_add(100, [](gpointer user_data) -> gboolean {
-    auto* monitor = static_cast<wolf::monitoring::ScopedThreadMonitor*>(user_data);
-    monitor->heartbeat();
-    return G_SOURCE_CONTINUE;  // Keep calling this callback
-  }, &thread_monitor);
+  // Note: Heartbeat is now updated by the watchdog thread's global scan
+  // We don't use bus handlers as they can interfere with GStreamer pipeline startup
 
   /* Thread cleanup handler - logs if thread exits unexpectedly */
   struct CleanupData {

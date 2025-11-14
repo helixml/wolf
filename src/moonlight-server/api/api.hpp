@@ -227,7 +227,7 @@ struct ThreadHealthInfo {
   std::string details;  // Pipeline description or other info
   int64_t seconds_since_heartbeat;
   int64_t seconds_alive;
-  uint64_t heartbeat_count;
+  int64_t heartbeat_count;  // Changed from uint64_t to avoid JSON string serialization
   bool is_stuck;  // >30s since heartbeat
 };
 
