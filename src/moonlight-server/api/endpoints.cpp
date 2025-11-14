@@ -1,10 +1,12 @@
 #include <api/api.hpp>
 #include <control/input_handler.hpp>
 #include <core/docker.hpp>
+#include <monitoring/thread-monitor.hpp>
 #include <rtp/udp-ping.hpp>
 #include <state/config.hpp>
 #include <state/sessions.hpp>
 #include <state/utils.hpp>
+#include <chrono>
 #include <fstream>
 #include <sstream>
 
@@ -867,6 +869,52 @@ void UnixSocketServer::endpoint_SystemMemory(const HTTPRequest &req, std::shared
 
   // Query GPU stats via nvidia-smi (with caching to prevent spam)
   res.gpu_stats = queryGPUStats();
+
+  send_http(socket, 200, rfl::json::write(res));
+}
+
+void UnixSocketServer::endpoint_SystemHealth(const HTTPRequest &req, std::shared_ptr<UnixSocket> socket) {
+  auto res = SystemHealthResponse{};
+
+  // Calculate process uptime
+  static auto process_start_time = std::chrono::steady_clock::now();
+  auto now = std::chrono::steady_clock::now();
+  res.process_uptime_seconds = std::chrono::duration_cast<std::chrono::seconds>(now - process_start_time).count();
+
+  // Get thread health from monitor
+  auto thread_statuses = wolf::monitoring::ThreadMonitor::get().get_all_threads();
+
+  for (const auto& status : thread_statuses) {
+    res.threads.push_back(ThreadHealthInfo{
+      .tid = status.tid,
+      .name = status.name,
+      .details = status.pipeline_desc,
+      .seconds_since_heartbeat = status.seconds_since_heartbeat,
+      .seconds_alive = status.seconds_alive,
+      .heartbeat_count = status.heartbeat_count,
+      .is_stuck = status.is_stuck
+    });
+  }
+
+  res.total_thread_count = res.threads.size();
+  res.stuck_thread_count = 0;
+  for (const auto& t : res.threads) {
+    if (t.is_stuck) {
+      res.stuck_thread_count++;
+    }
+  }
+
+  // Determine overall status
+  if (res.stuck_thread_count == 0) {
+    res.overall_status = "healthy";
+  } else if (res.stuck_thread_count < res.total_thread_count / 2) {
+    res.overall_status = "degraded";
+  } else {
+    res.overall_status = "critical";
+  }
+
+  logs::log(logs::debug, "[HEALTH] Status={} threads={} stuck={}",
+            res.overall_status, res.total_thread_count, res.stuck_thread_count);
 
   send_http(socket, 200, rfl::json::write(res));
 }

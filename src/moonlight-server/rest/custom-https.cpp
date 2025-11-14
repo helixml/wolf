@@ -22,6 +22,18 @@ Server<HTTPS>::Server(const std::string &certification_file, const std::string &
               request->path,
               ec.value(),
               ec.message());
+
+    // Explicitly close connection to prevent CLOSE_WAIT leak
+    // When client disconnects, we receive FIN but must call close() on our side
+    if (auto connection = request->connection.lock()) {
+      error_code close_ec;
+      connection->socket->lowest_layer().shutdown(boost::asio::ip::tcp::socket::shutdown_both, close_ec);
+      connection->socket->lowest_layer().close(close_ec);
+      if (close_ec && close_ec.value() != boost::asio::error::not_connected) {
+        logs::log(logs::trace, "HTTPS connection close: {}", close_ec.message());
+      }
+    }
+
     return;
   };
 }

@@ -11,7 +11,11 @@
 #include <gstreamer-1.0/gst/app/gstappsrc.h>
 #include <immer/box.hpp>
 #include <memory>
+#include <monitoring/thread-monitor.hpp>
 #include <moonlight/fec.hpp>
+#include <pthread.h>
+#include <sys/syscall.h>
+#include <unistd.h>
 
 namespace streaming {
 
@@ -61,7 +65,7 @@ void start_streaming_audio(immer::box<events::AudioSession> audio_session,
 
 static bool run_pipeline(
     const std::string &pipeline_desc,
-    const std::function<immer::array<immer::box<events::EventBusHandlers>>(gstreamer::gst_element_ptr /* pipeline */)>
+    const std::function<immer::array<immer::box<events::EventBusHandlers>>(gstreamer::gst_element_ptr /* pipeline */, gstreamer::gst_main_loop_ptr /* loop */)>
         &on_pipeline_ready) {
   GError *error = nullptr;
   gstreamer::gst_element_ptr pipeline(gst_parse_launch(pipeline_desc.c_str(), &error), [](const auto &pipeline) {
@@ -84,7 +88,7 @@ static bool run_pipeline(
   gstreamer::gst_main_loop_ptr loop(g_main_loop_new(context.get(), FALSE), ::g_main_loop_unref);
 
   /* Let the calling thread set extra things */
-  auto handlers = on_pipeline_ready(pipeline);
+  auto handlers = on_pipeline_ready(pipeline, loop);
 
   /*
    * adds a watch for new message on our pipeline's message bus to
@@ -103,10 +107,39 @@ static bool run_pipeline(
                                     GST_DEBUG_GRAPH_SHOW_ALL,
                                     "pipeline-start");
 
+  /* Thread lifecycle logging and monitoring */
+  pid_t tid = syscall(SYS_gettid);
+  std::string pipeline_short = pipeline_desc.substr(0, 80);
+  logs::log(logs::info, "[THREAD_LIFECYCLE] Pipeline thread started: TID={} pipeline={}...", tid, pipeline_short);
+
+  // Register thread for heartbeat monitoring
+  wolf::monitoring::ScopedThreadMonitor thread_monitor("GStreamer-Pipeline", pipeline_short);
+
+  /* Thread cleanup handler - logs if thread exits unexpectedly */
+  struct CleanupData {
+    std::string pipeline_desc_short;
+    pid_t tid;
+  } cleanup_data = {pipeline_desc.substr(0, 100), tid};
+
+  auto cleanup_handler = [](void* arg) {
+    auto* data = (CleanupData*)arg;
+    logs::log(logs::error, "[THREAD_EXIT] GStreamer pipeline thread (TID={}) exited UNEXPECTEDLY: {}...",
+              data->tid, data->pipeline_desc_short);
+    // Note: Cannot unlock mutexes held by GStreamer internal code (libgstbase, interpipe, etc.)
+    // Thread 43209 died inside GStreamer library, not our code - we have no access to those mutexes
+    // This cleanup handler is purely for logging/detection
+  };
+
+  pthread_cleanup_push(cleanup_handler, &cleanup_data);
+
   /* The main loop will be run until someone calls g_main_loop_quit() */
+  // Note: Using GStreamer's standard g_main_loop_run - it handles all the internal threading
   g_main_loop_run(loop.get());
 
+  pthread_cleanup_pop(0);  // Don't execute cleanup on normal exit
+
   /* Out of the main loop, clean up nicely */
+  logs::log(logs::info, "[THREAD_LIFECYCLE] Pipeline thread (TID={}) exiting normally, cleaning up", tid);
   gst_element_set_state(pipeline.get(), GST_STATE_PAUSED);
   gst_element_set_state(pipeline.get(), GST_STATE_READY);
   gst_element_set_state(pipeline.get(), GST_STATE_NULL);

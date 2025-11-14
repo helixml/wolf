@@ -105,7 +105,7 @@ void start_video_producer(const std::string &session_id,
       std::make_shared<GstBusData>(GstBusData{.on_ready = std::move(on_ready), .wayland_plugin = nullptr});
   std::shared_ptr<NeedContextData> ctx_data_ptr =
       std::make_shared<NeedContextData>(NeedContextData{.device_path = render_node, .gst_context = video_context});
-  run_pipeline(pipeline, [=](auto pipeline) {
+  run_pipeline(pipeline, [=](auto pipeline, auto loop) {
     logs::log(logs::debug, "Setting up waylanddisplaysrc");
 
     auto wayland_plugin_el = gst_bin_get_by_name(GST_BIN(pipeline.get()), "wolf_wayland_source");
@@ -118,18 +118,18 @@ void start_video_producer(const std::string &session_id,
     gst_object_unref(bus);
 
     auto stop_handler = event_bus->register_handler<immer::box<events::StopStreamEvent>>(
-        [session_id, pipeline](const immer::box<events::StopStreamEvent> &ev) {
+        [session_id, loop](const immer::box<events::StopStreamEvent> &ev) {
           if (std::to_string(ev->session_id) == session_id) {
-            logs::log(logs::debug, "[GSTREAMER] Stopping video producer: {}", session_id);
-            gst_element_send_event(pipeline.get(), gst_event_new_eos());
+            logs::log(logs::debug, "[GSTREAMER] Stopping video producer: {} (quitting main loop)", session_id);
+            g_main_loop_quit(loop.get());  // Thread-safe, avoids abandoned GStreamer mutexes
           }
         });
 
     auto stop_lobby_handler = event_bus->register_handler<immer::box<events::StopLobbyEvent>>(
-        [session_id, pipeline](const immer::box<events::StopLobbyEvent> &ev) {
+        [session_id, loop](const immer::box<events::StopLobbyEvent> &ev) {
           if (ev->lobby_id == session_id) {
-            logs::log(logs::debug, "[GSTREAMER] Stopping video producer: {}", session_id);
-            gst_element_send_event(pipeline.get(), gst_event_new_eos());
+            logs::log(logs::debug, "[GSTREAMER] Stopping video producer: {} (quitting main loop)", session_id);
+            g_main_loop_quit(loop.get());  // Thread-safe, avoids abandoned GStreamer mutexes
           }
         });
 
@@ -168,20 +168,20 @@ void start_audio_producer(const std::string &session_id,
                               fmt::arg("server_name", server_name));
   logs::log(logs::debug, "[GSTREAMER] Starting audio producer: {}", pipeline);
 
-  run_pipeline(pipeline, [=](auto pipeline) {
+  run_pipeline(pipeline, [=](auto pipeline, auto loop) {
     auto stop_handler = event_bus->register_handler<immer::box<events::StopStreamEvent>>(
-        [session_id, pipeline](const immer::box<events::StopStreamEvent> &ev) {
+        [session_id, loop](const immer::box<events::StopStreamEvent> &ev) {
           if (std::to_string(ev->session_id) == session_id) {
-            logs::log(logs::debug, "[GSTREAMER] Stopping audio producer: {}", session_id);
-            gst_element_send_event(pipeline.get(), gst_event_new_eos());
+            logs::log(logs::debug, "[GSTREAMER] Stopping audio producer: {} (quitting main loop)", session_id);
+            g_main_loop_quit(loop.get());  // Thread-safe, avoids abandoned GStreamer mutexes
           }
         });
 
     auto stop_lobby_handler = event_bus->register_handler<immer::box<events::StopLobbyEvent>>(
-        [session_id, pipeline](const immer::box<events::StopLobbyEvent> &ev) {
+        [session_id, loop](const immer::box<events::StopLobbyEvent> &ev) {
           if (ev->lobby_id == session_id) {
-            logs::log(logs::debug, "[GSTREAMER] Stopping video producer: {}", session_id);
-            gst_element_send_event(pipeline.get(), gst_event_new_eos());
+            logs::log(logs::debug, "[GSTREAMER] Stopping audio producer: {} (quitting main loop)", session_id);
+            g_main_loop_quit(loop.get());  // Thread-safe, avoids abandoned GStreamer mutexes
           }
         });
 
@@ -292,7 +292,7 @@ void start_streaming_video(immer::box<events::VideoSession> video_session,
       .client_endpoint = std::make_shared<udp::endpoint>(boost::asio::ip::make_address(client_ip), client_port)});
   std::shared_ptr<NeedContextData> ctx_data_ptr = std::make_shared<NeedContextData>(
       NeedContextData{.device_path = video_session->render_node, .gst_context = video_context});
-  run_pipeline(pipeline, [video_session, event_bus, udp_sink, ctx_data_ptr](auto pipeline) {
+  run_pipeline(pipeline, [video_session, event_bus, udp_sink, ctx_data_ptr](auto pipeline, auto loop) {
     if (auto app_sink_el = gst_bin_get_by_name(GST_BIN(pipeline.get()), "wolf_udp_sink")) {
       logs::log(logs::debug, "Setting up wolf_udp_sink");
       g_assert(GST_IS_APP_SINK(app_sink_el));
@@ -325,7 +325,7 @@ void start_streaming_video(immer::box<events::VideoSession> video_session,
         });
 
     auto pause_handler = event_bus->register_handler<immer::box<events::PauseStreamEvent>>(
-        [sess_id = video_session->session_id, pipeline, pause_sent](const immer::box<events::PauseStreamEvent> &ev) {
+        [sess_id = video_session->session_id, loop, pause_sent](const immer::box<events::PauseStreamEvent> &ev) {
           if (ev->session_id == sess_id) {
             // Guard against duplicate pause events (bug fix for upstream issue)
             if (*pause_sent) {
@@ -334,10 +334,7 @@ void start_streaming_video(immer::box<events::VideoSession> video_session,
             }
             *pause_sent = true;
 
-            auto state = GST_STATE(pipeline.get());
-            auto pending = GST_STATE_PENDING(pipeline.get());
-            logs::log(logs::warning, "[HANG_DEBUG] Video PauseStreamEvent for session {}, pipeline state: {} → {}",
-                     sess_id, gst_element_state_get_name(state), gst_element_state_get_name(pending));
+            logs::log(logs::warning, "[HANG_DEBUG] Video PauseStreamEvent for session {} (quitting main loop)", sess_id);
 
             /**
              * Unfortunately here we can't just pause the pipeline,
@@ -351,7 +348,7 @@ void start_streaming_video(immer::box<events::VideoSession> video_session,
              * when a resume happens
              */
 
-            gst_element_send_event(pipeline.get(), gst_event_new_eos());
+            g_main_loop_quit(loop.get());  // Thread-safe, avoids abandoned GStreamer mutexes
           }
         });
 
@@ -398,10 +395,10 @@ void start_streaming_video(immer::box<events::VideoSession> video_session,
         });
 
     auto stop_handler = event_bus->register_handler<immer::box<events::StopStreamEvent>>(
-        [sess_id = video_session->session_id, pipeline](const immer::box<events::StopStreamEvent> &ev) {
+        [sess_id = video_session->session_id, loop](const immer::box<events::StopStreamEvent> &ev) {
           if (ev->session_id == sess_id) {
-            logs::log(logs::debug, "[GSTREAMER] Stopping pipeline: {}", sess_id);
-            gst_element_send_event(pipeline.get(), gst_event_new_eos());
+            logs::log(logs::debug, "[GSTREAMER] Stopping pipeline: {} (quitting main loop)", sess_id);
+            g_main_loop_quit(loop.get());  // Thread-safe, avoids abandoned GStreamer mutexes
           }
         });
 
@@ -446,7 +443,7 @@ void start_streaming_audio(immer::box<events::AudioSession> audio_session,
       .socket = audio_socket,
       .client_endpoint = std::make_shared<udp::endpoint>(boost::asio::ip::make_address(client_ip), client_port)});
 
-  run_pipeline(pipeline, [session_id = audio_session->session_id, udp_sink, event_bus](auto pipeline) {
+  run_pipeline(pipeline, [session_id = audio_session->session_id, udp_sink, event_bus](auto pipeline, auto loop) {
     if (auto app_sink_el = gst_bin_get_by_name(GST_BIN(pipeline.get()), "wolf_udp_sink")) {
       logs::log(logs::debug, "Setting up wolf_udp_sink");
       g_assert(GST_IS_APP_SINK(app_sink_el));
@@ -458,7 +455,7 @@ void start_streaming_audio(immer::box<events::AudioSession> audio_session,
     auto pause_sent = std::make_shared<bool>(false);
 
     auto pause_handler = event_bus->register_handler<immer::box<events::PauseStreamEvent>>(
-        [session_id, pipeline, pause_sent](const immer::box<events::PauseStreamEvent> &ev) {
+        [session_id, loop, pause_sent](const immer::box<events::PauseStreamEvent> &ev) {
           if (ev->session_id == session_id) {
             // Guard against duplicate pause events (bug fix for upstream issue)
             if (*pause_sent) {
@@ -467,10 +464,7 @@ void start_streaming_audio(immer::box<events::AudioSession> audio_session,
             }
             *pause_sent = true;
 
-            auto state = GST_STATE(pipeline.get());
-            auto pending = GST_STATE_PENDING(pipeline.get());
-            logs::log(logs::warning, "[HANG_DEBUG] Audio PauseStreamEvent for session {}, pipeline state: {} → {}",
-                     session_id, gst_element_state_get_name(state), gst_element_state_get_name(pending));
+            logs::log(logs::warning, "[HANG_DEBUG] Audio PauseStreamEvent for session {} (quitting main loop)", session_id);
 
             /**
              * Unfortunately here we can't just pause the pipeline,
@@ -484,7 +478,7 @@ void start_streaming_audio(immer::box<events::AudioSession> audio_session,
              * when a resume happens
              */
 
-            gst_element_send_event(pipeline.get(), gst_event_new_eos());
+            g_main_loop_quit(loop.get());  // Thread-safe, avoids abandoned GStreamer mutexes
           }
         });
 
@@ -521,10 +515,10 @@ void start_streaming_audio(immer::box<events::AudioSession> audio_session,
         });
 
     auto stop_handler = event_bus->register_handler<immer::box<events::StopStreamEvent>>(
-        [session_id, pipeline](const immer::box<events::StopStreamEvent> &ev) {
+        [session_id, loop](const immer::box<events::StopStreamEvent> &ev) {
           if (ev->session_id == session_id) {
-            logs::log(logs::debug, "[GSTREAMER] Stopping pipeline: {}", session_id);
-            gst_element_send_event(pipeline.get(), gst_event_new_eos());
+            logs::log(logs::debug, "[GSTREAMER] Stopping pipeline: {} (quitting main loop)", session_id);
+            g_main_loop_quit(loop.get());  // Thread-safe, avoids abandoned GStreamer mutexes
           }
         });
 

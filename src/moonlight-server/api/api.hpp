@@ -221,6 +221,25 @@ struct GStreamerPipelineStats {
   int total_pipelines = 0;    // Sum of producers + consumers
 };
 
+struct ThreadHealthInfo {
+  int32_t tid;
+  std::string name;
+  std::string details;  // Pipeline description or other info
+  int64_t seconds_since_heartbeat;
+  int64_t seconds_alive;
+  uint64_t heartbeat_count;
+  bool is_stuck;  // >30s since heartbeat
+};
+
+struct SystemHealthResponse {
+  bool success = true;
+  int64_t process_uptime_seconds;  // How long Wolf has been running
+  std::vector<ThreadHealthInfo> threads;
+  int32_t stuck_thread_count;
+  int32_t total_thread_count;
+  std::string overall_status;  // "healthy", "degraded", "critical"
+};
+
 struct SystemMemoryResponse {
   bool success = true;
   int64_t process_rss_bytes;
@@ -284,6 +303,7 @@ private:
   void endpoint_DockerInspectImage(const HTTPRequest &req, std::shared_ptr<UnixSocket> socket);
   void endpoint_DockerPullImage(const HTTPRequest &req, std::shared_ptr<UnixSocket> socket);
   void endpoint_SystemMemory(const HTTPRequest &req, std::shared_ptr<UnixSocket> socket);
+  void endpoint_SystemHealth(const HTTPRequest &req, std::shared_ptr<UnixSocket> socket);
 
   void sse_broadcast(const std::string &payload);
   void sse_keepalive(const boost::system::error_code &e);
