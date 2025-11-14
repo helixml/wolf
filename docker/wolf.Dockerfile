@@ -54,12 +54,14 @@ WORKDIR /wolf
 ENV CCACHE_DIR=/cache/ccache
 ENV CMAKE_BUILD_DIR=/cache/cmake-build
 ARG BUILD_JOBS=8
+# DEBUG BUILD (current) - Full debug symbols for deadlock investigation
 RUN --mount=type=cache,target=/cache/ccache \
     cmake -B$CMAKE_BUILD_DIR \
-    -DCMAKE_BUILD_TYPE=RelWithDebInfo \
+    -DCMAKE_BUILD_TYPE=Debug \
     -DCMAKE_CXX_STANDARD=17 \
     -DCMAKE_CXX_EXTENSIONS=OFF \
-    -DCMAKE_CXX_FLAGS="-Wno-missing-template-arg-list-after-template-kw" \
+    -DCMAKE_CXX_FLAGS="-g3 -O0 -fno-omit-frame-pointer -Wno-missing-template-arg-list-after-template-kw" \
+    -DCMAKE_C_FLAGS="-g3 -O0 -fno-omit-frame-pointer" \
     -DBUILD_SHARED_LIBS=OFF \
     -DBoost_USE_STATIC_LIBS=ON \
     -DBUILD_FAKE_UDEV_CLI=ON \
@@ -70,6 +72,23 @@ RUN --mount=type=cache,target=/cache/ccache \
     # We have to copy out the built executables because this will only be available inside the buildkit cache
     cp $CMAKE_BUILD_DIR/src/moonlight-server/wolf /wolf/wolf && \
     cp $CMAKE_BUILD_DIR/src/fake-udev/fake-udev /wolf/fake-udev
+
+# RELEASE BUILD (commented out) - Use for production when debugging complete
+# RUN --mount=type=cache,target=/cache/ccache \
+#     cmake -B$CMAKE_BUILD_DIR \
+#     -DCMAKE_BUILD_TYPE=RelWithDebInfo \
+#     -DCMAKE_CXX_STANDARD=17 \
+#     -DCMAKE_CXX_EXTENSIONS=OFF \
+#     -DCMAKE_CXX_FLAGS="-Wno-missing-template-arg-list-after-template-kw" \
+#     -DBUILD_SHARED_LIBS=OFF \
+#     -DBoost_USE_STATIC_LIBS=ON \
+#     -DBUILD_FAKE_UDEV_CLI=ON \
+#     -DBUILD_TESTING=OFF \
+#     -G Ninja && \
+#     ninja -j $BUILD_JOBS -C $CMAKE_BUILD_DIR wolf && \
+#     ninja -j $BUILD_JOBS -C $CMAKE_BUILD_DIR fake-udev && \
+#     cp $CMAKE_BUILD_DIR/src/moonlight-server/wolf /wolf/wolf && \
+#     cp $CMAKE_BUILD_DIR/src/fake-udev/fake-udev /wolf/fake-udev
 
 ########################################################
 FROM $BASE_IMAGE AS runner
@@ -87,6 +106,23 @@ RUN apt-get update -y && \
     libdrm2 \
     libpci3 \
     libunwind8 \
+    && rm -rf /var/lib/apt/lists/*
+
+# Debug tools and symbols for deadlock investigation
+RUN apt-get update -y && \
+    apt-get install -y --no-install-recommends \
+    gdb \
+    strace \
+    && rm -rf /var/lib/apt/lists/*
+
+# GStreamer debug symbols (best effort - may not be available for all versions)
+RUN apt-get update -y && \
+    apt-get install -y --no-install-recommends \
+    libgstreamer1.0-0-dbgsym \
+    libgstbase-1.0-0-dbgsym \
+    gstreamer1.0-plugins-base-dbgsym \
+    gstreamer1.0-plugins-good-dbgsym \
+    || echo "Warning: GStreamer debug symbols not available" \
     && rm -rf /var/lib/apt/lists/*
 
 # gst-plugin-wayland runtime dependencies

@@ -115,6 +115,14 @@ static bool run_pipeline(
   // Register thread for heartbeat monitoring
   wolf::monitoring::ScopedThreadMonitor thread_monitor("GStreamer-Pipeline", pipeline_short);
 
+  // Add periodic heartbeat callback (every 100ms during pipeline execution)
+  // This lets the watchdog detect stuck threads (>30s without heartbeat = deadlock)
+  g_timeout_add(100, [](gpointer user_data) -> gboolean {
+    auto* monitor = static_cast<wolf::monitoring::ScopedThreadMonitor*>(user_data);
+    monitor->heartbeat();
+    return G_SOURCE_CONTINUE;  // Keep calling this callback
+  }, &thread_monitor);
+
   /* Thread cleanup handler - logs if thread exits unexpectedly */
   struct CleanupData {
     std::string pipeline_desc_short;

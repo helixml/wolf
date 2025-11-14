@@ -7,6 +7,7 @@
 #include <csignal>
 #include <exceptions/exceptions.h>
 #include <filesystem>
+#include <fstream>
 #include <immer/array_transient.hpp>
 #include <immer/map_transient.hpp>
 #include <immer/vector_transient.hpp>
@@ -14,11 +15,14 @@
 #include <mdns_cpp/logger.hpp>
 #include <mdns_cpp/mdns.hpp>
 #include <memory>
+#include <monitoring/thread-monitor.hpp>
 #include <rest/rest.hpp>
 #include <rtsp/net.hpp>
 #include <sessions/handlers.hpp>
 #include <state/config.hpp>
 #include <streaming/streaming.hpp>
+#include <sys/wait.h>
+#include <unistd.h>
 #include <vector>
 
 namespace ba = boost::asio;
@@ -159,6 +163,147 @@ std::optional<sessions::AudioServer> setup_audio_server(const std::string &host_
 }
 
 /**
+ * @brief Deadlock watchdog - monitors system health and dumps debug info on critical status
+ *
+ * Runs in separate thread, polls ThreadMonitor every 30s.
+ * If system is critical (stuck threads) for >60s:
+ * 1. Fork child process (timeout protection - if debug gathering deadlocks, child dies after 60s)
+ * 2. Write thread dump, generate core dump (timestamped files in /var/wolf-debug-dumps/)
+ * 3. Exit main process for Docker restart
+ */
+void start_watchdog() {
+  std::thread([]() {
+    using namespace std::chrono;
+
+    const seconds CHECK_INTERVAL{30};
+    const seconds CRITICAL_THRESHOLD{60};
+    std::optional<steady_clock::time_point> critical_since;
+
+    logs::log(logs::info, "[WATCHDOG] Started monitoring system health");
+
+    while (true) {
+      std::this_thread::sleep_for(CHECK_INTERVAL);
+
+      // Check health directly via ThreadMonitor (no HTTP call)
+      auto thread_statuses = wolf::monitoring::ThreadMonitor::get().get_all_threads();
+
+      int stuck_count = 0;
+      for (const auto& status : thread_statuses) {
+        if (status.is_stuck) {
+          stuck_count++;
+        }
+      }
+
+      bool is_critical = stuck_count > 0 && stuck_count >= thread_statuses.size() / 2;
+
+      if (is_critical) {
+        if (!critical_since) {
+          critical_since = steady_clock::now();
+          logs::log(logs::error,
+                    "[WATCHDOG] System entered CRITICAL state: {}/{} threads stuck",
+                    stuck_count, thread_statuses.size());
+        }
+
+        auto critical_duration = steady_clock::now() - *critical_since;
+        if (critical_duration >= CRITICAL_THRESHOLD) {
+          logs::log(logs::fatal,
+                    "[WATCHDOG] System CRITICAL for {}s - gathering debug info and exiting",
+                    duration_cast<seconds>(critical_duration).count());
+
+          // Fork child process for debug gathering (timeout protection)
+          pid_t child_pid = fork();
+
+          if (child_pid == 0) {
+            // CHILD PROCESS: Gather debug info with 60s timeout
+            alarm(60); // Kill child if debug gathering hangs
+
+            try {
+              auto now = system_clock::now();
+              auto timestamp = duration_cast<seconds>(now.time_since_epoch()).count();
+              std::string debug_dir = "/var/wolf-debug-dumps";
+              std::string prefix = fmt::format("{}/{}", debug_dir, timestamp);
+
+              // Create debug dumps directory
+              std::filesystem::create_directories(debug_dir);
+
+              // 1. Write thread dump
+              std::ofstream thread_dump(prefix + "-threads.txt");
+              thread_dump << fmt::format("Wolf Deadlock Debug Dump - {}\n", timestamp);
+              thread_dump << fmt::format("Critical for: {}s\n", duration_cast<seconds>(critical_duration).count());
+              thread_dump << fmt::format("Stuck threads: {}/{}\n\n", stuck_count, thread_statuses.size());
+
+              for (const auto& status : thread_statuses) {
+                thread_dump << fmt::format("TID {}: {} ({})\n", status.tid, status.name, status.pipeline_desc);
+                thread_dump << fmt::format("  Last heartbeat: {}s ago\n", status.seconds_since_heartbeat);
+                thread_dump << fmt::format("  Alive: {}s, Heartbeats: {}\n", status.seconds_alive, status.heartbeat_count);
+                thread_dump << fmt::format("  Status: {}\n\n", status.is_stuck ? "STUCK" : "healthy");
+              }
+              thread_dump.close();
+
+              // 2. Generate core dump using gcore
+              std::string gcore_cmd = fmt::format("gcore -o {} {}", prefix, getppid());
+              logs::log(logs::info, "[WATCHDOG] Generating core dump: {}", gcore_cmd);
+              int gcore_result = system(gcore_cmd.c_str());
+              if (gcore_result != 0) {
+                logs::log(logs::warning, "[WATCHDOG] gcore failed with code {}", gcore_result);
+              }
+
+              // 3. Copy recent logs (last 1000 lines)
+              // hostname gives us container ID, use docker inspect to get the name
+              std::string logs_cmd = fmt::format(
+                  "CONTAINER_NAME=$(docker inspect --format='{{{{.Name}}}}' $(hostname) 2>/dev/null | sed 's/^\\/\\/*//' || echo 'wolf'); "
+                  "docker logs --tail 1000 $CONTAINER_NAME > {}-logs.txt 2>&1 || "
+                  "echo 'Failed to capture logs' > {}-logs.txt",
+                  prefix, prefix);
+              system(logs_cmd.c_str());
+
+              logs::log(logs::info, "[WATCHDOG] Debug dumps written to: {}-*", prefix);
+              _exit(0); // Exit child cleanly
+
+            } catch (const std::exception& e) {
+              logs::log(logs::error, "[WATCHDOG] Debug gathering failed: {}", e.what());
+              _exit(1);
+            }
+          } else if (child_pid > 0) {
+            // PARENT PROCESS: Wait for child (max 70s = 60s alarm + 10s grace)
+            int status;
+            pid_t result = waitpid(child_pid, &status, 0);
+
+            if (result == -1) {
+              logs::log(logs::error, "[WATCHDOG] waitpid failed: {}", strerror(errno));
+            } else if (WIFEXITED(status)) {
+              logs::log(logs::info, "[WATCHDOG] Debug gathering completed with exit code {}", WEXITSTATUS(status));
+            } else if (WIFSIGNALED(status)) {
+              logs::log(logs::warning, "[WATCHDOG] Debug gathering killed by signal {}", WTERMSIG(status));
+            }
+
+            // Exit main process for Docker restart
+            logs::log(logs::fatal, "[WATCHDOG] Exiting for container restart");
+            exit(1);
+
+          } else {
+            logs::log(logs::error, "[WATCHDOG] fork() failed: {}", strerror(errno));
+            exit(1);
+          }
+        }
+      } else {
+        // System healthy - reset critical timer
+        if (critical_since) {
+          logs::log(logs::info, "[WATCHDOG] System recovered from critical state");
+          critical_since = std::nullopt;
+        }
+
+        if (stuck_count > 0) {
+          logs::log(logs::warning,
+                    "[WATCHDOG] System degraded: {}/{} threads stuck (not critical yet)",
+                    stuck_count, thread_statuses.size());
+        }
+      }
+    }
+  }).detach();
+}
+
+/**
  * @brief here's where the magic starts
  */
 void run() {
@@ -227,6 +372,9 @@ void run() {
   auto moonlight_sess_handlers = sessions::setup_moonlight_handlers(local_state, runtime_dir, audio_server);
   // Setup event handlers for player Lobbies
   auto lobbies_handlers = sessions::setup_lobbies_handlers(local_state, runtime_dir, audio_server);
+
+  // Start watchdog thread for deadlock detection
+  start_watchdog();
 
   http_thread.join(); // Let's park the main thread over here
 }
