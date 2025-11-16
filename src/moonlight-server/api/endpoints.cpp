@@ -892,7 +892,11 @@ void UnixSocketServer::endpoint_SystemHealth(const HTTPRequest &req, std::shared
       .seconds_since_heartbeat = status.seconds_since_heartbeat,
       .seconds_alive = status.seconds_alive,
       .heartbeat_count = status.heartbeat_count,
-      .is_stuck = status.is_stuck
+      .is_stuck = status.is_stuck,
+      .current_request_path = status.current_request_path,
+      .request_duration_seconds = status.request_duration_seconds,
+      .has_active_request = status.has_active_request,
+      .stack_trace = status.stack_trace
     });
   }
 

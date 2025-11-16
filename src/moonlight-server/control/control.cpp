@@ -3,6 +3,7 @@
 #include <control/input_handler.hpp>
 #include <events/events.hpp>
 #include <immer/box.hpp>
+#include <monitoring/thread-monitor.hpp>
 #include <state/sessions.hpp>
 #include <sys/socket.h>
 
@@ -157,7 +158,13 @@ void run_control(int port,
       });
 
   while (true) {
-    if (enet_host_service(host.get(), &event, timeout.count()) > 0) {
+    // Poll for events (blocks for up to timeout milliseconds)
+    int service_result = enet_host_service(host.get(), &event, timeout.count());
+
+    // Heartbeat after each poll (proves event loop is alive)
+    wolf::monitoring::ThreadMonitor::get().heartbeat();
+
+    if (service_result > 0) {
       auto [client_ip, client_port] = get_ip((sockaddr *)&event.peer->address.address);
       auto client_session = get_current_session(connected_clients, running_sessions, client_ip, event);
       if (client_session) {

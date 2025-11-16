@@ -2,9 +2,11 @@
 
 #include "boost/algorithm/hex.hpp"
 #include <boost/asio.hpp>
+#include <boost/asio/steady_timer.hpp>
 #include <boost/enable_shared_from_this.hpp>
 #include <boost/lexical_cast.hpp>
 #include <boost/shared_ptr.hpp>
+#include <monitoring/thread-monitor.hpp>
 #include <rtsp/commands.hpp>
 #include <state/sessions.hpp>
 #include <string_view>
@@ -255,6 +257,19 @@ void run_server(int port, const state::SessionsAtoms &running_sessions) {
   try {
     boost::asio::io_context io_context;
     tcp_server server(io_context, port, running_sessions);
+
+    // Add heartbeat timer
+    auto heartbeat_timer = std::make_shared<boost::asio::steady_timer>(io_context);
+    auto heartbeat_callback = std::make_shared<std::function<void(const boost::system::error_code&)>>();
+    *heartbeat_callback = [heartbeat_timer, heartbeat_callback](const boost::system::error_code& ec) {
+      if (!ec) {
+        wolf::monitoring::ThreadMonitor::get().heartbeat();
+        heartbeat_timer->expires_after(std::chrono::seconds(1));
+        heartbeat_timer->async_wait(*heartbeat_callback);
+      }
+    };
+    heartbeat_timer->expires_after(std::chrono::seconds(1));
+    heartbeat_timer->async_wait(*heartbeat_callback);
 
     logs::log(logs::info, "RTSP server started on port: {}", port);
 

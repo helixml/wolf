@@ -1,7 +1,9 @@
 #include <boost/property_tree/json_parser.hpp>
+#include <boost/asio/steady_timer.hpp>
 #include <events/events.hpp>
 #include <immer/atom.hpp>
 #include <immer/map_transient.hpp>
+#include <monitoring/thread-monitor.hpp>
 #include <rest/endpoints.hpp>
 
 namespace HTTPServers {
@@ -101,8 +103,23 @@ void startServer(HttpServer *server, const immer::box<state::AppState> state, in
         }
       });
 
-  // Start server
-  server->start([](unsigned short port) { logs::log(logs::info, "HTTP server listening on port: {} ", port); });
+  // Start server (this initializes io_service)
+  server->start([server](unsigned short port) {
+    logs::log(logs::info, "HTTP server listening on port: {} ", port);
+
+    // Add heartbeat timer to io_context (runs every 1 second)
+    auto heartbeat_timer = std::make_shared<boost::asio::steady_timer>(*server->io_service);
+    auto heartbeat_callback = std::make_shared<std::function<void(const boost::system::error_code&)>>();
+    *heartbeat_callback = [heartbeat_timer, heartbeat_callback](const boost::system::error_code& ec) {
+      if (!ec) {
+        wolf::monitoring::ThreadMonitor::get().heartbeat();
+        heartbeat_timer->expires_after(std::chrono::seconds(1));
+        heartbeat_timer->async_wait(*heartbeat_callback);
+      }
+    };
+    heartbeat_timer->expires_after(std::chrono::seconds(1));
+    heartbeat_timer->async_wait(*heartbeat_callback);
+  });
 
   pair_handler.unregister();
 }
@@ -190,7 +207,22 @@ void startServer(HttpsServer *server, const immer::box<state::AppState> state, i
     }
   };
 
-  server->start([](unsigned short port) { logs::log(logs::info, "HTTPS server listening on port: {} ", port); });
+  server->start([server](unsigned short port) {
+    logs::log(logs::info, "HTTPS server listening on port: {} ", port);
+
+    // Add heartbeat timer to io_context (runs every 1 second)
+    auto heartbeat_timer = std::make_shared<boost::asio::steady_timer>(*server->io_service);
+    auto heartbeat_callback = std::make_shared<std::function<void(const boost::system::error_code&)>>();
+    *heartbeat_callback = [heartbeat_timer, heartbeat_callback](const boost::system::error_code& ec) {
+      if (!ec) {
+        wolf::monitoring::ThreadMonitor::get().heartbeat();
+        heartbeat_timer->expires_after(std::chrono::seconds(1));
+        heartbeat_timer->async_wait(*heartbeat_callback);
+      }
+    };
+    heartbeat_timer->expires_after(std::chrono::seconds(1));
+    heartbeat_timer->async_wait(*heartbeat_callback);
+  });
 }
 
 } // namespace HTTPServers

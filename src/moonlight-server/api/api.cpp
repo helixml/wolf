@@ -1,9 +1,11 @@
 #include <api/api.hpp>
 #include <boost/asio/local/stream_protocol.hpp>
+#include <boost/asio/steady_timer.hpp>
 #include <events/reflectors.hpp>
 #include <filesystem>
 #include <helpers/utils.hpp>
 #include <memory>
+#include <monitoring/thread-monitor.hpp>
 #include <rfl/json.hpp>
 
 namespace wolf::api {
@@ -28,6 +30,19 @@ void start_server(std::string_view runtime_dir, immer::box<state::AppState> app_
         },
         ev);
   });
+
+  // Add heartbeat timer
+  auto heartbeat_timer = std::make_shared<boost::asio::steady_timer>(io_context);
+  auto heartbeat_callback = std::make_shared<std::function<void(const boost::system::error_code&)>>();
+  *heartbeat_callback = [heartbeat_timer, heartbeat_callback](const boost::system::error_code& ec) {
+    if (!ec) {
+      wolf::monitoring::ThreadMonitor::get().heartbeat();
+      heartbeat_timer->expires_after(std::chrono::seconds(1));
+      heartbeat_timer->async_wait(*heartbeat_callback);
+    }
+  };
+  heartbeat_timer->expires_after(std::chrono::seconds(1));
+  heartbeat_timer->async_wait(*heartbeat_callback);
 
   io_context.run();
 }

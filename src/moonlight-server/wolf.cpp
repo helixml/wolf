@@ -323,6 +323,7 @@ void run() {
   // HTTP APIs
   auto http_thread = std::thread([local_state]() {
     wolf::monitoring::ScopedThreadMonitor thread_monitor("HTTP-Server");
+    // TODO: Add Boost ASIO steady_timer for heartbeat in io_context event loop
     HttpServer server = HttpServer();
     HTTPServers::startServer(&server, local_state, state::get_port(state::HTTP_PORT));
   });
@@ -330,6 +331,7 @@ void run() {
   // HTTPS APIs
   std::thread([local_state, p_key_file, p_cert_file]() {
     wolf::monitoring::ScopedThreadMonitor thread_monitor("HTTPS-Server");
+    // TODO: Add Boost ASIO steady_timer for heartbeat in io_context event loop
     HttpsServer server = HttpsServer(p_cert_file, p_key_file);
     HTTPServers::startServer(&server, local_state, state::get_port(state::HTTPS_PORT));
   }).detach();
@@ -337,12 +339,14 @@ void run() {
   // RTSP
   std::thread([sessions = local_state->running_sessions]() {
     wolf::monitoring::ScopedThreadMonitor thread_monitor("RTSP-Server");
+    // TODO: Add Boost ASIO steady_timer for heartbeat in io_context event loop
     rtsp::run_server(state::get_port(state::RTSP_SETUP_PORT), sessions);
   }).detach();
 
   // Control
   std::thread([sessions = local_state->running_sessions, ev_bus = local_state->event_bus]() {
     wolf::monitoring::ScopedThreadMonitor thread_monitor("Control-Server");
+    // TODO: Add Boost ASIO steady_timer for heartbeat in io_context event loop
     control::run_control(state::get_port(state::CONTROL_PORT), sessions, ev_bus);
   }).detach();
 
@@ -353,6 +357,7 @@ void run() {
   // Wolf API server (Unix socket)
   std::thread([local_state, runtime_dir]() {
     wolf::monitoring::ScopedThreadMonitor thread_monitor("UnixSocket-API");
+    // TODO: Add Boost ASIO steady_timer for heartbeat in io_context event loop
     wolf::api::start_server(runtime_dir, local_state);
   }).detach();
 
@@ -384,10 +389,24 @@ void run() {
   start_watchdog();
 
   // Monitor main thread - parked on http_thread.join()
-  // If HTTP thread dies, main thread will unblock and exit
+  // Add simple heartbeat to prove main thread is alive
   wolf::monitoring::ScopedThreadMonitor main_thread_monitor("Main-Thread");
+  pid_t main_tid = syscall(SYS_gettid);
+
+  std::atomic<bool> stop_main_heartbeat{false};
+  std::thread main_heartbeat_thread([&stop_main_heartbeat, main_tid]() {
+    while (!stop_main_heartbeat) {
+      std::this_thread::sleep_for(std::chrono::seconds(1));
+      wolf::monitoring::ThreadMonitor::get().heartbeat_for_tid(main_tid);
+    }
+  });
 
   http_thread.join(); // Let's park the main thread over here
+
+  stop_main_heartbeat = true;
+  if (main_heartbeat_thread.joinable()) {
+    main_heartbeat_thread.join();
+  }
 
   // If we reach here, HTTP thread died unexpectedly
   logs::log(logs::fatal, "[MAIN] HTTP thread died - Wolf is shutting down");

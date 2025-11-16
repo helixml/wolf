@@ -107,16 +107,52 @@ static bool run_pipeline(
   gst_bus_add_signal_watch(bus);
 
   // Heartbeat handler - updates on every bus message (proves thread is alive and processing)
-  // Use a lambda that captures thread_monitor by pointer (it's on the stack in this function)
-  auto heartbeat_data = new wolf::monitoring::ScopedThreadMonitor*(&thread_monitor);
-  g_signal_connect(bus, "message", G_CALLBACK(+[](GstBus*, GstMessage*, gpointer user_data) {
-    auto** monitor_ptr = static_cast<wolf::monitoring::ScopedThreadMonitor**>(user_data);
-    (*monitor_ptr)->heartbeat();
-  }), heartbeat_data);
+  // Allocate monitor pointer on heap to safely pass to GLib callback
+  auto* monitor_ptr = new wolf::monitoring::ScopedThreadMonitor*(&thread_monitor);
+  g_signal_connect_data(bus, "message", G_CALLBACK(+[](GstBus*, GstMessage*, gpointer user_data) {
+    auto** monitor = static_cast<wolf::monitoring::ScopedThreadMonitor**>(user_data);
+    (*monitor)->heartbeat();
+  }), monitor_ptr, [](gpointer data, GClosure*) {
+    // Cleanup: delete the pointer when signal is disconnected
+    delete static_cast<wolf::monitoring::ScopedThreadMonitor**>(data);
+  }, GConnectFlags(0));
 
   g_signal_connect(bus, "message::error", G_CALLBACK(gstreamer::pipeline_error_handler), loop.get());
   g_signal_connect(bus, "message::eos", G_CALLBACK(gstreamer::pipeline_eos_handler), loop.get());
   gst_object_unref(bus);
+
+  // Add buffer probe to detect buffer flow (proves pipeline is processing data)
+  // Probe all source pads in the pipeline to catch buffer flow
+  // IMPORTANT: Probes execute in GStreamer streaming threads, so we pass the pipeline TID explicitly
+  GstIterator* it = gst_bin_iterate_elements(GST_BIN(pipeline.get()));
+  GValue item = G_VALUE_INIT;
+  int probe_count = 0;
+
+  while (gst_iterator_next(it, &item) == GST_ITERATOR_OK) {
+    GstElement* element = GST_ELEMENT(g_value_get_object(&item));
+
+    // Probe the src pad if it exists
+    GstPad* src_pad = gst_element_get_static_pad(element, "src");
+    if (src_pad) {
+      gst_pad_add_probe(src_pad, GST_PAD_PROBE_TYPE_BUFFER,
+        +[](GstPad*, GstPadProbeInfo*, gpointer user_data) -> GstPadProbeReturn {
+          // Heartbeat the registered pipeline thread (not the probe's thread!)
+          pid_t pipeline_tid = *static_cast<pid_t*>(user_data);
+          wolf::monitoring::ThreadMonitor::get().heartbeat_for_tid(pipeline_tid);
+          return GST_PAD_PROBE_OK;
+        }, new pid_t(tid), [](gpointer data) {
+          // Cleanup when probe is removed
+          delete static_cast<pid_t*>(data);
+        });
+      gst_object_unref(src_pad);
+      probe_count++;
+    }
+    g_value_reset(&item);
+  }
+  g_value_unset(&item);
+  gst_iterator_free(it);
+
+  logs::log(logs::debug, "[THREAD_LIFECYCLE] Added {} buffer probes to pipeline (TID={})", probe_count, tid);
 
   /* Set the pipeline to "playing" state*/
   gst_element_set_state(pipeline.get(), GST_STATE_PLAYING);

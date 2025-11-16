@@ -229,6 +229,14 @@ struct ThreadHealthInfo {
   int64_t seconds_alive;
   int64_t heartbeat_count;  // Changed from uint64_t to avoid JSON string serialization
   bool is_stuck;  // >30s since heartbeat
+
+  // HTTP request tracking (for HTTP/HTTPS server threads)
+  std::string current_request_path;
+  int64_t request_duration_seconds;
+  bool has_active_request;
+
+  // Kernel stack trace (where thread is blocked/executing)
+  std::string stack_trace;
 };
 
 struct SystemHealthResponse {

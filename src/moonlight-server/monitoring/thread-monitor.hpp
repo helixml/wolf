@@ -2,8 +2,10 @@
 
 #include <atomic>
 #include <chrono>
+#include <fstream>
 #include <helpers/logger.hpp>
 #include <mutex>
+#include <sstream>
 #include <sys/syscall.h>
 #include <unordered_map>
 #include <unistd.h>
@@ -17,6 +19,11 @@ struct ThreadInfo {
   std::atomic<std::chrono::steady_clock::time_point> last_heartbeat;
   std::chrono::steady_clock::time_point created_at;
   std::atomic<uint64_t> heartbeat_count{0};
+
+  // HTTP request tracking
+  std::string current_request_path;
+  std::chrono::steady_clock::time_point request_start_time;
+  bool has_active_request{false};
 };
 
 /**
@@ -25,6 +32,7 @@ struct ThreadInfo {
  */
 class ThreadMonitor {
 private:
+  friend class ScopedThreadMonitor;  // Allow ScopedThreadMonitor to access private members
   static ThreadMonitor instance_;
   std::mutex mutex_;
   std::unordered_map<pid_t, std::shared_ptr<ThreadInfo>> threads_;
@@ -55,7 +63,11 @@ public:
   // Update heartbeat for calling thread
   void heartbeat() {
     pid_t tid = syscall(SYS_gettid);
+    heartbeat_for_tid(tid);
+  }
 
+  // Update heartbeat for specific thread (by TID)
+  void heartbeat_for_tid(pid_t tid) {
     std::lock_guard lock(mutex_);
     auto it = threads_.find(tid);
     if (it != threads_.end()) {
@@ -90,6 +102,14 @@ public:
     int64_t seconds_alive;
     uint64_t heartbeat_count;
     bool is_stuck;  // >30s since last heartbeat
+
+    // HTTP request tracking
+    std::string current_request_path;
+    int64_t request_duration_seconds;
+    bool has_active_request;
+
+    // Kernel stack trace (where thread is blocked/executing)
+    std::string stack_trace;
   };
 
   std::vector<ThreadStatus> get_all_threads() {
@@ -102,6 +122,44 @@ public:
       auto since_heartbeat = std::chrono::duration_cast<std::chrono::seconds>(now - last_hb).count();
       auto alive = std::chrono::duration_cast<std::chrono::seconds>(now - info->created_at).count();
 
+      int64_t request_duration = 0;
+      if (info->has_active_request) {
+        request_duration = std::chrono::duration_cast<std::chrono::seconds>(now - info->request_start_time).count();
+      }
+
+      // A thread is only "stuck" if it WAS heartbeating and then stopped
+      // Threads that never heartbeat (heartbeat_count = 0) are not considered stuck
+      bool is_stuck = (info->heartbeat_count.load() > 0) && (since_heartbeat > 30);
+
+      // Read current syscall from /proc (shows what kernel call thread is blocked in)
+      // Format: "<syscall_nr> <arg1> <arg2> ... <sp> <pc>"
+      // Common syscalls: 1=write, 7=poll, 14=rt_sigtimedwait, 202=futex, 232=epoll_wait
+      std::string stack_trace;  // Reuse field name for syscall info
+      std::string syscall_path = "/proc/self/task/" + std::to_string(tid) + "/syscall";
+      std::ifstream syscall_file(syscall_path);
+      if (syscall_file.is_open()) {
+        std::string syscall_line;
+        std::getline(syscall_file, syscall_line);
+        if (!syscall_line.empty()) {
+          // Extract syscall number and format nicely
+          std::istringstream iss(syscall_line);
+          long syscall_nr;
+          if (iss >> syscall_nr) {
+            // Map common syscalls to names for readability
+            static const std::unordered_map<long, std::string> syscall_names = {
+              {0, "read"}, {1, "write"}, {7, "poll"}, {14, "rt_sigtimedwait"},
+              {202, "futex"}, {232, "epoll_wait"}, {271, "ppoll"}
+            };
+            auto it = syscall_names.find(syscall_nr);
+            if (it != syscall_names.end()) {
+              stack_trace = it->second + " (" + std::to_string(syscall_nr) + ")";
+            } else {
+              stack_trace = "syscall " + std::to_string(syscall_nr);
+            }
+          }
+        }
+      }
+
       result.push_back(ThreadStatus{
         .tid = tid,
         .name = info->name,
@@ -109,11 +167,38 @@ public:
         .seconds_since_heartbeat = since_heartbeat,
         .seconds_alive = alive,
         .heartbeat_count = info->heartbeat_count.load(),
-        .is_stuck = since_heartbeat > 30
+        .is_stuck = is_stuck,
+        .current_request_path = info->current_request_path,
+        .request_duration_seconds = request_duration,
+        .has_active_request = info->has_active_request,
+        .stack_trace = stack_trace
       });
     }
 
     return result;
+  }
+
+  // Start tracking an HTTP request
+  void start_request(const std::string& path) {
+    pid_t tid = syscall(SYS_gettid);
+    std::lock_guard lock(mutex_);
+    auto it = threads_.find(tid);
+    if (it != threads_.end()) {
+      it->second->current_request_path = path;
+      it->second->request_start_time = std::chrono::steady_clock::now();
+      it->second->has_active_request = true;
+    }
+  }
+
+  // End tracking an HTTP request
+  void end_request() {
+    pid_t tid = syscall(SYS_gettid);
+    std::lock_guard lock(mutex_);
+    auto it = threads_.find(tid);
+    if (it != threads_.end()) {
+      it->second->has_active_request = false;
+      it->second->current_request_path = "";
+    }
   }
 
   // Check for stuck threads (>30s since heartbeat)
