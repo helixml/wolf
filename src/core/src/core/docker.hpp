@@ -7,7 +7,7 @@
 #include <vector>
 
 namespace wolf::core::docker {
-constexpr auto DOCKER_API_VERSION = "v1.40";
+constexpr auto DOCKER_API_VERSION = "v1.44";
 
 enum ContainerStatus {
   CREATED,
