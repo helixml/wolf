@@ -8,19 +8,31 @@ trigger:
 
 steps:
   - name: publish-wolf-release
-    image: plugins/docker:20.17
+    image: docker:24-dind
+    volumes:
+      - name: dockersock
+        path: /var/run/docker.sock
     environment:
       DOCKER_BUILDKIT: 1
-    settings:
-      dockerfile: docker/wolf.Dockerfile
-      registry: registry.helixml.tech
-      repo: registry.helixml.tech/helix/wolf
-      username: admin
-      password:
+      BUILDKIT_SYNTAX: docker/dockerfile:1.4
+      REGISTRY_PASSWORD:
         from_secret: helix_registry_password
-      tags:
-        - ${DRONE_TAG}
-        - latest
-      platform: linux/amd64
-      build_args:
-        - BASE_IMAGE=ghcr.io/games-on-whales/gstreamer:1.26.7
+    commands:
+      - docker buildx create --use --driver docker-container --driver-opt image=moby/buildkit:master
+      - docker buildx version
+      - echo "$REGISTRY_PASSWORD" | docker login registry.helixml.tech -u admin --password-stdin
+      - |
+        docker buildx build \
+          -f docker/wolf.Dockerfile \
+          -t registry.helixml.tech/helix/wolf:${DRONE_TAG} \
+          -t registry.helixml.tech/helix/wolf:latest \
+          --platform linux/amd64 \
+          --build-arg BASE_IMAGE=ghcr.io/games-on-whales/gstreamer:1.26.7 \
+          --push \
+          .
+      - docker logout registry.helixml.tech
+
+volumes:
+  - name: dockersock
+    host:
+      path: /var/run/docker.sock
