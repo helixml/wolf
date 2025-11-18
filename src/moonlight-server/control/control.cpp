@@ -3,6 +3,7 @@
 #include <control/input_handler.hpp>
 #include <events/events.hpp>
 #include <immer/box.hpp>
+#include <monitoring/thread-monitor.hpp>
 #include <state/sessions.hpp>
 #include <sys/socket.h>
 
@@ -99,20 +100,20 @@ std::optional<events::StreamSession> get_current_session(const enet_clients_map 
                                                          std::string_view client_ip,
                                                          const ENetEvent &enet_event) {
   if (enet_event.type == ENET_EVENT_TYPE_CONNECT) {
+    logs::log(logs::info, "[ENET_MATCH] Connecting: enet_secret={} from IP {}", enet_event.data, client_ip);
     // A new connection, we should check if there's a session that matches the current client
     for (const StreamSession &session : *running_sessions->load()) {
+      logs::log(logs::info, "[ENET_MATCH] Checking session_id={} enet_secret={} ip={}", session.session_id, session.enet_secret_payload, session.ip);
       if (session.enet_secret_payload == enet_event.data) {
+        logs::log(logs::info, "[ENET_MATCH] ✅ FOUND MATCH session_id={}", session.session_id);
         return session;
       }
     }
-    logs::log(logs::warning,
-              "[ENET] Unable to find a session that matches the client secret {}, matching by IP",
-              enet_event.data);
-    for (const StreamSession &session : *running_sessions->load()) {
-      if (session.ip == client_ip) {
-        return session;
-      }
-    }
+    logs::log(logs::error,
+              "[ENET] Unable to find a session that matches the client secret {} from IP {}. Rejecting connection.",
+              enet_event.data,
+              client_ip);
+    return std::nullopt;  // Do not fall back to IP - causes AES key mismatch with multiple sessions from same IP
   } else {
     // The connection has already been established, we'll check for a match in our connected client map
     if (auto client = connected_clients.find(enet_event.peer)) {
@@ -157,7 +158,13 @@ void run_control(int port,
       });
 
   while (true) {
-    if (enet_host_service(host.get(), &event, timeout.count()) > 0) {
+    // Poll for events (blocks for up to timeout milliseconds)
+    int service_result = enet_host_service(host.get(), &event, timeout.count());
+
+    // Heartbeat after each poll (proves event loop is alive)
+    wolf::monitoring::ThreadMonitor::get().heartbeat();
+
+    if (service_result > 0) {
       auto [client_ip, client_port] = get_ip((sockaddr *)&event.peer->address.address);
       auto client_session = get_current_session(connected_clients, running_sessions, client_ip, event);
       if (client_session) {

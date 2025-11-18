@@ -73,7 +73,8 @@ inline std::shared_ptr<events::StreamSession> create_stream_session(immer::box<s
                                                                     const moonlight::DisplayMode &display_mode,
                                                                     int audio_channel_count,
                                                                     const std::string &aes_key,
-                                                                    const std::string &aes_iv) {
+                                                                    const std::string &aes_iv,
+                                                                    const std::string &client_unique_id) {
   auto full_path = std::filesystem::path(state->host->local_base_state_folder) / current_client.app_state_folder /
                    run_app.base.title;
   logs::log(logs::debug, "Host app state folder: {}, creating paths", full_path.string());
@@ -113,6 +114,8 @@ inline std::shared_ptr<events::StreamSession> create_stream_session(immer::box<s
 
       // client info
       .session_id = get_client_id(current_client),
+      .ip = "",  // Will be populated later
+      .client_unique_id = client_unique_id,  // Moonlight uniqueid for secure session matching
       .video_stream_port = static_cast<unsigned short>(get_port(VIDEO_PING_PORT)),
       .audio_stream_port = static_cast<unsigned short>(get_port(AUDIO_PING_PORT)),
       .control_stream_port = static_cast<unsigned short>(get_port(CONTROL_PORT))};

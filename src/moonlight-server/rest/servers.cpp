@@ -1,7 +1,9 @@
 #include <boost/property_tree/json_parser.hpp>
+#include <boost/asio/steady_timer.hpp>
 #include <events/events.hpp>
 #include <immer/atom.hpp>
 #include <immer/map_transient.hpp>
+#include <monitoring/thread-monitor.hpp>
 #include <rest/endpoints.hpp>
 
 namespace HTTPServers {
@@ -72,24 +74,52 @@ void startServer(HttpServer *server, const immer::box<state::AppState> state, in
 
   auto pair_handler = state->event_bus->register_handler<immer::box<events::PairSignal>>(
       [pairing_atom](const immer::box<events::PairSignal> pair_sig) {
-        pairing_atom->update([&pair_sig](const immer::map<std::string, immer::box<events::PairSignal>> &m) {
-          auto secret = crypto::str_to_hex(crypto::random(8));
-          logs::log(logs::info, "Insert pin at http://{}:47989/pin/#{}", pair_sig->host_ip, secret);
-          // filter out any other (dangling) pair request from the same client
-          auto t_map = m.transient();
-          for (auto [key, value] : m) {
-            if (value->client_ip == pair_sig->client_ip) {
-              t_map.erase(key);
+        // Check if auto-pairing PIN is set via environment variable
+        auto auto_pin_env = utils::get_env("MOONLIGHT_INTERNAL_PAIRING_PIN", "");
+        std::string auto_pin(auto_pin_env);
+
+        // Only auto-pair for clients from docker bridge network (172.x.x.x)
+        bool is_local_client = pair_sig->client_ip.rfind("172.", 0) == 0;
+
+        if (!auto_pin.empty() && is_local_client) {
+          logs::log(logs::info, "Auto-pairing client {} with PIN from MOONLIGHT_INTERNAL_PAIRING_PIN", pair_sig->client_ip);
+          // Automatically fulfill the PIN promise
+          pair_sig->user_pin->set_value(auto_pin);
+        } else {
+          pairing_atom->update([&pair_sig](const immer::map<std::string, immer::box<events::PairSignal>> &m) {
+            auto secret = crypto::str_to_hex(crypto::random(8));
+            logs::log(logs::info, "Insert pin at http://{}:47989/pin/#{}", pair_sig->host_ip, secret);
+            // filter out any other (dangling) pair request from the same client
+            auto t_map = m.transient();
+            for (auto [key, value] : m) {
+              if (value->client_ip == pair_sig->client_ip) {
+                t_map.erase(key);
+              }
             }
-          }
-          // insert the new pair request
-          t_map.set(secret, pair_sig);
-          return t_map.persistent();
-        });
+            // insert the new pair request
+            t_map.set(secret, pair_sig);
+            return t_map.persistent();
+          });
+        }
       });
 
-  // Start server
-  server->start([](unsigned short port) { logs::log(logs::info, "HTTP server listening on port: {} ", port); });
+  // Start server (this initializes io_service)
+  server->start([server](unsigned short port) {
+    logs::log(logs::info, "HTTP server listening on port: {} ", port);
+
+    // Add heartbeat timer to io_context (runs every 1 second)
+    auto heartbeat_timer = std::make_shared<boost::asio::steady_timer>(*server->io_service);
+    auto heartbeat_callback = std::make_shared<std::function<void(const boost::system::error_code&)>>();
+    *heartbeat_callback = [heartbeat_timer, heartbeat_callback](const boost::system::error_code& ec) {
+      if (!ec) {
+        wolf::monitoring::ThreadMonitor::get().heartbeat();
+        heartbeat_timer->expires_after(std::chrono::seconds(1));
+        heartbeat_timer->async_wait(*heartbeat_callback);
+      }
+    };
+    heartbeat_timer->expires_after(std::chrono::seconds(1));
+    heartbeat_timer->async_wait(*heartbeat_callback);
+  });
 
   pair_handler.unregister();
 }
@@ -177,7 +207,22 @@ void startServer(HttpsServer *server, const immer::box<state::AppState> state, i
     }
   };
 
-  server->start([](unsigned short port) { logs::log(logs::info, "HTTPS server listening on port: {} ", port); });
+  server->start([server](unsigned short port) {
+    logs::log(logs::info, "HTTPS server listening on port: {} ", port);
+
+    // Add heartbeat timer to io_context (runs every 1 second)
+    auto heartbeat_timer = std::make_shared<boost::asio::steady_timer>(*server->io_service);
+    auto heartbeat_callback = std::make_shared<std::function<void(const boost::system::error_code&)>>();
+    *heartbeat_callback = [heartbeat_timer, heartbeat_callback](const boost::system::error_code& ec) {
+      if (!ec) {
+        wolf::monitoring::ThreadMonitor::get().heartbeat();
+        heartbeat_timer->expires_after(std::chrono::seconds(1));
+        heartbeat_timer->async_wait(*heartbeat_callback);
+      }
+    };
+    heartbeat_timer->expires_after(std::chrono::seconds(1));
+    heartbeat_timer->async_wait(*heartbeat_callback);
+  });
 }
 
 } // namespace HTTPServers

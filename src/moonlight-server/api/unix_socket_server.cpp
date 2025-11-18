@@ -300,6 +300,27 @@ UnixSocketServer::UnixSocketServer(boost::asio::io_context &io_context,
                                "/api/v1/utils/get-icon?icon_path=/etc/wolf/icons/steam.png",
                     .handler = [this](auto req, auto socket) { endpoint_GetIcon(req, socket); }});
 
+  /**
+   * System API
+   */
+  state_->http.add(HTTPMethod::GET,
+                   "/api/v1/system/memory",
+                   {
+                       .summary = "Get Wolf process memory usage",
+                       .description = "Returns process RSS memory, GStreamer buffer estimates, and per-lobby breakdown",
+                       .response_description = {{200, {.json_schema = rfl::json::to_schema<SystemMemoryResponse>()}}},
+                       .handler = [this](auto req, auto socket) { endpoint_SystemMemory(req, socket); },
+                   });
+
+  state_->http.add(HTTPMethod::GET,
+                   "/api/v1/system/health",
+                   {
+                       .summary = "Get Wolf thread health and heartbeat status",
+                       .description = "Returns monitored threads, heartbeat status, and deadlock detection",
+                       .response_description = {{200, {.json_schema = rfl::json::to_schema<SystemHealthResponse>()}}},
+                       .handler = [this](auto req, auto socket) { endpoint_SystemHealth(req, socket); },
+                   });
+
   state_->http.add(
       HTTPMethod::GET,
       "/api/v1/docker/images/inspect",

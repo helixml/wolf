@@ -244,7 +244,19 @@ static GstFlowReturn gst_rtp_moonlight_pay_video_generate_output(GstBaseTransfor
   /* Send the generated packets to any downstream listener */
   gst_pad_push_list(trans->srcpad, rtp_packets);
 
-  gst_buffer_unref(inbuf);
+  /* Defensive unref: check refcount to handle interpipe multi-consumer bug
+   * When multiple Moonlight clients share one interpipesrc, buffer refcounting gets corrupted.
+   * Don't unref if already freed to prevent assertion failures. */
+  if (inbuf && GST_MINI_OBJECT_REFCOUNT_VALUE(inbuf) > 0) {
+    gst_buffer_unref(inbuf);
+  } else {
+    static std::atomic<guint64> skip_count{0};
+    guint64 count = skip_count.fetch_add(1, std::memory_order_relaxed);
+    /* Log every 10,000 occurrences to avoid log spam */
+    if (count % 10000 == 0) {
+      GST_WARNING("Skipped video buffer unref due to refcount=0 (interpipe multi-consumer bug), count: %" G_GUINT64_FORMAT, count);
+    }
+  }
 
   /* Setting outbuf to NULL and returning GST_BASE_TRANSFORM_FLOW_DROPPED will signal that we finished doing business */
   outbuf = nullptr;

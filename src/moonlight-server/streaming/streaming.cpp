@@ -93,7 +93,7 @@ void start_video_producer(const std::string &session_id,
                           std::shared_ptr<events::EventBusType> event_bus) {
   auto pipeline = fmt::format("waylanddisplaysrc name=wolf_wayland_source render_node={render_node} ! "
                               "{buffer_format}, width={width}, height={height}, framerate={fps}/1 ! \n"    //
-                              "interpipesink sync=true async=false name={session_id}_video max-buffers=1", //
+                              "interpipesink sync=true async=false name={session_id}_video max-buffers=5", //
                               fmt::arg("buffer_format", buffer_format),
                               fmt::arg("render_node", render_node),
                               fmt::arg("session_id", session_id),
@@ -105,7 +105,7 @@ void start_video_producer(const std::string &session_id,
       std::make_shared<GstBusData>(GstBusData{.on_ready = std::move(on_ready), .wayland_plugin = nullptr});
   std::shared_ptr<NeedContextData> ctx_data_ptr =
       std::make_shared<NeedContextData>(NeedContextData{.device_path = render_node, .gst_context = video_context});
-  run_pipeline(pipeline, [=](auto pipeline) {
+  run_pipeline(pipeline, [=](auto pipeline, auto loop) {
     logs::log(logs::debug, "Setting up waylanddisplaysrc");
 
     auto wayland_plugin_el = gst_bin_get_by_name(GST_BIN(pipeline.get()), "wolf_wayland_source");
@@ -118,18 +118,18 @@ void start_video_producer(const std::string &session_id,
     gst_object_unref(bus);
 
     auto stop_handler = event_bus->register_handler<immer::box<events::StopStreamEvent>>(
-        [session_id, pipeline](const immer::box<events::StopStreamEvent> &ev) {
+        [session_id, loop](const immer::box<events::StopStreamEvent> &ev) {
           if (std::to_string(ev->session_id) == session_id) {
-            logs::log(logs::debug, "[GSTREAMER] Stopping video producer: {}", session_id);
-            gst_element_send_event(pipeline.get(), gst_event_new_eos());
+            logs::log(logs::debug, "[GSTREAMER] Stopping video producer: {} (quitting main loop)", session_id);
+            g_main_loop_quit(loop.get());  // Thread-safe, avoids abandoned GStreamer mutexes
           }
         });
 
     auto stop_lobby_handler = event_bus->register_handler<immer::box<events::StopLobbyEvent>>(
-        [session_id, pipeline](const immer::box<events::StopLobbyEvent> &ev) {
+        [session_id, loop](const immer::box<events::StopLobbyEvent> &ev) {
           if (ev->lobby_id == session_id) {
-            logs::log(logs::debug, "[GSTREAMER] Stopping video producer: {}", session_id);
-            gst_element_send_event(pipeline.get(), gst_event_new_eos());
+            logs::log(logs::debug, "[GSTREAMER] Stopping video producer: {} (quitting main loop)", session_id);
+            g_main_loop_quit(loop.get());  // Thread-safe, avoids abandoned GStreamer mutexes
           }
         });
 
@@ -168,20 +168,20 @@ void start_audio_producer(const std::string &session_id,
                               fmt::arg("server_name", server_name));
   logs::log(logs::debug, "[GSTREAMER] Starting audio producer: {}", pipeline);
 
-  run_pipeline(pipeline, [=](auto pipeline) {
+  run_pipeline(pipeline, [=](auto pipeline, auto loop) {
     auto stop_handler = event_bus->register_handler<immer::box<events::StopStreamEvent>>(
-        [session_id, pipeline](const immer::box<events::StopStreamEvent> &ev) {
+        [session_id, loop](const immer::box<events::StopStreamEvent> &ev) {
           if (std::to_string(ev->session_id) == session_id) {
-            logs::log(logs::debug, "[GSTREAMER] Stopping audio producer: {}", session_id);
-            gst_element_send_event(pipeline.get(), gst_event_new_eos());
+            logs::log(logs::debug, "[GSTREAMER] Stopping audio producer: {} (quitting main loop)", session_id);
+            g_main_loop_quit(loop.get());  // Thread-safe, avoids abandoned GStreamer mutexes
           }
         });
 
     auto stop_lobby_handler = event_bus->register_handler<immer::box<events::StopLobbyEvent>>(
-        [session_id, pipeline](const immer::box<events::StopLobbyEvent> &ev) {
+        [session_id, loop](const immer::box<events::StopLobbyEvent> &ev) {
           if (ev->lobby_id == session_id) {
-            logs::log(logs::debug, "[GSTREAMER] Stopping video producer: {}", session_id);
-            gst_element_send_event(pipeline.get(), gst_event_new_eos());
+            logs::log(logs::debug, "[GSTREAMER] Stopping audio producer: {} (quitting main loop)", session_id);
+            g_main_loop_quit(loop.get());  // Thread-safe, avoids abandoned GStreamer mutexes
           }
         });
 
@@ -292,7 +292,7 @@ void start_streaming_video(immer::box<events::VideoSession> video_session,
       .client_endpoint = std::make_shared<udp::endpoint>(boost::asio::ip::make_address(client_ip), client_port)});
   std::shared_ptr<NeedContextData> ctx_data_ptr = std::make_shared<NeedContextData>(
       NeedContextData{.device_path = video_session->render_node, .gst_context = video_context});
-  run_pipeline(pipeline, [video_session, event_bus, udp_sink, ctx_data_ptr](auto pipeline) {
+  run_pipeline(pipeline, [video_session, event_bus, udp_sink, ctx_data_ptr](auto pipeline, auto loop) {
     if (auto app_sink_el = gst_bin_get_by_name(GST_BIN(pipeline.get()), "wolf_udp_sink")) {
       logs::log(logs::debug, "Setting up wolf_udp_sink");
       g_assert(GST_IS_APP_SINK(app_sink_el));
@@ -302,7 +302,43 @@ void start_streaming_video(immer::box<events::VideoSession> video_session,
 
     auto bus = gst_pipeline_get_bus(GST_PIPELINE(pipeline.get()));
     gst_bus_set_sync_handler(bus, bus_sync_handler, ctx_data_ptr.get(), nullptr);
+
+    // Bus message handler for switch-interpipe-src (runs in pipeline thread - safe for g_object_set)
+    auto sess_id_for_handler = video_session->session_id;
+    g_signal_connect(bus, "message::application", G_CALLBACK(+[](GstBus*, GstMessage* msg, gpointer user_data) {
+      const GstStructure* s = gst_message_get_structure(msg);
+      if (gst_structure_has_name(s, "switch-interpipe-src")) {
+        guint session_id;
+        const char* interpipe_id;
+        if (gst_structure_get_uint(s, "session-id", &session_id) &&
+            (interpipe_id = gst_structure_get_string(s, "interpipe-id"))) {
+
+          logs::log(logs::warning, "[HANG_DEBUG] Pipeline thread handling switch-interpipe-src: session {}, target {}", session_id, interpipe_id);
+
+          /* NOW we're in the pipeline thread - safe to call g_object_set */
+          auto pipe_name = fmt::format("interpipesrc_{}_video", session_id);
+          auto pipeline_ptr = GST_ELEMENT(GST_MESSAGE_SRC(msg));
+          if (auto src = gst_bin_get_by_name(GST_BIN(pipeline_ptr), pipe_name.c_str())) {
+            logs::log(logs::warning, "[HANG_DEBUG] Switching interpipesrc listen-to: {} → {}", pipe_name, interpipe_id);
+
+            // Set allow-renegotiation to true to handle resolution changes
+            g_object_set(src, "allow-renegotiation", TRUE, nullptr);
+            g_object_set(src, "listen-to", interpipe_id, nullptr);
+
+            logs::log(logs::warning, "[HANG_DEBUG] Unrefing interpipesrc element");
+            gst_object_unref(src);
+            logs::log(logs::warning, "[HANG_DEBUG] Switch complete for session {}", session_id);
+          } else {
+            logs::log(logs::error, "[GSTREAMER] Failed to get video interpipesrc for {}", session_id);
+          }
+        }
+      }
+    }), &sess_id_for_handler);
+
     gst_object_unref(bus);
+
+    // Guard against duplicate pause events
+    auto pause_sent = std::make_shared<bool>(false);
 
     /*
      * The force IDR event will be triggered by the control stream.
@@ -322,9 +358,16 @@ void start_streaming_video(immer::box<events::VideoSession> video_session,
         });
 
     auto pause_handler = event_bus->register_handler<immer::box<events::PauseStreamEvent>>(
-        [sess_id = video_session->session_id, pipeline](const immer::box<events::PauseStreamEvent> &ev) {
+        [sess_id = video_session->session_id, loop, pause_sent](const immer::box<events::PauseStreamEvent> &ev) {
           if (ev->session_id == sess_id) {
-            logs::log(logs::debug, "[GSTREAMER] Pausing pipeline: {}", sess_id);
+            // Guard against duplicate pause events (bug fix for upstream issue)
+            if (*pause_sent) {
+              logs::log(logs::warning, "[HANG_DEBUG] Video PauseStreamEvent DUPLICATE IGNORED for session {}", sess_id);
+              return;
+            }
+            *pause_sent = true;
+
+            logs::log(logs::warning, "[HANG_DEBUG] Video PauseStreamEvent for session {} (quitting main loop)", sess_id);
 
             /**
              * Unfortunately here we can't just pause the pipeline,
@@ -338,36 +381,56 @@ void start_streaming_video(immer::box<events::VideoSession> video_session,
              * when a resume happens
              */
 
-            gst_element_send_event(pipeline.get(), gst_event_new_eos());
+            g_main_loop_quit(loop.get());  // Thread-safe, avoids abandoned GStreamer mutexes
           }
         });
 
+    // Guard against duplicate switch events (same as pause guard fix)
+    auto last_video_switch = std::make_shared<std::string>("");
+
     auto switch_producer_handler = event_bus->register_handler<immer::box<events::SwitchStreamProducerEvents>>(
         [sess_id = video_session->session_id,
-         pipeline](const immer::box<events::SwitchStreamProducerEvents> &switch_ev) {
+         pipeline, last_video_switch](const immer::box<events::SwitchStreamProducerEvents> &switch_ev) {
           if (switch_ev->session_id == sess_id) {
-            logs::log(logs::debug,
-                      "[GSTREAMER] Switching video producer pipeline for {} to {}",
-                      sess_id,
-                      switch_ev->interpipe_src_id);
-            /* Grab a reference to the interpipesrc */
-            auto pipe_name = fmt::format("interpipesrc_{}_video", sess_id);
-            if (auto src = gst_bin_get_by_name(GST_BIN(pipeline.get()), pipe_name.c_str())) {
-              /* Perform the switch */
-              auto video_interpipe = fmt::format("{}_video", switch_ev->interpipe_src_id);
-              g_object_set(src, "listen-to", video_interpipe.c_str(), nullptr);
-              gst_object_unref(src);
-            } else {
-              logs::log(logs::error, "[GSTREAMER] Failed to get video interpipesrc for {}", sess_id);
+            // Guard against duplicate switch events to same destination
+            if (*last_video_switch == switch_ev->interpipe_src_id) {
+              logs::log(logs::warning, "[HANG_DEBUG] Video SwitchStreamProducerEvents DUPLICATE IGNORED: session {} already switched to {}", sess_id, switch_ev->interpipe_src_id);
+              return;
             }
+
+            // Update last_video_switch IMMEDIATELY to prevent race conditions
+            *last_video_switch = switch_ev->interpipe_src_id;
+
+            auto state = GST_STATE(pipeline.get());
+            logs::log(logs::warning,
+                      "[HANG_DEBUG] Video SwitchStreamProducerEvents: session {} switching to {}, pipeline state: {}",
+                      sess_id,
+                      switch_ev->interpipe_src_id,
+                      gst_element_state_get_name(state));
+
+            /* DEADLOCK FIX: Post message to pipeline bus instead of calling g_object_set directly
+             * Problem: g_object_set acquires global GLib type lock - if this thread crashes while
+             * holding it, ALL pipeline creation blocks (can't create new sessions).
+             * Solution: Post application message to pipeline's bus, let pipeline thread handle it.
+             * Pipeline thread owns the GMainContext, so g_object_set runs in the right thread.
+             */
+            auto video_interpipe = fmt::format("{}_video", switch_ev->interpipe_src_id);
+            logs::log(logs::warning, "[HANG_DEBUG] Posting switch-interpipe-src message to pipeline bus: {}", video_interpipe);
+
+            gst_element_post_message(pipeline.get(),
+              gst_message_new_application(GST_OBJECT(pipeline.get()),
+                gst_structure_new("switch-interpipe-src",
+                  "session-id", G_TYPE_UINT, sess_id,
+                  "interpipe-id", G_TYPE_STRING, video_interpipe.c_str(),
+                  nullptr)));
           }
         });
 
     auto stop_handler = event_bus->register_handler<immer::box<events::StopStreamEvent>>(
-        [sess_id = video_session->session_id, pipeline](const immer::box<events::StopStreamEvent> &ev) {
+        [sess_id = video_session->session_id, loop](const immer::box<events::StopStreamEvent> &ev) {
           if (ev->session_id == sess_id) {
-            logs::log(logs::debug, "[GSTREAMER] Stopping pipeline: {}", sess_id);
-            gst_element_send_event(pipeline.get(), gst_event_new_eos());
+            logs::log(logs::debug, "[GSTREAMER] Stopping pipeline: {} (quitting main loop)", sess_id);
+            g_main_loop_quit(loop.get());  // Thread-safe, avoids abandoned GStreamer mutexes
           }
         });
 
@@ -412,7 +475,7 @@ void start_streaming_audio(immer::box<events::AudioSession> audio_session,
       .socket = audio_socket,
       .client_endpoint = std::make_shared<udp::endpoint>(boost::asio::ip::make_address(client_ip), client_port)});
 
-  run_pipeline(pipeline, [session_id = audio_session->session_id, udp_sink, event_bus](auto pipeline) {
+  run_pipeline(pipeline, [session_id = audio_session->session_id, udp_sink, event_bus](auto pipeline, auto loop) {
     if (auto app_sink_el = gst_bin_get_by_name(GST_BIN(pipeline.get()), "wolf_udp_sink")) {
       logs::log(logs::debug, "Setting up wolf_udp_sink");
       g_assert(GST_IS_APP_SINK(app_sink_el));
@@ -420,10 +483,51 @@ void start_streaming_audio(immer::box<events::AudioSession> audio_session,
       gst_object_unref(app_sink_el);
     }
 
+    // Bus message handler for switch-interpipe-src-audio (runs in pipeline thread - safe for g_object_set)
+    auto bus = gst_pipeline_get_bus(GST_PIPELINE(pipeline.get()));
+    g_signal_connect(bus, "message::application", G_CALLBACK(+[](GstBus*, GstMessage* msg, gpointer user_data) {
+      const GstStructure* s = gst_message_get_structure(msg);
+      if (gst_structure_has_name(s, "switch-interpipe-src-audio")) {
+        guint session_id;
+        const char* interpipe_id;
+        if (gst_structure_get_uint(s, "session-id", &session_id) &&
+            (interpipe_id = gst_structure_get_string(s, "interpipe-id"))) {
+
+          logs::log(logs::warning, "[HANG_DEBUG] Audio pipeline thread handling switch-interpipe-src: session {}, target {}", session_id, interpipe_id);
+
+          /* NOW we're in the pipeline thread - safe to call g_object_set */
+          auto pipe_name = fmt::format("interpipesrc_{}_audio", session_id);
+          auto pipeline_ptr = GST_ELEMENT(GST_MESSAGE_SRC(msg));
+          if (auto src = gst_bin_get_by_name(GST_BIN(pipeline_ptr), pipe_name.c_str())) {
+            logs::log(logs::warning, "[HANG_DEBUG] Switching audio interpipesrc listen-to: {} → {}", pipe_name, interpipe_id);
+
+            g_object_set(src, "listen-to", interpipe_id, nullptr);
+
+            logs::log(logs::warning, "[HANG_DEBUG] Unrefing audio interpipesrc element");
+            gst_object_unref(src);
+            logs::log(logs::warning, "[HANG_DEBUG] Audio switch complete for session {}", session_id);
+          } else {
+            logs::log(logs::error, "[GSTREAMER] Failed to get audio interpipesrc for {}", session_id);
+          }
+        }
+      }
+    }), nullptr);
+    gst_object_unref(bus);
+
+    // Guard against duplicate pause events
+    auto pause_sent = std::make_shared<bool>(false);
+
     auto pause_handler = event_bus->register_handler<immer::box<events::PauseStreamEvent>>(
-        [session_id, pipeline](const immer::box<events::PauseStreamEvent> &ev) {
+        [session_id, loop, pause_sent](const immer::box<events::PauseStreamEvent> &ev) {
           if (ev->session_id == session_id) {
-            logs::log(logs::debug, "[GSTREAMER] Pausing pipeline: {}", session_id);
+            // Guard against duplicate pause events (bug fix for upstream issue)
+            if (*pause_sent) {
+              logs::log(logs::warning, "[HANG_DEBUG] Audio PauseStreamEvent DUPLICATE IGNORED for session {}", session_id);
+              return;
+            }
+            *pause_sent = true;
+
+            logs::log(logs::warning, "[HANG_DEBUG] Audio PauseStreamEvent for session {} (quitting main loop)", session_id);
 
             /**
              * Unfortunately here we can't just pause the pipeline,
@@ -437,35 +541,50 @@ void start_streaming_audio(immer::box<events::AudioSession> audio_session,
              * when a resume happens
              */
 
-            gst_element_send_event(pipeline.get(), gst_event_new_eos());
+            g_main_loop_quit(loop.get());  // Thread-safe, avoids abandoned GStreamer mutexes
           }
         });
 
+    // Guard against duplicate switch events (same as pause guard fix)
+    auto last_audio_switch = std::make_shared<std::string>("");
+
     auto switch_producer_handler = event_bus->register_handler<immer::box<events::SwitchStreamProducerEvents>>(
-        [session_id, pipeline](const immer::box<events::SwitchStreamProducerEvents> &switch_ev) {
+        [session_id, pipeline, last_audio_switch](const immer::box<events::SwitchStreamProducerEvents> &switch_ev) {
           if (switch_ev->session_id == session_id) {
+            // Guard against duplicate switch events to same destination
+            if (*last_audio_switch == switch_ev->interpipe_src_id) {
+              logs::log(logs::warning, "[HANG_DEBUG] Audio SwitchStreamProducerEvents DUPLICATE IGNORED: session {} already switched to {}", session_id, switch_ev->interpipe_src_id);
+              return;
+            }
+
+            // Update last_audio_switch IMMEDIATELY to prevent race conditions
+            *last_audio_switch = switch_ev->interpipe_src_id;
+
             logs::log(logs::debug,
                       "[GSTREAMER] Switching audio producer for {} to {}",
                       session_id,
                       switch_ev->interpipe_src_id);
 
-            auto pipe_name = fmt::format("interpipesrc_{}_audio", session_id);
-            if (auto src = gst_bin_get_by_name(GST_BIN(pipeline.get()), pipe_name.c_str())) {
-              /* Perform the switch */
-              auto audio_interpipe = fmt::format("{}_audio", switch_ev->interpipe_src_id);
-              g_object_set(src, "listen-to", audio_interpipe.c_str(), nullptr);
-              gst_object_unref(src);
-            } else {
-              logs::log(logs::error, "[GSTREAMER] Failed to get audio interpipesrc for {}", session_id);
-            }
+            /* DEADLOCK FIX: Post message to pipeline bus instead of calling g_object_set directly
+             * Same fix as video pipeline - prevents global GLib type lock deadlock
+             */
+            auto audio_interpipe = fmt::format("{}_audio", switch_ev->interpipe_src_id);
+            logs::log(logs::warning, "[HANG_DEBUG] Posting switch-interpipe-src-audio message to pipeline bus: {}", audio_interpipe);
+
+            gst_element_post_message(pipeline.get(),
+              gst_message_new_application(GST_OBJECT(pipeline.get()),
+                gst_structure_new("switch-interpipe-src-audio",
+                  "session-id", G_TYPE_UINT, session_id,
+                  "interpipe-id", G_TYPE_STRING, audio_interpipe.c_str(),
+                  nullptr)));
           }
         });
 
     auto stop_handler = event_bus->register_handler<immer::box<events::StopStreamEvent>>(
-        [session_id, pipeline](const immer::box<events::StopStreamEvent> &ev) {
+        [session_id, loop](const immer::box<events::StopStreamEvent> &ev) {
           if (ev->session_id == session_id) {
-            logs::log(logs::debug, "[GSTREAMER] Stopping pipeline: {}", session_id);
-            gst_element_send_event(pipeline.get(), gst_event_new_eos());
+            logs::log(logs::debug, "[GSTREAMER] Stopping pipeline: {} (quitting main loop)", session_id);
+            g_main_loop_quit(loop.get());  // Thread-safe, avoids abandoned GStreamer mutexes
           }
         });
 

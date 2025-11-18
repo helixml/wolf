@@ -149,11 +149,13 @@ XML applist(const immer::vector<App> &apps);
 /**
  * After the user selects an app to launch we have to negotiate the IP and PORT for the RTSP session
  *
- * @param config: local state
- * @return:
+ * @param local_ip: The local IP address for the RTSP session
+ * @param rtsp_port: The RTSP port for the session
+ * @param client_id: Wolf's session_id (as string) for auto-join functionality
+ * @return: XML response with session URL and client_id
  */
-XML launch_success(const std::string &local_ip, const std::string &rtsp_port);
+XML launch_success(const std::string &local_ip, const std::string &rtsp_port, const std::string &client_id);
 // TODO: launch_error()
 
-XML launch_resume(const std::string &local_ip, const std::string &rtsp_port);
+XML launch_resume(const std::string &local_ip, const std::string &rtsp_port, const std::string &client_id);
 } // namespace moonlight

@@ -1,10 +1,14 @@
 #include <api/api.hpp>
 #include <control/input_handler.hpp>
 #include <core/docker.hpp>
+#include <monitoring/thread-monitor.hpp>
 #include <rtp/udp-ping.hpp>
 #include <state/config.hpp>
 #include <state/sessions.hpp>
 #include <state/utils.hpp>
+#include <chrono>
+#include <fstream>
+#include <sstream>
 
 namespace wolf::api {
 
@@ -99,14 +103,36 @@ void UnixSocketServer::endpoint_Apps(const HTTPRequest &req, std::shared_ptr<Uni
 void UnixSocketServer::endpoint_AddApp(const HTTPRequest &req, std::shared_ptr<UnixSocket> socket) {
   auto app = rfl::json::read<rfl::Reflector<events::App>::ReflType>(req.body);
   if (app) {
+    // Compute pipeline defaults if not provided in request
+    // This ensures API apps get correct pipelines based on GPU vendor and WOLF_USE_ZERO_COPY
+    auto defaults = state::compute_pipeline_defaults(this->state_->app_state->config->config_source);
+
+    // Apply defaults to empty pipeline fields
+    auto app_with_defaults = app.value();
+    if (!app_with_defaults.video_producer_buffer_caps || app_with_defaults.video_producer_buffer_caps->empty()) {
+      app_with_defaults.video_producer_buffer_caps = defaults.video_producer_buffer_caps;
+    }
+    if (!app_with_defaults.h264_gst_pipeline || app_with_defaults.h264_gst_pipeline->empty()) {
+      app_with_defaults.h264_gst_pipeline = defaults.h264_gst_pipeline;
+    }
+    if (!app_with_defaults.hevc_gst_pipeline || app_with_defaults.hevc_gst_pipeline->empty()) {
+      app_with_defaults.hevc_gst_pipeline = defaults.hevc_gst_pipeline;
+    }
+    if (!app_with_defaults.av1_gst_pipeline || app_with_defaults.av1_gst_pipeline->empty()) {
+      app_with_defaults.av1_gst_pipeline = defaults.av1_gst_pipeline;
+    }
+    if (!app_with_defaults.opus_gst_pipeline || app_with_defaults.opus_gst_pipeline->empty()) {
+      app_with_defaults.opus_gst_pipeline = defaults.opus_gst_pipeline;
+    }
+
     auto profiles = state_->app_state->config->profiles->load().get();
     state::update_profiles(
         state_->app_state->config,
         profiles | //
-            ranges::views::transform([app = app.value(), this](const immer::box<events::Profile> &profile) {
+            ranges::views::transform([app_with_defaults, this](const immer::box<events::Profile> &profile) {
               if (profile->id == events::MOONLIGHT_PROFILE_ID) {
-                profile->apps->update([app, this](auto &apps) {
-                  return apps.push_back(rfl::Reflector<events::App>::to(app, this->state_->app_state->event_bus));
+                profile->apps->update([app_with_defaults, this](auto &apps) {
+                  return apps.push_back(rfl::Reflector<events::App>::to(app_with_defaults, this->state_->app_state->event_bus));
                 });
               }
               return profile;
@@ -238,7 +264,8 @@ void UnixSocketServer::endpoint_StreamSessionAdd(const HTTPRequest &req, std::sh
                                .av1_supported = state_->app_state->config->support_av1},
         ss.audio_channel_count,
         ss.aes_key,
-        ss.aes_iv);
+        ss.aes_iv,
+        "");  // client_unique_id defaults to empty for Unix socket API (only HTTPS endpoints populate this)
     new_session->ip = ss.client_ip;
     new_session->rtsp_fake_ip = ss.rtsp_fake_ip;
 
@@ -612,6 +639,296 @@ void UnixSocketServer::endpoint_DockerPullImage(const HTTPRequest &req, std::sha
       }
     }).detach();
   }
+}
+
+// Cache for GPU stats to prevent spamming nvidia-smi
+// nvidia-smi can be slow (50-200ms), so we cache for 2 seconds
+static std::optional<GPUStats> cached_gpu_stats;
+static std::chrono::steady_clock::time_point last_gpu_query_time;
+static const std::chrono::seconds GPU_CACHE_DURATION{2};
+
+GPUStats queryGPUStats() {
+  auto now = std::chrono::steady_clock::now();
+
+  // Return cached stats if less than 2 seconds old
+  if (cached_gpu_stats.has_value() &&
+      (now - last_gpu_query_time) < GPU_CACHE_DURATION) {
+    return *cached_gpu_stats;
+  }
+
+  GPUStats stats{};
+  auto query_start = std::chrono::steady_clock::now();
+
+  // Execute nvidia-smi to query GPU metrics
+  // Query: name,encoder.stats.sessionCount,encoder.stats.averageFps,encoder.stats.averageLatency,
+  //        utilization.encoder,utilization.gpu,utilization.memory,memory.used,memory.total,temperature.gpu
+  std::string cmd = "nvidia-smi --query-gpu=name,encoder.stats.sessionCount,encoder.stats.averageFps,"
+                    "encoder.stats.averageLatency,utilization.encoder,utilization.gpu,utilization.memory,"
+                    "memory.used,memory.total,temperature.gpu --format=csv,noheader,nounits";
+
+  std::array<char, 512> buffer{};
+  std::string result;
+
+  FILE* pipe = popen(cmd.c_str(), "r");
+  if (!pipe) {
+    stats.error = "Failed to execute nvidia-smi";
+    stats.available = false;
+    cached_gpu_stats = stats;
+    last_gpu_query_time = now;
+    return stats;
+  }
+
+  while (fgets(buffer.data(), buffer.size(), pipe) != nullptr) {
+    result += buffer.data();
+  }
+
+  int return_code = pclose(pipe);
+
+  auto query_end = std::chrono::steady_clock::now();
+  stats.query_duration_ms = std::chrono::duration_cast<std::chrono::milliseconds>(query_end - query_start).count();
+
+  if (return_code != 0) {
+    stats.error = fmt::format("nvidia-smi exited with code {}", return_code);
+    stats.available = false;
+    cached_gpu_stats = stats;
+    last_gpu_query_time = now;
+    return stats;
+  }
+
+  // Parse CSV output
+  std::istringstream iss(result);
+  std::string field;
+  std::vector<std::string> fields;
+
+  while (std::getline(iss, field, ',')) {
+    // Trim whitespace
+    field.erase(0, field.find_first_not_of(" \t\r\n"));
+    field.erase(field.find_last_not_of(" \t\r\n") + 1);
+    fields.push_back(field);
+  }
+
+  if (fields.size() != 10) {
+    stats.error = fmt::format("Unexpected nvidia-smi output: expected 10 fields, got {}", fields.size());
+    stats.available = false;
+    cached_gpu_stats = stats;
+    last_gpu_query_time = now;
+    return stats;
+  }
+
+  // Parse fields
+  stats.gpu_name = fields[0];
+  stats.encoder_session_count = std::stoi(fields[1]);
+  stats.encoder_average_fps = std::stod(fields[2]);
+  stats.encoder_average_latency_us = std::stoi(fields[3]);
+  stats.encoder_utilization_percent = std::stoi(fields[4]);
+  stats.gpu_utilization_percent = std::stoi(fields[5]);
+  stats.memory_utilization_percent = std::stoi(fields[6]);
+  stats.memory_used_mb = std::stoi(fields[7]);
+  stats.memory_total_mb = std::stoi(fields[8]);
+  stats.temperature_celsius = std::stoi(fields[9]);
+  stats.available = true;
+
+  logs::log(logs::debug, "[GPU] nvidia-smi query took {}ms: {} NVENC sessions active",
+            stats.query_duration_ms, stats.encoder_session_count);
+
+  // Cache the result
+  cached_gpu_stats = stats;
+  last_gpu_query_time = now;
+
+  return stats;
+}
+
+void UnixSocketServer::endpoint_SystemMemory(const HTTPRequest &req, std::shared_ptr<UnixSocket> socket) {
+  auto res = SystemMemoryResponse{};
+
+  // Read process RSS memory from /proc/self/status
+  std::ifstream status_file("/proc/self/status");
+  std::string line;
+  size_t rss_kb = 0;
+
+  while (std::getline(status_file, line)) {
+    if (line.find("VmRSS:") == 0) {
+      // Extract RSS value in kB
+      std::istringstream iss(line);
+      std::string label;
+      iss >> label >> rss_kb; // Format: "VmRSS:     123456 kB"
+      break;
+    }
+  }
+
+  res.process_rss_bytes = rss_kb * 1024; // Convert kB to bytes
+
+  // Get apps from moonlight profile for backwards compatibility with stable-moonlight-web frontend
+  auto moonlight_profile = state::get_moonlight_profile(state_->app_state->config);
+  if (moonlight_profile) {
+    immer::vector<immer::box<events::App>> apps = moonlight_profile.value()->apps->load();
+    for (const immer::box<events::App> &app_box : apps) {
+      const events::App &app = *app_box;
+      // Apps don't have streaming sessions directly in lobbies mode, so set client_count to 0
+      res.apps.push_back(AppMemoryUsage{
+        .app_id = app.base.id,
+        .app_name = app.base.title,
+        .resolution = "N/A", // Apps don't stream directly in lobbies mode
+        .client_count = 0,
+        .memory_bytes = 0
+      });
+    }
+  }
+
+  // Get lobbies and calculate per-lobby memory breakdown
+  immer::vector<events::Lobby> lobbies = state_->app_state->lobbies->load();
+  size_t total_lobby_memory = 0;
+
+  for (const events::Lobby &lobby : lobbies) {
+    auto connected_sessions = lobby.connected_sessions->load();
+    size_t client_count = connected_sessions.get().size();
+
+    // Estimate memory per lobby based on resolution and client count
+    // Formula: base overhead + (width * height * bytes_per_pixel * buffer_count) + (client_count * transcoding_overhead)
+    // Rough estimates:
+    // - Base overhead per lobby: ~50 MB (wayland display, audio sink, runner state)
+    // - Video buffer: width * height * 4 bytes (RGBA) * 3 buffers
+    // - Per-client transcoding: ~20 MB per client (encoder state, RTP buffers)
+
+    size_t base_overhead = 50 * 1024 * 1024; // 50 MB
+
+    // Get actual video settings from lobby
+    int width = lobby.video_settings.width;
+    int height = lobby.video_settings.height;
+    int fps = lobby.video_settings.refresh_rate;
+
+    size_t video_buffers = width * height * 4 * 3; // RGBA * 3 buffers
+    size_t client_overhead = client_count * 20 * 1024 * 1024; // 20 MB per client
+
+    size_t lobby_memory = base_overhead + video_buffers + client_overhead;
+    total_lobby_memory += lobby_memory;
+
+    std::string resolution_str = std::to_string(width) + "x" + std::to_string(height) + "@" + std::to_string(fps);
+
+    res.lobbies.push_back(LobbyMemoryUsage{
+      .lobby_id = lobby.id,
+      .lobby_name = lobby.name,
+      .resolution = resolution_str,
+      .client_count = client_count,
+      .memory_bytes = lobby_memory
+    });
+  }
+
+  // Iterate over ALL client connections (StreamSessions) for leak detection
+  immer::vector<events::StreamSession> sessions = state_->app_state->running_sessions->load();
+  for (const events::StreamSession &session : sessions) {
+    // Estimate memory per client connection
+    // - Base client overhead: ~10 MB (session state, buffers)
+    // - Video encoder state: ~15 MB
+    // - Audio encoder state: ~5 MB
+    // - Per-client total: ~30 MB
+    size_t client_memory = 30 * 1024 * 1024;
+
+    // Check if this client is connected to a lobby
+    std::optional<std::string> lobby_id;
+    auto lobby = state::get_lobby_by_connected_session(lobbies, std::to_string(session.session_id));
+    if (lobby) {
+      lobby_id = lobby->id;
+    }
+
+    // Get client resolution from display_mode
+    std::string client_resolution = std::to_string(session.display_mode.width) + "x" +
+                                   std::to_string(session.display_mode.height) + "@" +
+                                   std::to_string(session.display_mode.refreshRate);
+
+    // For compatibility: provide both lobby_id (wolf-ui) and app_id (stable-moonlight-web)
+    std::optional<std::string> app_id;
+    if (session.app) {
+      app_id = session.app->base.id;
+    }
+
+    res.clients.push_back(ClientConnectionInfo{
+      .session_id = session.session_id,
+      .client_ip = session.ip,
+      .resolution = client_resolution,
+      .lobby_id = lobby_id,
+      .app_id = app_id,
+      .memory_bytes = client_memory
+    });
+  }
+
+  // GStreamer buffer estimate (rough approximation)
+  // This includes interpipe buffers, encoder buffers, RTP buffers
+  res.gstreamer_buffer_bytes = total_lobby_memory / 2; // Rough estimate: ~50% of lobby memory is GStreamer buffers
+
+  res.total_memory_bytes = res.process_rss_bytes;
+
+  // Count actual GStreamer pipelines from state (not estimated)
+  // Each lobby has 2 pipelines: video producer + audio producer
+  // Each session has 2 pipelines: video consumer + audio consumer
+  GStreamerPipelineStats pipeline_stats{};
+  pipeline_stats.producer_pipelines = lobbies.size() * 2;
+  pipeline_stats.consumer_pipelines = sessions.size() * 2;
+  pipeline_stats.total_pipelines = pipeline_stats.producer_pipelines + pipeline_stats.consumer_pipelines;
+  res.gstreamer_pipelines = pipeline_stats;
+
+  // Query GPU stats via nvidia-smi (with caching to prevent spam)
+  res.gpu_stats = queryGPUStats();
+
+  send_http(socket, 200, rfl::json::write(res));
+}
+
+void UnixSocketServer::endpoint_SystemHealth(const HTTPRequest &req, std::shared_ptr<UnixSocket> socket) {
+  auto res = SystemHealthResponse{};
+
+  // Calculate process uptime
+  static auto process_start_time = std::chrono::steady_clock::now();
+  auto now = std::chrono::steady_clock::now();
+  res.process_uptime_seconds = std::chrono::duration_cast<std::chrono::seconds>(now - process_start_time).count();
+
+  // Get thread health from monitor
+  auto thread_statuses = wolf::monitoring::ThreadMonitor::get().get_all_threads();
+
+  for (const auto& status : thread_statuses) {
+    res.threads.push_back(ThreadHealthInfo{
+      .tid = status.tid,
+      .name = status.name,
+      .details = status.pipeline_desc,
+      .seconds_since_heartbeat = status.seconds_since_heartbeat,
+      .seconds_alive = status.seconds_alive,
+      .heartbeat_count = status.heartbeat_count,
+      .is_stuck = status.is_stuck,
+      .current_request_path = status.current_request_path,
+      .request_duration_seconds = status.request_duration_seconds,
+      .has_active_request = status.has_active_request,
+      .stack_trace = status.stack_trace
+    });
+  }
+
+  res.total_thread_count = res.threads.size();
+  res.stuck_thread_count = 0;
+  for (const auto& t : res.threads) {
+    if (t.is_stuck) {
+      res.stuck_thread_count++;
+    }
+  }
+
+  // Test if new pipelines can be created (real deadlock detection)
+  // Production deadlocked with only 35% threads stuck, but new sessions couldn't start
+  // This test detects the ACTUAL failure: global GLib type lock held
+  res.can_create_new_pipelines = wolf::monitoring::ThreadMonitor::can_create_new_pipelines();
+
+  // Determine overall status based on pipeline creation test (not thread percentage)
+  // If pipeline creation fails → CRITICAL (new sessions won't work)
+  // Thread stuck count is just context
+  if (!res.can_create_new_pipelines) {
+    res.overall_status = "critical";  // Type lock held - new sessions blocked
+  } else if (res.stuck_thread_count == 0) {
+    res.overall_status = "healthy";
+  } else {
+    res.overall_status = "degraded";  // Some threads stuck, but new sessions OK
+  }
+
+  logs::log(logs::debug, "[HEALTH] Status={} threads={} stuck={} pipelines={}",
+            res.overall_status, res.total_thread_count, res.stuck_thread_count,
+            res.can_create_new_pipelines ? "OK" : "BLOCKED");
+
+  send_http(socket, 200, rfl::json::write(res));
 }
 
 } // namespace wolf::api

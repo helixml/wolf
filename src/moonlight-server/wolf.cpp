@@ -7,6 +7,7 @@
 #include <csignal>
 #include <exceptions/exceptions.h>
 #include <filesystem>
+#include <fstream>
 #include <immer/array_transient.hpp>
 #include <immer/map_transient.hpp>
 #include <immer/vector_transient.hpp>
@@ -14,11 +15,14 @@
 #include <mdns_cpp/logger.hpp>
 #include <mdns_cpp/mdns.hpp>
 #include <memory>
+#include <monitoring/thread-monitor.hpp>
 #include <rest/rest.hpp>
 #include <rtsp/net.hpp>
 #include <sessions/handlers.hpp>
 #include <state/config.hpp>
 #include <streaming/streaming.hpp>
+#include <sys/wait.h>
+#include <unistd.h>
 #include <vector>
 
 namespace ba = boost::asio;
@@ -159,6 +163,257 @@ std::optional<sessions::AudioServer> setup_audio_server(const std::string &host_
 }
 
 /**
+ * @brief Deadlock watchdog - monitors system health and dumps debug info on critical status
+ *
+ * Runs in separate thread, polls ThreadMonitor every 30s.
+ * If system is critical (stuck threads) for >60s:
+ * 1. Fork child process (timeout protection - if debug gathering deadlocks, child dies after 60s)
+ * 2. Write thread dump, generate core dump (timestamped files in /var/wolf-debug-dumps/)
+ * 3. Exit main process for Docker restart
+ */
+void start_watchdog() {
+  std::thread([]() {
+    using namespace std::chrono;
+
+    const seconds CHECK_INTERVAL{30};
+    const seconds CRITICAL_THRESHOLD{60};
+    std::optional<steady_clock::time_point> critical_since;
+
+    logs::log(logs::info, "[WATCHDOG] Started monitoring system health");
+
+    while (true) {
+      std::this_thread::sleep_for(CHECK_INTERVAL);
+
+      // Test if new pipelines can be created (real failure condition)
+      // Production deadlocked with only 35% threads stuck, but new sessions couldn't start
+      bool pipelines_work = wolf::monitoring::ThreadMonitor::can_create_new_pipelines();
+
+      // Also check stuck thread count for context
+      auto thread_statuses = wolf::monitoring::ThreadMonitor::get().get_all_threads();
+      int stuck_count = 0;
+      for (const auto& status : thread_statuses) {
+        if (status.is_stuck) {
+          stuck_count++;
+        }
+      }
+
+      // CRITICAL if: pipeline creation fails (type lock held)
+      // Thread count is just for logging context
+      bool is_critical = !pipelines_work;
+
+      if (is_critical) {
+        if (!critical_since) {
+          critical_since = steady_clock::now();
+          logs::log(logs::error,
+                    "[WATCHDOG] System entered CRITICAL state: pipeline creation FAILED (type lock held) - {}/{} threads stuck",
+                    stuck_count, thread_statuses.size());
+        }
+
+        auto critical_duration = steady_clock::now() - *critical_since;
+        if (critical_duration >= CRITICAL_THRESHOLD) {
+          logs::log(logs::fatal,
+                    "[WATCHDOG] System CRITICAL for {}s - gathering debug info and exiting",
+                    duration_cast<seconds>(critical_duration).count());
+
+          // Fork child process for debug gathering (timeout protection)
+          pid_t child_pid = fork();
+
+          if (child_pid == 0) {
+            // CHILD PROCESS: Gather debug info with 60s timeout
+            alarm(60); // Kill child if debug gathering hangs
+
+            try {
+              auto now = system_clock::now();
+              auto timestamp = duration_cast<seconds>(now.time_since_epoch()).count();
+              std::string debug_dir = "/var/wolf-debug-dumps";
+              std::string prefix = fmt::format("{}/{}", debug_dir, timestamp);
+
+              // Create debug dumps directory
+              std::filesystem::create_directories(debug_dir);
+
+              // 1. Write thread dump
+              std::ofstream thread_dump(prefix + "-threads.txt");
+              thread_dump << fmt::format("Wolf Deadlock Debug Dump - {}\n", timestamp);
+              thread_dump << fmt::format("Critical for: {}s\n", duration_cast<seconds>(critical_duration).count());
+              thread_dump << fmt::format("Stuck threads: {}/{}\n\n", stuck_count, thread_statuses.size());
+
+              for (const auto& status : thread_statuses) {
+                thread_dump << fmt::format("TID {}: {} ({})\n", status.tid, status.name, status.pipeline_desc);
+                thread_dump << fmt::format("  Last heartbeat: {}s ago\n", status.seconds_since_heartbeat);
+                thread_dump << fmt::format("  Alive: {}s, Heartbeats: {}\n", status.seconds_alive, status.heartbeat_count);
+                thread_dump << fmt::format("  Status: {}\n\n", status.is_stuck ? "STUCK" : "healthy");
+              }
+              thread_dump.close();
+
+              // 2. Generate core dump using gcore
+              std::string gcore_cmd = fmt::format("gcore -o {} {}", prefix, getppid());
+              logs::log(logs::info, "[WATCHDOG] Generating core dump: {}", gcore_cmd);
+              int gcore_result = system(gcore_cmd.c_str());
+              if (gcore_result != 0) {
+                logs::log(logs::warning, "[WATCHDOG] gcore failed with code {}", gcore_result);
+              }
+
+              // 3. Copy recent logs (last 1000 lines)
+              // hostname gives us container ID, use docker inspect to get the name
+              std::string logs_cmd = fmt::format(
+                  "CONTAINER_NAME=$(docker inspect --format='{{{{.Name}}}}' $(hostname) 2>/dev/null | sed 's/^\\/\\/*//' || echo 'wolf'); "
+                  "docker logs --tail 1000 $CONTAINER_NAME > {}-logs.txt 2>&1 || "
+                  "echo 'Failed to capture logs' > {}-logs.txt",
+                  prefix, prefix);
+              system(logs_cmd.c_str());
+
+              logs::log(logs::info, "[WATCHDOG] Debug dumps written to: {}-*", prefix);
+              _exit(0); // Exit child cleanly
+
+            } catch (const std::exception& e) {
+              logs::log(logs::error, "[WATCHDOG] Debug gathering failed: {}", e.what());
+              _exit(1);
+            }
+          } else if (child_pid > 0) {
+            // PARENT PROCESS: Wait for child (max 70s = 60s alarm + 10s grace)
+            int status;
+            pid_t result = waitpid(child_pid, &status, 0);
+
+            if (result == -1) {
+              logs::log(logs::error, "[WATCHDOG] waitpid failed: {}", strerror(errno));
+            } else if (WIFEXITED(status)) {
+              logs::log(logs::info, "[WATCHDOG] Debug gathering completed with exit code {}", WEXITSTATUS(status));
+            } else if (WIFSIGNALED(status)) {
+              logs::log(logs::warning, "[WATCHDOG] Debug gathering killed by signal {}", WTERMSIG(status));
+            }
+
+            // Exit main process for Docker restart
+            logs::log(logs::fatal, "[WATCHDOG] Exiting for container restart");
+            exit(1);
+
+          } else {
+            logs::log(logs::error, "[WATCHDOG] fork() failed: {}", strerror(errno));
+            exit(1);
+          }
+        }
+      } else {
+        // System healthy - pipeline creation works
+        if (critical_since) {
+          logs::log(logs::info, "[WATCHDOG] System recovered - pipeline creation works again");
+          critical_since = std::nullopt;
+        }
+
+        if (stuck_count > 0) {
+          logs::log(logs::warning,
+                    "[WATCHDOG] System degraded: {}/{} threads stuck, BUT pipeline creation works (new sessions OK)",
+                    stuck_count, thread_statuses.size());
+        }
+      }
+    }
+  }).detach();
+}
+
+/**
+ * @brief Periodic core dump - dumps core every hour for post-mortem debugging
+ *
+ * If Wolf deadlocks but doesn't hit critical threshold (e.g., 5/14 = 35% < 50%),
+ * or if restarted before watchdog triggers, we lose all debugging data.
+ * Hourly dumps ensure we always have recent state to analyze.
+ *
+ * Uses gcore which pauses process briefly (~3s) to get consistent snapshot.
+ * May cause brief stream glitches during dump, but process keeps running.
+ *
+ * Keeps last 48 hours of dumps + rotates old ones.
+ * Core dumps are ~8GB each: 48 × 8GB = ~400GB disk space required.
+ */
+void start_periodic_dumps() {
+  std::thread([]() {
+    using namespace std::chrono;
+
+    const hours DUMP_INTERVAL{1};  // Dump every hour
+    const int MAX_HOURLY_DUMPS = 48;  // Keep 48 hours of dumps
+
+    logs::log(logs::info, "[PERIODIC_DUMP] Started hourly core dump thread");
+
+    // First dump after 5 minutes to verify gcore works (don't wait a full hour)
+    const minutes INITIAL_DELAY{5};
+    logs::log(logs::info, "[PERIODIC_DUMP] First dump in 5 minutes, then hourly");
+    std::this_thread::sleep_for(INITIAL_DELAY);
+
+    while (true) {
+
+      logs::log(logs::info, "[PERIODIC_DUMP] Starting hourly core dump");
+
+      // Fork child process for dump (timeout protection - if gcore hangs, child dies after 5min)
+      pid_t child_pid = fork();
+
+      if (child_pid == 0) {
+        // CHILD PROCESS: Generate core dump with 5min timeout
+        alarm(300);  // Kill child if gcore hangs
+
+        try {
+          auto now = system_clock::now();
+          auto timestamp = duration_cast<seconds>(now.time_since_epoch()).count();
+          std::string debug_dir = "/var/wolf-debug-dumps";
+          std::string prefix = fmt::format("{}/hourly-{}", debug_dir, timestamp);
+
+          std::filesystem::create_directories(debug_dir);
+
+          // Generate core dump using gcore (dumps WITHOUT stopping process)
+          std::string gcore_cmd = fmt::format("gcore -o {} {} 2>&1", prefix, getppid());
+          logs::log(logs::info, "[PERIODIC_DUMP] Running: {}", gcore_cmd);
+          int gcore_result = system(gcore_cmd.c_str());
+
+          if (gcore_result == 0) {
+            logs::log(logs::info, "[PERIODIC_DUMP] Core dump saved: {}.{}", prefix, getppid());
+
+            // Rotate old hourly dumps (keep last MAX_HOURLY_DUMPS)
+            std::vector<std::filesystem::path> hourly_dumps;
+            for (const auto& entry : std::filesystem::directory_iterator(debug_dir)) {
+              std::string filename = entry.path().filename().string();
+              // Match hourly-* core dumps (not critical dumps)
+              if (filename.starts_with("hourly-") && (filename.find(".core.") != std::string::npos || filename.ends_with(fmt::format(".{}", getppid())))) {
+                hourly_dumps.push_back(entry.path());
+              }
+            }
+
+            // Sort by timestamp (filename is hourly-{timestamp}.{pid})
+            std::sort(hourly_dumps.begin(), hourly_dumps.end());
+
+            // Remove oldest dumps if we have more than MAX_HOURLY_DUMPS
+            if (hourly_dumps.size() > MAX_HOURLY_DUMPS) {
+              int to_remove = hourly_dumps.size() - MAX_HOURLY_DUMPS;
+              for (int i = 0; i < to_remove; i++) {
+                logs::log(logs::info, "[PERIODIC_DUMP] Rotating out old dump: {}", hourly_dumps[i].string());
+                std::filesystem::remove(hourly_dumps[i]);
+              }
+            }
+          } else {
+            logs::log(logs::warning, "[PERIODIC_DUMP] gcore failed with code {}", gcore_result);
+          }
+
+          _exit(0);  // Exit child cleanly
+
+        } catch (const std::exception& e) {
+          logs::log(logs::error, "[PERIODIC_DUMP] Dump failed: {}", e.what());
+          _exit(1);
+        }
+      } else if (child_pid > 0) {
+        // PARENT PROCESS: Wait for child (max 310s = 5min alarm + 10s grace)
+        int status;
+        pid_t result = waitpid(child_pid, &status, 0);
+
+        if (result == -1) {
+          logs::log(logs::error, "[PERIODIC_DUMP] waitpid failed: {}", strerror(errno));
+        } else if (WIFEXITED(status) && WEXITSTATUS(status) == 0) {
+          logs::log(logs::info, "[PERIODIC_DUMP] Hourly dump completed successfully");
+        }
+      } else {
+        logs::log(logs::error, "[PERIODIC_DUMP] fork() failed: {}", strerror(errno));
+      }
+
+      // Sleep until next dump (1 hour)
+      std::this_thread::sleep_for(DUMP_INTERVAL);
+    }
+  }).detach();
+}
+
+/**
  * @brief here's where the magic starts
  */
 void run() {
@@ -177,23 +432,31 @@ void run() {
 
   // HTTP APIs
   auto http_thread = std::thread([local_state]() {
+    wolf::monitoring::ScopedThreadMonitor thread_monitor("HTTP-Server");
+    // TODO: Add Boost ASIO steady_timer for heartbeat in io_context event loop
     HttpServer server = HttpServer();
     HTTPServers::startServer(&server, local_state, state::get_port(state::HTTP_PORT));
   });
 
   // HTTPS APIs
   std::thread([local_state, p_key_file, p_cert_file]() {
+    wolf::monitoring::ScopedThreadMonitor thread_monitor("HTTPS-Server");
+    // TODO: Add Boost ASIO steady_timer for heartbeat in io_context event loop
     HttpsServer server = HttpsServer(p_cert_file, p_key_file);
     HTTPServers::startServer(&server, local_state, state::get_port(state::HTTPS_PORT));
   }).detach();
 
   // RTSP
   std::thread([sessions = local_state->running_sessions]() {
+    wolf::monitoring::ScopedThreadMonitor thread_monitor("RTSP-Server");
+    // TODO: Add Boost ASIO steady_timer for heartbeat in io_context event loop
     rtsp::run_server(state::get_port(state::RTSP_SETUP_PORT), sessions);
   }).detach();
 
   // Control
   std::thread([sessions = local_state->running_sessions, ev_bus = local_state->event_bus]() {
+    wolf::monitoring::ScopedThreadMonitor thread_monitor("Control-Server");
+    // TODO: Add Boost ASIO steady_timer for heartbeat in io_context event loop
     control::run_control(state::get_port(state::CONTROL_PORT), sessions, ev_bus);
   }).detach();
 
@@ -201,8 +464,12 @@ void run() {
   rtp::start_rtp_ping(state::get_port(state::VIDEO_PING_PORT),
                       state::get_port(state::AUDIO_PING_PORT),
                       local_state->event_bus);
-  // Wolf API server
-  std::thread([local_state, runtime_dir]() { wolf::api::start_server(runtime_dir, local_state); }).detach();
+  // Wolf API server (Unix socket)
+  std::thread([local_state, runtime_dir]() {
+    wolf::monitoring::ScopedThreadMonitor thread_monitor("UnixSocket-API");
+    // TODO: Add Boost ASIO steady_timer for heartbeat in io_context event loop
+    wolf::api::start_server(runtime_dir, local_state);
+  }).detach();
 
   // mDNS
   std::thread([hostname = local_state->config->hostname]() {
@@ -228,7 +495,35 @@ void run() {
   // Setup event handlers for player Lobbies
   auto lobbies_handlers = sessions::setup_lobbies_handlers(local_state, runtime_dir, audio_server);
 
+  // Start watchdog thread for deadlock detection
+  start_watchdog();
+
+  // Start periodic core dumps (every hour, keeps last 3)
+  start_periodic_dumps();
+
+  // Monitor main thread - parked on http_thread.join()
+  // Add simple heartbeat to prove main thread is alive
+  wolf::monitoring::ScopedThreadMonitor main_thread_monitor("Main-Thread");
+  pid_t main_tid = syscall(SYS_gettid);
+
+  std::atomic<bool> stop_main_heartbeat{false};
+  std::thread main_heartbeat_thread([&stop_main_heartbeat, main_tid]() {
+    while (!stop_main_heartbeat) {
+      std::this_thread::sleep_for(std::chrono::seconds(1));
+      wolf::monitoring::ThreadMonitor::get().heartbeat_for_tid(main_tid);
+    }
+  });
+
   http_thread.join(); // Let's park the main thread over here
+
+  stop_main_heartbeat = true;
+  if (main_heartbeat_thread.joinable()) {
+    main_heartbeat_thread.join();
+  }
+
+  // If we reach here, HTTP thread died unexpectedly
+  logs::log(logs::fatal, "[MAIN] HTTP thread died - Wolf is shutting down");
+  exit(1);
 }
 
 int main(int argc, char *argv[]) try {

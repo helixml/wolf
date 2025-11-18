@@ -223,33 +223,45 @@ static int openssl_verify_cb(int ok, X509_STORE_CTX *ctx) {
 }
 
 /**
- * @brief: adapted from Sunshine
+ * @brief: Verify client certificate by comparing public keys
+ *
+ * For self-signed client certificates, we need to verify that the incoming certificate
+ * is THE SAME as the paired certificate, not that one is signed by the other.
+ *
+ * The old approach used X509_verify_cert() which is designed for CA chain validation.
+ * With X509_V_FLAG_PARTIAL_CHAIN and the openssl_verify_cb override, ALL self-signed
+ * certificates would verify successfully against each other, preventing multiple clients.
+ *
+ * This fix: Compare public keys directly. Only certificates with matching public keys
+ * (i.e., the exact same certificate) will verify successfully.
  */
 std::optional<std::string> verification_error(x509_ptr paired_cert, x509_ptr untrusted_cert) {
-  auto x509_store{X509_STORE_new()};
-  X509_STORE_add_cert(x509_store, paired_cert.get());
+  // Extract public keys from both certificates
+  auto paired_pkey = X509_get_pubkey(paired_cert.get());
+  auto untrusted_pkey = X509_get_pubkey(untrusted_cert.get());
 
-  auto _cert_ctx{X509_STORE_CTX_new()};
-
-  X509_STORE_CTX_init(_cert_ctx, x509_store, untrusted_cert.get(), nullptr);
-  X509_STORE_CTX_set_verify_cb(_cert_ctx, openssl_verify_cb);
-
-  // We don't care to validate the entire chain for the purposes of client auth.
-  // Some versions of clients forked from Moonlight Embedded produce client certs
-  // that OpenSSL doesn't detect as self-signed due to some X509v3 extensions.
-  X509_STORE_CTX_set_flags(_cert_ctx, X509_V_FLAG_PARTIAL_CHAIN);
-
-  auto err = X509_verify_cert(_cert_ctx);
-  X509_STORE_free(x509_store);
-
-  if (err == 1) {
-    X509_STORE_CTX_free(_cert_ctx);
-    return std::nullopt;
+  if (!paired_pkey || !untrusted_pkey) {
+    if (paired_pkey) EVP_PKEY_free(paired_pkey);
+    if (untrusted_pkey) EVP_PKEY_free(untrusted_pkey);
+    return "Failed to extract public key from certificate";
   }
 
-  int err_code = X509_STORE_CTX_get_error(_cert_ctx);
-  X509_STORE_CTX_free(_cert_ctx);
-  return X509_verify_cert_error_string(err_code);
+  // Compare public keys (returns 1 if equal, 0 if different, -1 on error)
+  int cmp_result = EVP_PKEY_cmp(paired_pkey, untrusted_pkey);
+
+  EVP_PKEY_free(paired_pkey);
+  EVP_PKEY_free(untrusted_pkey);
+
+  if (cmp_result == 1) {
+    // Public keys match → same certificate → verification success
+    return std::nullopt;
+  } else if (cmp_result == 0) {
+    // Public keys don't match → different certificate → verification failure
+    return "Certificate public key does not match paired certificate";
+  } else {
+    // Error during comparison
+    return "Error comparing certificate public keys";
+  }
 }
 
 } // namespace x509

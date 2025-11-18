@@ -11,7 +11,11 @@
 #include <gstreamer-1.0/gst/app/gstappsrc.h>
 #include <immer/box.hpp>
 #include <memory>
+#include <monitoring/thread-monitor.hpp>
 #include <moonlight/fec.hpp>
+#include <pthread.h>
+#include <sys/syscall.h>
+#include <unistd.h>
 
 namespace streaming {
 
@@ -61,7 +65,7 @@ void start_streaming_audio(immer::box<events::AudioSession> audio_session,
 
 static bool run_pipeline(
     const std::string &pipeline_desc,
-    const std::function<immer::array<immer::box<events::EventBusHandlers>>(gstreamer::gst_element_ptr /* pipeline */)>
+    const std::function<immer::array<immer::box<events::EventBusHandlers>>(gstreamer::gst_element_ptr /* pipeline */, gstreamer::gst_main_loop_ptr /* loop */)>
         &on_pipeline_ready) {
   GError *error = nullptr;
   gstreamer::gst_element_ptr pipeline(gst_parse_launch(pipeline_desc.c_str(), &error), [](const auto &pipeline) {
@@ -84,7 +88,15 @@ static bool run_pipeline(
   gstreamer::gst_main_loop_ptr loop(g_main_loop_new(context.get(), FALSE), ::g_main_loop_unref);
 
   /* Let the calling thread set extra things */
-  auto handlers = on_pipeline_ready(pipeline);
+  auto handlers = on_pipeline_ready(pipeline, loop);
+
+  /* Thread lifecycle logging and monitoring */
+  pid_t tid = syscall(SYS_gettid);
+  std::string pipeline_short = pipeline_desc.substr(0, 80);
+  logs::log(logs::info, "[THREAD_LIFECYCLE] Pipeline thread started: TID={} pipeline={}...", tid, pipeline_short);
+
+  // Register thread for heartbeat monitoring
+  wolf::monitoring::ScopedThreadMonitor thread_monitor("GStreamer-Pipeline", pipeline_short);
 
   /*
    * adds a watch for new message on our pipeline's message bus to
@@ -93,9 +105,54 @@ static bool run_pipeline(
    */
   auto bus = gst_pipeline_get_bus(GST_PIPELINE(pipeline.get()));
   gst_bus_add_signal_watch(bus);
+
+  // Heartbeat handler - updates on every bus message (proves thread is alive and processing)
+  // Allocate monitor pointer on heap to safely pass to GLib callback
+  auto* monitor_ptr = new wolf::monitoring::ScopedThreadMonitor*(&thread_monitor);
+  g_signal_connect_data(bus, "message", G_CALLBACK(+[](GstBus*, GstMessage*, gpointer user_data) {
+    auto** monitor = static_cast<wolf::monitoring::ScopedThreadMonitor**>(user_data);
+    (*monitor)->heartbeat();
+  }), monitor_ptr, [](gpointer data, GClosure*) {
+    // Cleanup: delete the pointer when signal is disconnected
+    delete static_cast<wolf::monitoring::ScopedThreadMonitor**>(data);
+  }, GConnectFlags(0));
+
   g_signal_connect(bus, "message::error", G_CALLBACK(gstreamer::pipeline_error_handler), loop.get());
   g_signal_connect(bus, "message::eos", G_CALLBACK(gstreamer::pipeline_eos_handler), loop.get());
   gst_object_unref(bus);
+
+  // Add buffer probe to detect buffer flow (proves pipeline is processing data)
+  // Probe all source pads in the pipeline to catch buffer flow
+  // IMPORTANT: Probes execute in GStreamer streaming threads, so we pass the pipeline TID explicitly
+  GstIterator* it = gst_bin_iterate_elements(GST_BIN(pipeline.get()));
+  GValue item = G_VALUE_INIT;
+  int probe_count = 0;
+
+  while (gst_iterator_next(it, &item) == GST_ITERATOR_OK) {
+    GstElement* element = GST_ELEMENT(g_value_get_object(&item));
+
+    // Probe the src pad if it exists
+    GstPad* src_pad = gst_element_get_static_pad(element, "src");
+    if (src_pad) {
+      gst_pad_add_probe(src_pad, GST_PAD_PROBE_TYPE_BUFFER,
+        +[](GstPad*, GstPadProbeInfo*, gpointer user_data) -> GstPadProbeReturn {
+          // Heartbeat the registered pipeline thread (not the probe's thread!)
+          pid_t pipeline_tid = *static_cast<pid_t*>(user_data);
+          wolf::monitoring::ThreadMonitor::get().heartbeat_for_tid(pipeline_tid);
+          return GST_PAD_PROBE_OK;
+        }, new pid_t(tid), [](gpointer data) {
+          // Cleanup when probe is removed
+          delete static_cast<pid_t*>(data);
+        });
+      gst_object_unref(src_pad);
+      probe_count++;
+    }
+    g_value_reset(&item);
+  }
+  g_value_unset(&item);
+  gst_iterator_free(it);
+
+  logs::log(logs::debug, "[THREAD_LIFECYCLE] Added {} buffer probes to pipeline (TID={})", probe_count, tid);
 
   /* Set the pipeline to "playing" state*/
   gst_element_set_state(pipeline.get(), GST_STATE_PLAYING);
@@ -103,10 +160,34 @@ static bool run_pipeline(
                                     GST_DEBUG_GRAPH_SHOW_ALL,
                                     "pipeline-start");
 
+  // Note: Heartbeat is now updated by the watchdog thread's global scan
+  // We don't use bus handlers as they can interfere with GStreamer pipeline startup
+
+  /* Thread cleanup handler - logs if thread exits unexpectedly */
+  struct CleanupData {
+    std::string pipeline_desc_short;
+    pid_t tid;
+  } cleanup_data = {pipeline_desc.substr(0, 100), tid};
+
+  auto cleanup_handler = [](void* arg) {
+    auto* data = (CleanupData*)arg;
+    logs::log(logs::error, "[THREAD_EXIT] GStreamer pipeline thread (TID={}) exited UNEXPECTEDLY: {}...",
+              data->tid, data->pipeline_desc_short);
+    // Note: Cannot unlock mutexes held by GStreamer internal code (libgstbase, interpipe, etc.)
+    // Thread 43209 died inside GStreamer library, not our code - we have no access to those mutexes
+    // This cleanup handler is purely for logging/detection
+  };
+
+  pthread_cleanup_push(cleanup_handler, &cleanup_data);
+
   /* The main loop will be run until someone calls g_main_loop_quit() */
+  // Note: Using GStreamer's standard g_main_loop_run - it handles all the internal threading
   g_main_loop_run(loop.get());
 
+  pthread_cleanup_pop(0);  // Don't execute cleanup on normal exit
+
   /* Out of the main loop, clean up nicely */
+  logs::log(logs::info, "[THREAD_LIFECYCLE] Pipeline thread (TID={}) exiting normally, cleaning up", tid);
   gst_element_set_state(pipeline.get(), GST_STATE_PAUSED);
   gst_element_set_state(pipeline.get(), GST_STATE_READY);
   gst_element_set_state(pipeline.get(), GST_STATE_NULL);

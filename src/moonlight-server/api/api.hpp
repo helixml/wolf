@@ -174,6 +174,93 @@ struct DockerPullImageResponse {
   bool success = true;
 };
 
+struct AppMemoryUsage {
+  std::string app_id;
+  std::string app_name;
+  std::string resolution;
+  int64_t client_count;
+  int64_t memory_bytes;
+};
+
+struct LobbyMemoryUsage {
+  std::string lobby_id;
+  std::string lobby_name;
+  std::string resolution;
+  int64_t client_count;
+  int64_t memory_bytes;
+};
+
+struct ClientConnectionInfo {
+  size_t session_id; // Keep as size_t - Moonlight requires string serialization for session IDs
+  std::string client_ip;
+  std::string resolution;
+  std::optional<std::string> lobby_id;
+  std::optional<std::string> app_id;
+  int64_t memory_bytes;
+};
+
+struct GPUStats {
+  bool available = false;
+  std::string gpu_name;
+  int encoder_session_count = 0;
+  double encoder_average_fps = 0.0;
+  int encoder_average_latency_us = 0;
+  int encoder_utilization_percent = 0;
+  int gpu_utilization_percent = 0;
+  int memory_utilization_percent = 0;
+  int memory_used_mb = 0;
+  int memory_total_mb = 0;
+  int temperature_celsius = 0;
+  int query_duration_ms = 0; // Track how long nvidia-smi took
+  std::string error;
+};
+
+struct GStreamerPipelineStats {
+  int producer_pipelines = 0; // Video + audio producers (2 per lobby)
+  int consumer_pipelines = 0; // Video + audio consumers (2 per session)
+  int total_pipelines = 0;    // Sum of producers + consumers
+};
+
+struct ThreadHealthInfo {
+  int32_t tid;
+  std::string name;
+  std::string details;  // Pipeline description or other info
+  int64_t seconds_since_heartbeat;
+  int64_t seconds_alive;
+  int64_t heartbeat_count;  // Changed from uint64_t to avoid JSON string serialization
+  bool is_stuck;  // >30s since heartbeat
+
+  // HTTP request tracking (for HTTP/HTTPS server threads)
+  std::string current_request_path;
+  int64_t request_duration_seconds;
+  bool has_active_request;
+
+  // Kernel stack trace (where thread is blocked/executing)
+  std::string stack_trace;
+};
+
+struct SystemHealthResponse {
+  bool success = true;
+  int64_t process_uptime_seconds;  // How long Wolf has been running
+  std::vector<ThreadHealthInfo> threads;
+  int32_t stuck_thread_count;
+  int32_t total_thread_count;
+  bool can_create_new_pipelines;  // Tests if GStreamer type lock is available (real deadlock check)
+  std::string overall_status;  // "healthy", "degraded", "critical"
+};
+
+struct SystemMemoryResponse {
+  bool success = true;
+  int64_t process_rss_bytes;
+  int64_t gstreamer_buffer_bytes;
+  int64_t total_memory_bytes;
+  std::vector<AppMemoryUsage> apps;
+  std::vector<LobbyMemoryUsage> lobbies;
+  std::vector<ClientConnectionInfo> clients;
+  std::optional<GPUStats> gpu_stats;                          // GPU encoder metrics via nvidia-smi
+  std::optional<GStreamerPipelineStats> gstreamer_pipelines; // Actual pipeline count from state
+};
+
 struct UnixSocket {
   boost::asio::local::stream_protocol::socket socket;
   bool is_alive = true;
@@ -224,6 +311,8 @@ private:
   void endpoint_GetIcon(const HTTPRequest &req, std::shared_ptr<UnixSocket> socket);
   void endpoint_DockerInspectImage(const HTTPRequest &req, std::shared_ptr<UnixSocket> socket);
   void endpoint_DockerPullImage(const HTTPRequest &req, std::shared_ptr<UnixSocket> socket);
+  void endpoint_SystemMemory(const HTTPRequest &req, std::shared_ptr<UnixSocket> socket);
+  void endpoint_SystemHealth(const HTTPRequest &req, std::shared_ptr<UnixSocket> socket);
 
   void sse_broadcast(const std::string &payload);
   void sse_keepalive(const boost::system::error_code &e);

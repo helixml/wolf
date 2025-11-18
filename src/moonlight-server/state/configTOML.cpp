@@ -126,6 +126,158 @@ std::string generate_app_id(const BaseApp &app) {
   return std::to_string(abs((int32_t)hash));
 }
 
+PipelineDefaults compute_pipeline_defaults(const std::string &config_source) {
+  // Load config to get gstreamer settings
+  if (!file_exist(config_source)) {
+    throw std::runtime_error("Config file not found: " + config_source);
+  }
+
+  auto cfg = rfl::toml::load<WolfConfig, rfl::DefaultIfMissing>(config_source).value();
+  auto default_gst_video_settings = cfg.gstreamer.video;
+  auto default_gst_audio_settings = cfg.gstreamer.audio;
+  auto default_gst_encoder_settings = default_gst_video_settings.defaults;
+
+  // Apply same migrations as load_or_default (wolf-ui uses interpipesrc name formatting)
+  if (default_gst_video_settings.default_source.find("name=interpipesrc") == std::string::npos) {
+    default_gst_video_settings.default_source =
+        default_gst_video_settings.default_source.replace(0, 12, "interpipesrc name=interpipesrc_{}_video");
+  }
+  if (default_gst_audio_settings.default_source.find("name=interpipesrc") == std::string::npos) {
+    default_gst_audio_settings.default_source =
+        default_gst_audio_settings.default_source.replace(0, 12, "interpipesrc name=interpipesrc_{}_audio");
+  }
+
+  // Determine zero-copy mode
+  bool use_zero_copy = utils::get_env("WOLF_USE_ZERO_COPY", "") != std::string("FALSE");
+
+  auto default_app_render_node = utils::get_env("WOLF_RENDER_NODE", "/dev/dri/renderD128");
+  auto default_gst_render_node = utils::get_env("WOLF_ENCODER_NODE", default_app_render_node);
+  auto vendor = get_vendor(default_gst_render_node);
+  if (vendor == GPU_VENDOR::UNKNOWN) {
+    logs::log(logs::warning, "Unable to detect GPU vendor, disabling zero copy pipeline.");
+    use_zero_copy = false;
+  }
+
+  // Pick encoders (wolf-ui uses extended signature with encoder_node parameter)
+  auto h264_encoder = get_encoder("h264", default_gst_render_node, default_gst_video_settings.h264_encoders, vendor);
+  if (!h264_encoder) {
+    throw std::runtime_error(
+        "Unable to find a compatible H.264 encoder, please check [[gstreamer.video.h264_encoders]] "
+        "in your config.toml or your Gstreamer installation");
+  }
+  auto hevc_encoder = get_encoder("h265", default_gst_render_node, default_gst_video_settings.hevc_encoders, vendor);
+  auto av1_encoder = get_encoder("av1", default_gst_render_node, default_gst_video_settings.av1_encoders, vendor);
+
+  // Compute video producer buffer caps
+  auto video_encoder = encoder_type(*h264_encoder);
+  std::string video_producer_buffer_caps = "video/x-raw";
+  if (use_zero_copy) {
+    switch (video_encoder) {
+    case NVIDIA: {
+      video_producer_buffer_caps = "video/x-raw(memory:CUDAMemory)";
+      break;
+    }
+    case VAAPI:
+    case QUICKSYNC: {
+      auto required_caps = gstreamer::get_dma_caps("vapostproc");
+      auto gst_caps = required_caps | //
+                      ranges::views::remove_if([](const std::string &cap) {
+                        return cap.find("P010") != std::string::npos || cap.find("AR30") != std::string::npos ||
+                               cap.find(" ") != std::string::npos;
+                      }) | //
+                      ranges::to<std::vector>();
+      if (gst_caps.empty()) {
+        logs::log(logs::warning,
+                  "Unable to find any compatible DMA formats for vapostproc, disabling zero copy pipeline.");
+        use_zero_copy = false;
+      } else {
+        video_producer_buffer_caps =
+            fmt::format("video/x-raw(memory:DMABuf), drm-format={{{}}}", utils::join(gst_caps, ","));
+      }
+      break;
+    }
+    default: {
+    }
+    }
+  }
+
+  logs::log(logs::info,
+            "Using {} pipeline on {} ({})",
+            use_zero_copy ? "zero copy" : "legacy",
+            get_vendor_name(vendor),
+            default_gst_render_node);
+
+  // Get encoder defaults
+  auto empty_enc = GstEncoderDefault{};
+  auto default_h264 = utils::get_optional(default_gst_encoder_settings, h264_encoder.value_or(GstEncoder{}).plugin_name)
+                          .value_or(empty_enc);
+  auto default_hevc = utils::get_optional(default_gst_encoder_settings, hevc_encoder.value_or(GstEncoder{}).plugin_name)
+                          .value_or(empty_enc);
+  auto default_av1 = utils::get_optional(default_gst_encoder_settings, av1_encoder.value_or(GstEncoder{}).plugin_name)
+                         .value_or(empty_enc);
+
+  auto h264_video_params = use_zero_copy
+                               ? h264_encoder->video_params_zero_copy.value_or(default_h264.video_params_zero_copy)
+                               : h264_encoder->video_params.value_or(default_h264.video_params);
+
+  auto hevc_video_params = use_zero_copy
+                               ? hevc_encoder->video_params_zero_copy.value_or(default_hevc.video_params_zero_copy)
+                               : hevc_encoder->video_params.value_or(default_hevc.video_params);
+
+  auto av1_video_params = use_zero_copy
+                              ? av1_encoder->video_params_zero_copy.value_or(default_av1.video_params_zero_copy)
+                              : av1_encoder->video_params.value_or(default_av1.video_params);
+
+  // Build pipelines (wolf-ui uses BaseAppVideoOverride with .source.value(), .sink.value())
+  auto default_base_video = BaseAppVideoOverride{.source = default_gst_video_settings.default_source,
+                                                 .sink = default_gst_video_settings.default_sink,
+                                                 .producer_buffer_caps = video_producer_buffer_caps};
+  auto default_base_audio = BaseAppAudioOverride{.source = default_gst_audio_settings.default_source,
+                                                 .audio_params = default_gst_audio_settings.default_audio_params,
+                                                 .opus_encoder = default_gst_audio_settings.default_opus_encoder,
+                                                 .sink = default_gst_audio_settings.default_sink};
+
+  auto h264_pipeline = fmt::format(
+      "{} !\n{} !\n{} !\n{}", //
+      default_base_video.source.value(),
+      h264_video_params,
+      h264_encoder->encoder_pipeline,
+      default_base_video.sink.value());
+
+  auto hevc_pipeline =
+      hevc_encoder.has_value()
+          ? fmt::format("{} !\n{} !\n{} !\n{}", //
+                        default_base_video.source.value(),
+                        hevc_video_params,
+                        hevc_encoder->encoder_pipeline,
+                        default_base_video.sink.value())
+          : "";
+
+  auto av1_pipeline = av1_encoder.has_value()
+                          ? fmt::format(
+                                "{} !\n{} !\n{} !\n{}", //
+                                default_base_video.source.value(),
+                                av1_video_params,
+                                av1_encoder->encoder_pipeline,
+                                default_base_video.sink.value())
+                          : "";
+
+  auto opus_pipeline = fmt::format(
+      "{} !\n{} !\n{} !\n{}", //
+      default_base_audio.source.value(),
+      default_base_audio.audio_params.value(),
+      default_base_audio.opus_encoder.value(),
+      default_base_audio.sink.value());
+
+  return PipelineDefaults{
+      .video_producer_buffer_caps = video_producer_buffer_caps,
+      .h264_gst_pipeline = h264_pipeline,
+      .hevc_gst_pipeline = hevc_pipeline,
+      .av1_gst_pipeline = av1_pipeline,
+      .opus_gst_pipeline = opus_pipeline,
+  };
+}
+
 std::shared_ptr<immer::atom<immer::vector<immer::box<events::App>>>>
 parse_apps(const std::vector<BaseApp> &apps,
            const std::string &default_app_render_node,

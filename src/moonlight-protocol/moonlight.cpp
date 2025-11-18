@@ -183,23 +183,25 @@ XML applist(const immer::vector<App> &apps) {
   return resp;
 }
 
-XML launch_success(const std::string &local_ip, const std::string &rtsp_port) {
+XML launch_success(const std::string &local_ip, const std::string &rtsp_port, const std::string &client_id) {
   // TODO: implement error on launch
   XML resp;
 
   resp.put("root.<xmlattr>.status_code", 200);
   resp.put("root.sessionUrl0", "rtsp://" + local_ip + ":" + rtsp_port);
   resp.put("root.gamesession", 1);
+  resp.put("root.clientId", client_id);  // Wolf's client_id (session_id as string) for auto-join functionality
 
   return resp;
 }
 
-XML launch_resume(const std::string &local_ip, const std::string &rtsp_port) {
+XML launch_resume(const std::string &local_ip, const std::string &rtsp_port, const std::string &client_id) {
   XML resp;
 
   resp.put("root.<xmlattr>.status_code", 200);
   resp.put("root.sessionUrl0", "rtsp://" + local_ip + ":" + rtsp_port);
   resp.put("root.resume", 1);
+  resp.put("root.clientId", client_id);  // Wolf's client_id (session_id as string) for auto-join functionality
 
   return resp;
 }

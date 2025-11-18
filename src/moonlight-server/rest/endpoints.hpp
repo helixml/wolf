@@ -247,6 +247,20 @@ void pair(const std::shared_ptr<typename SimpleWeb::Server<SimpleWeb::HTTP>::Res
     return;
   }
 
+  // PHASE 5 (also supported over HTTP for compatibility)
+  // Check this BEFORE cache lookup since cache is removed after Phase 4
+  auto phrase = get_header(headers, "phrase");
+  logs::log(logs::debug, "Checking Phase 5: phrase={}, uniqueid={}",
+            phrase ? phrase.value() : "none",
+            client_id ? client_id.value() : "none");
+  if (phrase && phrase.value() == "pairchallenge") {
+    XML xml;
+    xml.put("root.paired", 1);
+    xml.put("root.<xmlattr>.status_code", 200);
+    send_xml<SimpleWeb::HTTP>(response, SimpleWeb::StatusCode::success_ok, xml);
+    return;
+  }
+
   auto client_cache_it = state->pairing_cache->load()->find(cache_key);
   if (client_cache_it == nullptr) {
     send_xml<SimpleWeb::HTTP>(
@@ -389,7 +403,8 @@ auto create_run_session(const SimpleWeb::CaseInsensitiveMultimap &headers,
                                             display_mode,
                                             channelCount,
                                             get_header(headers, "rikey").value(),
-                                            get_header(headers, "rikeyid").value());
+                                            get_header(headers, "rikeyid").value(),
+                                            get_header(headers, "uniqueid").value_or(""));
 
   base_session->ip = client_ip;
   return std::move(base_session);
@@ -420,7 +435,7 @@ void launch(const std::shared_ptr<typename SimpleWeb::Server<SimpleWeb::HTTPS>::
       [new_session](const immer::vector<events::StreamSession> &ses_v) { return ses_v.push_back(*new_session); });
 
   auto rtsp_ip = get_rtsp_ip_string(get_host_ip<SimpleWeb::HTTPS>(request, state), *new_session);
-  auto xml = moonlight::launch_success(rtsp_ip, std::to_string(get_port(state::RTSP_SETUP_PORT)));
+  auto xml = moonlight::launch_success(rtsp_ip, std::to_string(get_port(state::RTSP_SETUP_PORT)), std::to_string(new_session->session_id));
   send_xml<SimpleWeb::HTTPS>(response, SimpleWeb::StatusCode::success_ok, xml);
 }
 
@@ -449,7 +464,7 @@ void resume(const std::shared_ptr<typename SimpleWeb::Server<SimpleWeb::HTTPS>::
     });
 
     auto rtsp_ip = get_rtsp_ip_string(get_host_ip<SimpleWeb::HTTPS>(request, state), *new_session);
-    auto xml = moonlight::launch_resume(rtsp_ip, std::to_string(get_port(state::RTSP_SETUP_PORT)));
+    auto xml = moonlight::launch_resume(rtsp_ip, std::to_string(get_port(state::RTSP_SETUP_PORT)), std::to_string(new_session->session_id));
     send_xml<SimpleWeb::HTTPS>(response, SimpleWeb::StatusCode::success_ok, xml);
   } else {
     logs::log(logs::warning, "[HTTPS] Received resume event from an unregistered session, ip: {}", client_ip);

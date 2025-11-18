@@ -1,3 +1,4 @@
+# syntax=docker/dockerfile:1.4
 ARG BASE_IMAGE=ghcr.io/games-on-whales/gstreamer:1.26.7
 ########################################################
 FROM $BASE_IMAGE AS wolf-builder
@@ -53,22 +54,42 @@ WORKDIR /wolf
 
 ENV CCACHE_DIR=/cache/ccache
 ENV CMAKE_BUILD_DIR=/cache/cmake-build
+ARG BUILD_JOBS=8
+# DEBUG BUILD (current) - Full debug symbols for deadlock investigation
 RUN --mount=type=cache,target=/cache/ccache \
     cmake -B$CMAKE_BUILD_DIR \
-    -DCMAKE_BUILD_TYPE=RelWithDebInfo \
+    -DCMAKE_BUILD_TYPE=Debug \
     -DCMAKE_CXX_STANDARD=17 \
     -DCMAKE_CXX_EXTENSIONS=OFF \
-    -DCMAKE_CXX_FLAGS="-Wno-missing-template-arg-list-after-template-kw" \
+    -DCMAKE_CXX_FLAGS="-g3 -O0 -fno-omit-frame-pointer -Wno-missing-template-arg-list-after-template-kw" \
+    -DCMAKE_C_FLAGS="-g3 -O0 -fno-omit-frame-pointer" \
     -DBUILD_SHARED_LIBS=OFF \
     -DBoost_USE_STATIC_LIBS=ON \
     -DBUILD_FAKE_UDEV_CLI=ON \
     -DBUILD_TESTING=OFF \
     -G Ninja && \
-    ninja -C $CMAKE_BUILD_DIR wolf && \
-    ninja -C $CMAKE_BUILD_DIR fake-udev && \
+    ninja -j $BUILD_JOBS -C $CMAKE_BUILD_DIR wolf && \
+    ninja -j $BUILD_JOBS -C $CMAKE_BUILD_DIR fake-udev && \
     # We have to copy out the built executables because this will only be available inside the buildkit cache
     cp $CMAKE_BUILD_DIR/src/moonlight-server/wolf /wolf/wolf && \
     cp $CMAKE_BUILD_DIR/src/fake-udev/fake-udev /wolf/fake-udev
+
+# RELEASE BUILD (commented out) - Use for production when debugging complete
+# RUN --mount=type=cache,target=/cache/ccache \
+#     cmake -B$CMAKE_BUILD_DIR \
+#     -DCMAKE_BUILD_TYPE=RelWithDebInfo \
+#     -DCMAKE_CXX_STANDARD=17 \
+#     -DCMAKE_CXX_EXTENSIONS=OFF \
+#     -DCMAKE_CXX_FLAGS="-Wno-missing-template-arg-list-after-template-kw" \
+#     -DBUILD_SHARED_LIBS=OFF \
+#     -DBoost_USE_STATIC_LIBS=ON \
+#     -DBUILD_FAKE_UDEV_CLI=ON \
+#     -DBUILD_TESTING=OFF \
+#     -G Ninja && \
+#     ninja -j $BUILD_JOBS -C $CMAKE_BUILD_DIR wolf && \
+#     ninja -j $BUILD_JOBS -C $CMAKE_BUILD_DIR fake-udev && \
+#     cp $CMAKE_BUILD_DIR/src/moonlight-server/wolf /wolf/wolf && \
+#     cp $CMAKE_BUILD_DIR/src/fake-udev/fake-udev /wolf/fake-udev
 
 ########################################################
 FROM $BASE_IMAGE AS runner
@@ -86,6 +107,40 @@ RUN apt-get update -y && \
     libdrm2 \
     libpci3 \
     libunwind8 \
+    && rm -rf /var/lib/apt/lists/*
+
+# Debug tools for deadlock investigation and core dump analysis
+RUN apt-get update -y && \
+    apt-get install -y --no-install-recommends \
+    gdb \
+    strace \
+    ltrace \
+    lsof \
+    procps \
+    htop \
+    binutils \
+    && rm -rf /var/lib/apt/lists/*
+
+# Add ddebs repository for debug symbols (including updates)
+# Download GPG key from official ddebs.ubuntu.com
+# Note: ddebs has plucky and plucky-updates, but NO plucky-security suite
+RUN apt-get update -y && \
+    apt-get install -y --no-install-recommends wget ca-certificates gnupg && \
+    wget -O- http://ddebs.ubuntu.com/dbgsym-release-key.asc | gpg --dearmor -o /usr/share/keyrings/ddebs-archive-keyring.gpg && \
+    echo "deb [signed-by=/usr/share/keyrings/ddebs-archive-keyring.gpg] http://ddebs.ubuntu.com plucky main restricted universe multiverse" > /etc/apt/sources.list.d/ddebs.list && \
+    echo "deb [signed-by=/usr/share/keyrings/ddebs-archive-keyring.gpg] http://ddebs.ubuntu.com plucky-updates main restricted universe multiverse" >> /etc/apt/sources.list.d/ddebs.list && \
+    rm -rf /var/lib/apt/lists/*
+
+# Install debug symbols for security-patched versions
+# Wolf binary compiled with -g3 -O0 -fno-omit-frame-pointer (full debug symbols)
+# System symbols: pthread_mutex_lock, g_object_set, gst_element_factory_make, futex, epoll
+RUN apt-get update -y && \
+    apt-get install -y --no-install-recommends \
+    libc6-dbg \
+    libglib2.0-0t64-dbgsym \
+    libgstreamer1.0-0-dbgsym \
+    gstreamer1.0-plugins-base-dbgsym \
+    gstreamer1.0-plugins-good-dbgsym \
     && rm -rf /var/lib/apt/lists/*
 
 # gst-plugin-wayland runtime dependencies
@@ -106,6 +161,13 @@ ENV WOLF_CFG_FOLDER=/etc/wolf/cfg
 
 COPY --from=wolf-builder /wolf/wolf /wolf/wolf
 COPY --from=wolf-builder /wolf/fake-udev /wolf/fake-udev
+
+# Add Helix init script and config template for Wolf initialization
+# Template goes to /opt/wolf-defaults (NOT bind-mounted, always available from image)
+RUN mkdir -p /opt/wolf-defaults
+COPY docker/config.toml.template /opt/wolf-defaults/config.toml.template
+COPY docker/init-wolf-config.sh /etc/cont-init.d/05-init-wolf-config.sh
+RUN chmod +x /etc/cont-init.d/05-init-wolf-config.sh
 
 ENV GST_GL_API=gles2 \
     GST_GL_PLATFORM=egl \
