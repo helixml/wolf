@@ -235,6 +235,12 @@ public:
     // Fork child to test creation (timeout protection)
     pid_t child = fork();
 
+    if (child == -1) {
+      // Fork failed (out of memory, process limit, etc.)
+      logs::log(logs::error, "[HEALTH_CHECK] fork() failed: {}", strerror(errno));
+      return false;  // Assume system is unhealthy if can't even fork
+    }
+
     if (child == 0) {
       // CHILD PROCESS: Try to create element (requires global GLib type lock)
       alarm(5);  // Kill child if it hangs >5s
@@ -247,7 +253,7 @@ public:
       _exit(1);  // Failed to create (shouldn't happen for fakesrc)
     }
 
-    // PARENT PROCESS: Wait for child with timeout
+    // PARENT PROCESS: Wait for child with timeout (max 6s)
     int status;
     auto start = std::chrono::steady_clock::now();
     const auto timeout = std::chrono::seconds(6);  // 6s max (5s alarm + 1s grace)
