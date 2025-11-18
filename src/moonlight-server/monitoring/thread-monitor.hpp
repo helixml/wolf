@@ -5,8 +5,10 @@
 #include <fstream>
 #include <helpers/logger.hpp>
 #include <mutex>
+#include <signal.h>
 #include <sstream>
 #include <sys/syscall.h>
+#include <sys/wait.h>
 #include <unordered_map>
 #include <unistd.h>
 
