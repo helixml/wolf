@@ -9,6 +9,8 @@ trigger:
 steps:
   - name: publish-wolf-release
     image: plugins/docker
+    environment:
+      DOCKER_BUILDKIT: 1
     settings:
       dockerfile: docker/wolf.Dockerfile
       registry: registry.helixml.tech
