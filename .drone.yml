@@ -6,38 +6,18 @@ trigger:
   event:
     - tag
 
-services:
-  - name: docker
-    image: docker:24-dind
-    privileged: true
-    environment:
-      DOCKER_TLS_CERTDIR: /certs
-    command:
-      - dockerd
-      - --host=unix:///var/run/docker.sock
-      - --host=tcp://0.0.0.0:2375
-      - --tls=false
-
 steps:
   - name: publish-wolf-release
-    image: docker:24-cli
-    environment:
-      DOCKER_HOST: tcp://docker:2375
-      DOCKER_BUILDKIT: 1
-      REGISTRY_PASSWORD:
+    image: plugins/docker
+    settings:
+      dockerfile: docker/wolf.Dockerfile
+      registry: registry.helixml.tech
+      repo: registry.helixml.tech/helix/wolf
+      username: admin
+      password:
         from_secret: helix_registry_password
-    commands:
-      - sleep 5  # Wait for Docker daemon to start
-      - docker buildx create --use --driver docker-container --driver-opt image=moby/buildkit:master
-      - docker buildx version
-      - echo "$REGISTRY_PASSWORD" | docker login registry.helixml.tech -u admin --password-stdin
-      - |
-        docker buildx build \
-          -f docker/wolf.Dockerfile \
-          -t registry.helixml.tech/helix/wolf:${DRONE_TAG} \
-          -t registry.helixml.tech/helix/wolf:latest \
-          --platform linux/amd64 \
-          --build-arg BASE_IMAGE=ghcr.io/games-on-whales/gstreamer:1.26.7 \
-          --push \
-          .
-      - docker logout registry.helixml.tech
+      tags:
+        - ${DRONE_TAG}
+        - latest
+      build_args:
+        - BASE_IMAGE=ghcr.io/games-on-whales/gstreamer:1.26.7
