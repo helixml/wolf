@@ -6,18 +6,28 @@ trigger:
   event:
     - tag
 
+services:
+  - name: docker
+    image: docker:24-dind
+    privileged: true
+    environment:
+      DOCKER_TLS_CERTDIR: /certs
+    command:
+      - dockerd
+      - --host=unix:///var/run/docker.sock
+      - --host=tcp://0.0.0.0:2375
+      - --tls=false
+
 steps:
   - name: publish-wolf-release
-    image: docker:24-dind
-    volumes:
-      - name: dockersock
-        path: /var/run/docker.sock
+    image: docker:24-cli
     environment:
+      DOCKER_HOST: tcp://docker:2375
       DOCKER_BUILDKIT: 1
-      BUILDKIT_SYNTAX: docker/dockerfile:1.4
       REGISTRY_PASSWORD:
         from_secret: helix_registry_password
     commands:
+      - sleep 5  # Wait for Docker daemon to start
       - docker buildx create --use --driver docker-container --driver-opt image=moby/buildkit:master
       - docker buildx version
       - echo "$REGISTRY_PASSWORD" | docker login registry.helixml.tech -u admin --password-stdin
@@ -31,8 +41,3 @@ steps:
           --push \
           .
       - docker logout registry.helixml.tech
-
-volumes:
-  - name: dockersock
-    host:
-      path: /var/run/docker.sock
