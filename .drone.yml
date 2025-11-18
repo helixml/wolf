@@ -8,7 +8,7 @@ trigger:
 
 steps:
   - name: publish-wolf-release
-    image: plugins/docker
+    image: plugins/docker:20.17
     environment:
       DOCKER_BUILDKIT: 1
     settings:
