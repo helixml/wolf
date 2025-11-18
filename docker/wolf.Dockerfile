@@ -121,13 +121,24 @@ RUN apt-get update -y && \
     binutils \
     && rm -rf /var/lib/apt/lists/*
 
-# Install critical debug symbols
-# Wolf binary compiled with -g3 -O0 -fno-omit-frame-pointer (full debug symbols for our code)
-# libc6-dbg provides symbols for: pthread_mutex_lock, epoll_wait, futex, poll, etc.
-# GStreamer/GLib debug symbols skipped - require exact version matches with base image
+# Add ddebs repository for debug symbols with proper GPG key
+RUN apt-get update -y && \
+    apt-get install -y --no-install-recommends ca-certificates gnupg wget && \
+    wget -O- http://ddebs.ubuntu.com/dbgsym-release-key.asc | gpg --dearmor -o /usr/share/keyrings/ddebs-archive-keyring.gpg && \
+    echo "deb [signed-by=/usr/share/keyrings/ddebs-archive-keyring.gpg] http://ddebs.ubuntu.com plucky main restricted universe multiverse" > /etc/apt/sources.list.d/ddebs.list && \
+    apt-get update -y && \
+    rm -rf /var/lib/apt/lists/*
+
+# Install debug symbols matching exact installed package versions
+# Base image versions: libglib2.0-0t64=2.84.1-1ubuntu0.1, libgstreamer1.0-0=1.26.0-3
+# Wolf binary compiled with -g3 -O0 -fno-omit-frame-pointer (full debug symbols)
 RUN apt-get update -y && \
     apt-get install -y --no-install-recommends \
     libc6-dbg \
+    libglib2.0-0t64-dbgsym=2.84.1-1ubuntu0.1 \
+    libgstreamer1.0-0-dbgsym=1.26.0-3 \
+    gstreamer1.0-plugins-base-dbgsym=1.26.0-1ubuntu0.1 \
+    gstreamer1.0-plugins-good-dbgsym=1.26.0-1ubuntu2.1 \
     && rm -rf /var/lib/apt/lists/*
 
 # gst-plugin-wayland runtime dependencies
