@@ -121,24 +121,29 @@ RUN apt-get update -y && \
     binutils \
     && rm -rf /var/lib/apt/lists/*
 
-# Add ddebs repository for debug symbols with proper GPG key
+# Add ddebs repository for debug symbols using keyserver method
 RUN apt-get update -y && \
-    apt-get install -y --no-install-recommends ca-certificates gnupg wget && \
-    wget -O- http://ddebs.ubuntu.com/dbgsym-release-key.asc | gpg --dearmor -o /usr/share/keyrings/ddebs-archive-keyring.gpg && \
+    apt-get install -y --no-install-recommends ca-certificates gnupg dirmngr && \
+    gpg --keyserver keyserver.ubuntu.com --recv-keys F2EDC64DC5AEE1F6B9C621F0C8CAB6595FDFF622 && \
+    gpg --export F2EDC64DC5AEE1F6B9C621F0C8CAB6595FDFF622 > /usr/share/keyrings/ddebs-archive-keyring.gpg && \
     echo "deb [signed-by=/usr/share/keyrings/ddebs-archive-keyring.gpg] http://ddebs.ubuntu.com plucky main restricted universe multiverse" > /etc/apt/sources.list.d/ddebs.list && \
-    apt-get update -y && \
     rm -rf /var/lib/apt/lists/*
 
-# Install debug symbols matching exact installed package versions
-# Base image versions: libglib2.0-0t64=2.84.1-1ubuntu0.1, libgstreamer1.0-0=1.26.0-3
+# Upgrade system packages to latest versions so they match available debug symbols
+RUN apt-get update -y && \
+    apt-get upgrade -y && \
+    rm -rf /var/lib/apt/lists/*
+
+# Install debug symbols (will match upgraded package versions)
 # Wolf binary compiled with -g3 -O0 -fno-omit-frame-pointer (full debug symbols)
+# System symbols: pthread_mutex_lock, g_object_set, gst_element_factory_make, futex, epoll
 RUN apt-get update -y && \
     apt-get install -y --no-install-recommends \
     libc6-dbg \
-    libglib2.0-0t64-dbgsym=2.84.1-1ubuntu0.1 \
-    libgstreamer1.0-0-dbgsym=1.26.0-3 \
-    gstreamer1.0-plugins-base-dbgsym=1.26.0-1ubuntu0.1 \
-    gstreamer1.0-plugins-good-dbgsym=1.26.0-1ubuntu2.1 \
+    libglib2.0-0t64-dbgsym \
+    libgstreamer1.0-0-dbgsym \
+    gstreamer1.0-plugins-base-dbgsym \
+    gstreamer1.0-plugins-good-dbgsym \
     && rm -rf /var/lib/apt/lists/*
 
 # gst-plugin-wayland runtime dependencies
