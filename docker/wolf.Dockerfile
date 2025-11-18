@@ -109,11 +109,25 @@ RUN apt-get update -y && \
     libunwind8 \
     && rm -rf /var/lib/apt/lists/*
 
-# Debug tools and symbols for deadlock investigation
+# Debug tools for deadlock investigation and core dump analysis
 RUN apt-get update -y && \
     apt-get install -y --no-install-recommends \
     gdb \
     strace \
+    ltrace \
+    lsof \
+    procps \
+    htop \
+    binutils \
+    && rm -rf /var/lib/apt/lists/*
+
+# Core library debug symbols (libc, libstdc++, libpthread)
+RUN apt-get update -y && \
+    apt-get install -y --no-install-recommends \
+    libc6-dbg \
+    libstdc++6-dbgsym \
+    libpthread-stubs0-dev \
+    || echo "Warning: Core library debug symbols not available" \
     && rm -rf /var/lib/apt/lists/*
 
 # GStreamer debug symbols (best effort - may not be available for all versions)
