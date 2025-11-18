@@ -26,29 +26,8 @@ steps:
       build_args:
         - BASE_IMAGE=ghcr.io/games-on-whales/gstreamer:1.26.7
 
----
-kind: pipeline
-type: docker
-name: publish-release
-
-trigger:
-  event:
-    - tag
-
-steps:
-  - name: publish-wolf-release
-    image: plugins/docker
-    environment:
-      DOCKER_BUILDKIT: 1
-    settings:
-      dockerfile: docker/wolf.Dockerfile
-      registry: registry.helixml.tech
-      repo: registry.helixml.tech/helix/wolf
-      username: admin
-      password:
-        from_secret: helix_registry_password
-      tags:
-        - ${DRONE_TAG}
-        - latest
-      build_args:
-        - BASE_IMAGE=ghcr.io/games-on-whales/gstreamer:1.26.7
+# Note: Wolf releases are now handled by the Helix release pipeline
+# When Helix is tagged (e.g., v1.5.0), it automatically:
+# 1. Tags Wolf's stable branch with the same version
+# 2. Builds and publishes Wolf with that tag
+# This ensures Wolf versions stay synchronized with Helix versions
