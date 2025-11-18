@@ -908,17 +908,25 @@ void UnixSocketServer::endpoint_SystemHealth(const HTTPRequest &req, std::shared
     }
   }
 
-  // Determine overall status
-  if (res.stuck_thread_count == 0) {
+  // Test if new pipelines can be created (real deadlock detection)
+  // Production deadlocked with only 35% threads stuck, but new sessions couldn't start
+  // This test detects the ACTUAL failure: global GLib type lock held
+  res.can_create_new_pipelines = wolf::monitoring::ThreadMonitor::can_create_new_pipelines();
+
+  // Determine overall status based on pipeline creation test (not thread percentage)
+  // If pipeline creation fails → CRITICAL (new sessions won't work)
+  // Thread stuck count is just context
+  if (!res.can_create_new_pipelines) {
+    res.overall_status = "critical";  // Type lock held - new sessions blocked
+  } else if (res.stuck_thread_count == 0) {
     res.overall_status = "healthy";
-  } else if (res.stuck_thread_count < res.total_thread_count / 2) {
-    res.overall_status = "degraded";
   } else {
-    res.overall_status = "critical";
+    res.overall_status = "degraded";  // Some threads stuck, but new sessions OK
   }
 
-  logs::log(logs::debug, "[HEALTH] Status={} threads={} stuck={}",
-            res.overall_status, res.total_thread_count, res.stuck_thread_count);
+  logs::log(logs::debug, "[HEALTH] Status={} threads={} stuck={} pipelines={}",
+            res.overall_status, res.total_thread_count, res.stuck_thread_count,
+            res.can_create_new_pipelines ? "OK" : "BLOCKED");
 
   send_http(socket, 200, rfl::json::write(res));
 }

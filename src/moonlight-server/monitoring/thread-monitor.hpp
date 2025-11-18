@@ -217,6 +217,57 @@ public:
 
     return stuck;
   }
+
+  /**
+   * Test if new GStreamer pipelines can be created (deadlock detection)
+   *
+   * Production deadlock: Global GLib type lock held by crashed thread
+   * → gst_element_factory_make() blocks → new sessions can't start
+   *
+   * This test detects the ACTUAL failure condition, not arbitrary thread percentages.
+   * Uses fork + timeout to avoid hanging the health check itself.
+   *
+   * @return true if pipeline creation works, false if deadlocked
+   */
+  static bool can_create_new_pipelines() {
+    // Fork child to test creation (timeout protection)
+    pid_t child = fork();
+
+    if (child == 0) {
+      // CHILD PROCESS: Try to create element (requires global GLib type lock)
+      alarm(5);  // Kill child if it hangs >5s
+
+      GstElement* test = gst_element_factory_make("fakesrc", nullptr);
+      if (test) {
+        gst_object_unref(test);
+        _exit(0);  // Success - type lock available
+      }
+      _exit(1);  // Failed to create (shouldn't happen for fakesrc)
+    }
+
+    // PARENT PROCESS: Wait for child with timeout
+    int status;
+    auto start = std::chrono::steady_clock::now();
+    const auto timeout = std::chrono::seconds(6);  // 6s max (5s alarm + 1s grace)
+
+    while (std::chrono::steady_clock::now() - start < timeout) {
+      pid_t result = waitpid(child, &status, WNOHANG);
+      if (result == child) {
+        // Child exited
+        return WIFEXITED(status) && WEXITSTATUS(status) == 0;
+      } else if (result == -1) {
+        // Error
+        return false;
+      }
+      // Child still running, sleep briefly
+      std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    }
+
+    // Child timed out - kill it and return false
+    kill(child, SIGKILL);
+    waitpid(child, &status, 0);  // Clean up zombie
+    return false;  // Type lock is held - new sessions WON'T work
+  }
 };
 
 // Initialize static instance

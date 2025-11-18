@@ -171,68 +171,6 @@ std::optional<sessions::AudioServer> setup_audio_server(const std::string &host_
  * 2. Write thread dump, generate core dump (timestamped files in /var/wolf-debug-dumps/)
  * 3. Exit main process for Docker restart
  */
-/**
- * @brief Test if new GStreamer pipelines can be created
- *
- * The real failure mode for production deadlock is: global GLib type lock held
- * → gst_element_factory_make() blocks → can't create new sessions
- *
- * This test detects the ACTUAL problem (new sessions won't work) instead of
- * arbitrary thread percentage. Production deadlocked with only 5/14 threads stuck
- * (35% < 50% threshold), but new sessions couldn't start.
- *
- * @return true if pipeline creation works, false if deadlocked
- */
-bool can_create_pipelines() {
-  // Fork child to test creation (timeout protection - if type lock held, child hangs)
-  pid_t child = fork();
-
-  if (child == 0) {
-    // CHILD PROCESS: Try to create simple element (requires global type lock)
-    alarm(5);  // Kill child if it hangs >5s
-
-    // gst_element_factory_make acquires global GLib type lock
-    // If lock is held by crashed thread, this will block forever
-    GstElement* test = gst_element_factory_make("fakesrc", nullptr);
-    if (test) {
-      gst_object_unref(test);
-      _exit(0);  // Success - type lock available
-    }
-    _exit(1);  // Failed to create (shouldn't happen for fakesrc)
-  }
-
-  // PARENT PROCESS: Wait for child with timeout
-  int status;
-  struct timespec timeout = {.tv_sec = 6, .tv_nsec = 0};  // 6s max (5s alarm + 1s grace)
-  siginfo_t info;
-
-  int result = waitid(P_PID, child, &info, WEXITED | WNOHANG);
-  if (result == 0 && info.si_pid == 0) {
-    // Child still running after initial check - wait with timeout
-    auto start = std::chrono::steady_clock::now();
-    while (std::chrono::steady_clock::now() - start < std::chrono::seconds(6)) {
-      result = waitid(P_PID, child, &info, WEXITED | WNOHANG);
-      if (result == 0 && info.si_pid != 0) {
-        // Child exited
-        if (info.si_code == CLD_EXITED && info.si_status == 0) {
-          return true;  // Pipeline creation works!
-        }
-        return false;  // Child crashed or returned error
-      }
-      std::this_thread::sleep_for(std::chrono::milliseconds(100));
-    }
-
-    // Child timed out - kill it
-    kill(child, SIGKILL);
-    waitpid(child, &status, 0);  // Clean up zombie
-    return false;  // Type lock is held - new sessions WON'T work
-  }
-
-  // Child exited immediately
-  waitpid(child, &status, 0);
-  return WIFEXITED(status) && WEXITSTATUS(status) == 0;
-}
-
 void start_watchdog() {
   std::thread([]() {
     using namespace std::chrono;
@@ -248,7 +186,7 @@ void start_watchdog() {
 
       // Test if new pipelines can be created (real failure condition)
       // Production deadlocked with only 35% threads stuck, but new sessions couldn't start
-      bool pipelines_work = can_create_pipelines();
+      bool pipelines_work = wolf::monitoring::ThreadMonitor::can_create_new_pipelines();
 
       // Also check stuck thread count for context
       auto thread_statuses = wolf::monitoring::ThreadMonitor::get().get_all_threads();

@@ -245,6 +245,7 @@ struct SystemHealthResponse {
   std::vector<ThreadHealthInfo> threads;
   int32_t stuck_thread_count;
   int32_t total_thread_count;
+  bool can_create_new_pipelines;  // Tests if GStreamer type lock is available (real deadlock check)
   std::string overall_status;  // "healthy", "degraded", "critical"
 };
 

@@ -121,17 +121,19 @@ RUN apt-get update -y && \
     binutils \
     && rm -rf /var/lib/apt/lists/*
 
-# Add ddebs repository for debug symbols (dbgsym packages)
-# Required for GStreamer, libstdc++, and other library debug symbols
-RUN echo "deb http://ddebs.ubuntu.com plucky main restricted universe multiverse" > /etc/apt/sources.list.d/ddebs.list && \
-    apt-get update -y --allow-insecure-repositories && \
-    apt-get install -y --no-install-recommends --allow-unauthenticated ubuntu-dbgsym-keyring && \
-    apt-get update -y
+# Add ddebs repository GPG key for debug symbols
+RUN apt-get update -y && \
+    apt-get install -y --no-install-recommends ca-certificates gnupg wget && \
+    wget -O- http://ddebs.ubuntu.com/dbgsym-release-key.asc | gpg --dearmor -o /usr/share/keyrings/ddebs-archive-keyring.gpg && \
+    echo "deb [signed-by=/usr/share/keyrings/ddebs-archive-keyring.gpg] http://ddebs.ubuntu.com plucky main restricted universe multiverse" > /etc/apt/sources.list.d/ddebs.list && \
+    apt-get update -y && \
+    rm -rf /var/lib/apt/lists/*
 
-# Core library and GStreamer debug symbols
+# Install debug symbols for critical libraries
 # Wolf binary compiled with -g3 -O0 -fno-omit-frame-pointer (full debug symbols)
 # System library symbols: pthread_mutex_lock, g_object_set, epoll_wait, futex, etc.
-RUN apt-get install -y --no-install-recommends \
+RUN apt-get update -y && \
+    apt-get install -y --no-install-recommends \
     libc6-dbg \
     libstdc++6-dbgsym \
     libglib2.0-0t64-dbgsym \
