@@ -304,6 +304,111 @@ void start_watchdog() {
 }
 
 /**
+ * @brief Periodic core dump - dumps core every hour for post-mortem debugging
+ *
+ * If Wolf deadlocks but doesn't hit critical threshold (e.g., 5/14 = 35% < 50%),
+ * or if restarted before watchdog triggers, we lose all debugging data.
+ * Hourly dumps ensure we always have recent state to analyze.
+ *
+ * Uses gcore which pauses process briefly (~1-3s) to get consistent snapshot.
+ * May cause brief stream glitches during dump, but process keeps running.
+ *
+ * Keeps last 48 hours of dumps + rotates old ones.
+ * Core dumps are ~3GB each: 48 × 3GB = ~150GB disk space required.
+ */
+void start_periodic_dumps() {
+  std::thread([]() {
+    using namespace std::chrono;
+
+    const hours DUMP_INTERVAL{1};  // Dump every hour
+    const int MAX_HOURLY_DUMPS = 48;  // Keep 48 hours of dumps
+
+    logs::log(logs::info, "[PERIODIC_DUMP] Started hourly core dump thread");
+
+    // First dump after 5 minutes to verify gcore works (don't wait a full hour)
+    const minutes INITIAL_DELAY{5};
+    logs::log(logs::info, "[PERIODIC_DUMP] First dump in 5 minutes, then hourly");
+    std::this_thread::sleep_for(INITIAL_DELAY);
+
+    while (true) {
+
+      logs::log(logs::info, "[PERIODIC_DUMP] Starting hourly core dump");
+
+      // Fork child process for dump (timeout protection - if gcore hangs, child dies after 5min)
+      pid_t child_pid = fork();
+
+      if (child_pid == 0) {
+        // CHILD PROCESS: Generate core dump with 5min timeout
+        alarm(300);  // Kill child if gcore hangs
+
+        try {
+          auto now = system_clock::now();
+          auto timestamp = duration_cast<seconds>(now.time_since_epoch()).count();
+          std::string debug_dir = "/var/wolf-debug-dumps";
+          std::string prefix = fmt::format("{}/hourly-{}", debug_dir, timestamp);
+
+          std::filesystem::create_directories(debug_dir);
+
+          // Generate core dump using gcore (dumps WITHOUT stopping process)
+          std::string gcore_cmd = fmt::format("gcore -o {} {} 2>&1", prefix, getppid());
+          logs::log(logs::info, "[PERIODIC_DUMP] Running: {}", gcore_cmd);
+          int gcore_result = system(gcore_cmd.c_str());
+
+          if (gcore_result == 0) {
+            logs::log(logs::info, "[PERIODIC_DUMP] Core dump saved: {}.{}", prefix, getppid());
+
+            // Rotate old hourly dumps (keep last MAX_HOURLY_DUMPS)
+            std::vector<std::filesystem::path> hourly_dumps;
+            for (const auto& entry : std::filesystem::directory_iterator(debug_dir)) {
+              std::string filename = entry.path().filename().string();
+              // Match hourly-* core dumps (not critical dumps)
+              if (filename.starts_with("hourly-") && (filename.find(".core.") != std::string::npos || filename.ends_with(fmt::format(".{}", getppid())))) {
+                hourly_dumps.push_back(entry.path());
+              }
+            }
+
+            // Sort by timestamp (filename is hourly-{timestamp}.{pid})
+            std::sort(hourly_dumps.begin(), hourly_dumps.end());
+
+            // Remove oldest dumps if we have more than MAX_HOURLY_DUMPS
+            if (hourly_dumps.size() > MAX_HOURLY_DUMPS) {
+              int to_remove = hourly_dumps.size() - MAX_HOURLY_DUMPS;
+              for (int i = 0; i < to_remove; i++) {
+                logs::log(logs::info, "[PERIODIC_DUMP] Rotating out old dump: {}", hourly_dumps[i].string());
+                std::filesystem::remove(hourly_dumps[i]);
+              }
+            }
+          } else {
+            logs::log(logs::warning, "[PERIODIC_DUMP] gcore failed with code {}", gcore_result);
+          }
+
+          _exit(0);  // Exit child cleanly
+
+        } catch (const std::exception& e) {
+          logs::log(logs::error, "[PERIODIC_DUMP] Dump failed: {}", e.what());
+          _exit(1);
+        }
+      } else if (child_pid > 0) {
+        // PARENT PROCESS: Wait for child (max 310s = 5min alarm + 10s grace)
+        int status;
+        pid_t result = waitpid(child_pid, &status, 0);
+
+        if (result == -1) {
+          logs::log(logs::error, "[PERIODIC_DUMP] waitpid failed: {}", strerror(errno));
+        } else if (WIFEXITED(status) && WEXITSTATUS(status) == 0) {
+          logs::log(logs::info, "[PERIODIC_DUMP] Hourly dump completed successfully");
+        }
+      } else {
+        logs::log(logs::error, "[PERIODIC_DUMP] fork() failed: {}", strerror(errno));
+      }
+
+      // Sleep until next dump (1 hour)
+      std::this_thread::sleep_for(DUMP_INTERVAL);
+    }
+  }).detach();
+}
+
+/**
  * @brief here's where the magic starts
  */
 void run() {
@@ -387,6 +492,9 @@ void run() {
 
   // Start watchdog thread for deadlock detection
   start_watchdog();
+
+  // Start periodic core dumps (every hour, keeps last 3)
+  start_periodic_dumps();
 
   // Monitor main thread - parked on http_thread.join()
   // Add simple heartbeat to prove main thread is alive
