@@ -121,20 +121,19 @@ RUN apt-get update -y && \
     binutils \
     && rm -rf /var/lib/apt/lists/*
 
-# Add ddebs repository for debug symbols using keyserver method
+# Install wget and upgrade packages before adding ddebs
+# wget needs libicu76 which comes from apt-get upgrade
 RUN apt-get update -y && \
-    apt-get install -y --no-install-recommends ca-certificates gnupg dirmngr && \
-    gpg --keyserver keyserver.ubuntu.com --recv-keys F2EDC64DC5AEE1F6B9C621F0C8CAB6595FDFF622 && \
-    gpg --export F2EDC64DC5AEE1F6B9C621F0C8CAB6595FDFF622 > /usr/share/keyrings/ddebs-archive-keyring.gpg && \
-    echo "deb [signed-by=/usr/share/keyrings/ddebs-archive-keyring.gpg] http://ddebs.ubuntu.com plucky main restricted universe multiverse" > /etc/apt/sources.list.d/ddebs.list && \
-    rm -rf /var/lib/apt/lists/*
-
-# Upgrade system packages to latest versions so they match available debug symbols
-RUN apt-get update -y && \
+    apt-get install -y --no-install-recommends wget ca-certificates gnupg && \
     apt-get upgrade -y && \
     rm -rf /var/lib/apt/lists/*
 
-# Install debug symbols (will match upgraded package versions)
+# Add ddebs repository for debug symbols
+# Download GPG key from official ddebs.ubuntu.com
+RUN wget -O- http://ddebs.ubuntu.com/dbgsym-release-key.asc | gpg --dearmor -o /usr/share/keyrings/ddebs-archive-keyring.gpg && \
+    echo "deb [signed-by=/usr/share/keyrings/ddebs-archive-keyring.gpg] http://ddebs.ubuntu.com plucky main restricted universe multiverse" > /etc/apt/sources.list.d/ddebs.list
+
+# Install debug symbols (matching upgraded package versions)
 # Wolf binary compiled with -g3 -O0 -fno-omit-frame-pointer (full debug symbols)
 # System symbols: pthread_mutex_lock, g_object_set, gst_element_factory_make, futex, epoll
 RUN apt-get update -y && \
