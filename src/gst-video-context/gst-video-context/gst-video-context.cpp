@@ -1,11 +1,14 @@
 #include "gst-video-context.hpp"
+#include <algorithm>
 #include <filesystem>
+#include <fstream>
 #include <gst/cuda/gstcudacontext.h>
 #include <gst/cuda/gstcudaloader.h>
 #include <gst/cuda/gstcudautils.h>
 #include <helpers/logger.hpp>
 #include <sys/stat.h>
 #include <sys/sysmacros.h>
+#include <vector>
 
 namespace gst_video_context {
 
@@ -70,46 +73,55 @@ std::optional<int> getCudaDeviceIndexFromPciBusId(const std::string &pciBusId) {
     return std::nullopt;
   }
 
-  std::string pciBusIdLower = pciBusId;
-  std::transform(pciBusIdLower.begin(), pciBusIdLower.end(), pciBusIdLower.begin(), ::tolower);
+  auto normalize = [](std::string value) {
+    std::transform(value.begin(), value.end(), value.begin(), ::tolower);
+    return value;
+  };
 
+  std::vector<std::pair<std::string, std::string>> gpuBusIds;
   for (const auto &entry : fs::directory_iterator(gpusDir, ec)) {
-    if (!entry.is_directory())
+    if (!entry.is_directory()) {
       continue;
+    }
 
-    logs::log(logs::debug, "Found Nvidia GPU: {}", entry.path().string());
+    std::string busId = entry.path().filename().string();
+    logs::log(logs::debug, "Found Nvidia GPU: {}", busId);
 
-    std::string gpuBusId = entry.path().filename().string();
-    std::string gpuBusIdLower = gpuBusId;
-    std::transform(gpuBusIdLower.begin(), gpuBusIdLower.end(), gpuBusIdLower.begin(), ::tolower);
+    gpuBusIds.emplace_back(busId, normalize(busId));
+  }
 
-    if (gpuBusIdLower == pciBusIdLower) {
-      fs::path infoPath = entry.path() / "information";
-      std::ifstream infoFile(infoPath);
-      if (!infoFile.is_open()) {
-        continue;
-      }
+  if (gpuBusIds.empty()) {
+    logs::log(logs::warning, "No NVIDIA GPUs found in {}", gpusDir.string());
+    return std::nullopt;
+  }
 
-      std::string line;
-      while (std::getline(infoFile, line)) {
-        if (line.find("Device Minor:") != std::string::npos) {
-          size_t pos = line.find(':');
-          if (pos != std::string::npos) {
-            std::string minorStr = line.substr(pos + 1);
-            // Trim whitespace
-            minorStr.erase(0, minorStr.find_first_not_of(" \t"));
-            minorStr.erase(minorStr.find_last_not_of(" \t") + 1);
+  std::sort(gpuBusIds.begin(), gpuBusIds.end(), [](const auto &lhs, const auto &rhs) {
+    return lhs.second < rhs.second;
+  });
 
-            try {
-              return std::stoi(minorStr);
-            } catch (...) {
-              return std::nullopt;
-            }
-          }
-        }
-      }
+  std::string target = normalize(pciBusId);
+  for (size_t index = 0; index < gpuBusIds.size(); ++index) {
+    if (gpuBusIds[index].second == target) {
+      logs::log(logs::debug,
+                "PCI bus ID {} mapped to CUDA device index {} (sorted order)",
+                gpuBusIds[index].first,
+                index);
+      return static_cast<int>(index);
     }
   }
+
+  std::string availableIds;
+  for (const auto &entry : gpuBusIds) {
+    if (!availableIds.empty()) {
+      availableIds.append(", ");
+    }
+    availableIds.append(entry.first);
+  }
+
+  logs::log(logs::warning,
+            "PCI bus ID {} not found when mapping to CUDA device index. Available GPUs: {}",
+            pciBusId,
+            availableIds);
 
   return std::nullopt;
 }

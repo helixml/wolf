@@ -240,8 +240,7 @@ setup_lobbies_handlers(const immer::box<state::AppState> &app_state,
         // Switch over all joypads present in the session into the lobby
         events::JoypadList joypads = session->joypads->load();
         for (auto [_joypad_nr, joypad] : joypads) {
-          // Plug them into the lobby
-          events::PlugDeviceEvent plug_ev{.session_id = lobby->id};
+          events::PlugDeviceEvent plug_ev{.session_id = std::to_string(session->session_id)};
           std::visit(
               [&plug_ev](auto &pad) {
                 plug_ev.udev_events = pad.get_udev_events();
@@ -321,8 +320,6 @@ setup_lobbies_handlers(const immer::box<state::AppState> &app_state,
                     "[LOBBY] adding device to session {} in lobby {}",
                     plug_device_event->session_id,
                     lobby->id);
-
-          // TODO: somehow block the PlugDeviceEvent handler in the underlying session!
 
           lobby->plugged_devices_queue->push(immer::box<events::PlugDeviceEvent>{
               events::PlugDeviceEvent{.session_id = lobby->id,

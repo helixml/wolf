@@ -107,7 +107,7 @@ req(CURL *handle,
 
 std::optional<Container> DockerAPI::get_by_id(std::string_view id) const {
   if (auto conn = docker_connect(socket_path)) {
-    auto url = fmt::format("http://localhost/{}/containers/{}/json", DOCKER_API_VERSION, id);
+    auto url = fmt::format("http://localhost/{}/containers/{}/json", docker_api_version, id);
     auto raw_msg = req(conn.value().get(), GET, url);
     if (raw_msg && raw_msg->first == 200) {
       auto json = parse_json(raw_msg->second);
@@ -122,7 +122,7 @@ std::optional<Container> DockerAPI::get_by_id(std::string_view id) const {
 
 std::vector<Container> DockerAPI::get_containers(bool all) const {
   if (auto conn = docker_connect(socket_path)) {
-    auto url = fmt::format("http://localhost/{}/containers/json{}", DOCKER_API_VERSION, all ? "?all=true" : "");
+    auto url = fmt::format("http://localhost/{}/containers/json{}", docker_api_version, all ? "?all=true" : "");
     auto raw_msg = req(conn.value().get(), GET, url);
     if (raw_msg && raw_msg->first == 200) {
       auto json = parse_json(raw_msg->second);
@@ -156,7 +156,7 @@ std::optional<Container> DockerAPI::create(const Container &container,
                                            std::string_view registry_auth,
                                            bool force_recreate_if_present) const {
   if (auto conn = docker_connect(socket_path)) {
-    auto url = fmt::format("http://localhost/{}/containers/create?name={}", DOCKER_API_VERSION, container.name);
+    auto url = fmt::format("http://localhost/{}/containers/create?name={}", docker_api_version, container.name);
     // See: https://stackoverflow.com/a/39149767 and https://github.com/moby/moby/issues/3039
     auto exposed_ports = json::object();
     for (const auto &port : container.ports) {
@@ -208,7 +208,7 @@ std::optional<Container> DockerAPI::create(const Container &container,
 bool DockerAPI::start_by_id(std::string_view id) const {
   if (auto conn = docker_connect(socket_path)) {
     auto raw_msg =
-        req(conn.value().get(), POST, fmt::format("http://localhost/{}/containers/{}/start", DOCKER_API_VERSION, id));
+        req(conn.value().get(), POST, fmt::format("http://localhost/{}/containers/{}/start", docker_api_version, id));
     if (raw_msg && (raw_msg->first == 204 || raw_msg->first == 304)) {
       return true;
     } else if (raw_msg) {
@@ -224,7 +224,7 @@ bool DockerAPI::stop_by_id(std::string_view id, int timeout_seconds) const {
     auto raw_msg = req(
         conn.value().get(),
         POST,
-        fmt::format("http://localhost/{}/containers/{}/stop?t={}", DOCKER_API_VERSION, id, timeout_seconds));
+        fmt::format("http://localhost/{}/containers/{}/stop?t={}", docker_api_version, id, timeout_seconds));
     if (raw_msg && (raw_msg->first == 204 || raw_msg->first == 304)) {
       return true;
     } else if (raw_msg) {
@@ -238,7 +238,7 @@ bool DockerAPI::stop_by_id(std::string_view id, int timeout_seconds) const {
 bool DockerAPI::remove_by_id(std::string_view id, bool remove_volumes, bool force, bool link) const {
   if (auto conn = docker_connect(socket_path)) {
     auto api_url = fmt::format("http://localhost/{}/containers/{}?v={}&force={}&link={}",
-                               DOCKER_API_VERSION,
+                               docker_api_version,
                                id,
                                remove_volumes,
                                force,
@@ -282,7 +282,7 @@ bool DockerAPI::pull_image(std::string_view image_name,
                            std::string_view registry_auth,
                            const std::function<void(const DockerProgressEvent &)> &progress_fn) const {
   if (auto conn = docker_connect(socket_path)) {
-    auto api_url = fmt::format("http://localhost/{}/images/create?fromImage={}", DOCKER_API_VERSION, image_name);
+    auto api_url = fmt::format("http://localhost/{}/images/create?fromImage={}", docker_api_version, image_name);
 
     struct PullState {
       std::string buffer = {};
@@ -391,12 +391,12 @@ bool DockerAPI::pull_image(std::string_view image_name,
  */
 std::optional<std::string> DockerAPI::inspect_image(std::string_view image_name) const {
   if (auto conn = docker_connect(socket_path)) {
-    auto api_url = fmt::format("http://localhost/{}/images/{}/json", DOCKER_API_VERSION, image_name);
+    auto api_url = fmt::format("http://localhost/{}/images/{}/json", docker_api_version, image_name);
     auto raw_msg = req(conn.value().get(), GET, api_url);
     if (raw_msg && raw_msg->first == 200) {
       return raw_msg->second;
     } else if (raw_msg) {
-      logs::log(logs::debug, "[DOCKER] inspect_image returned {} - {}", raw_msg->first, raw_msg->second);
+      logs::log(logs::trace, "[DOCKER] inspect_image returned {} - {}", raw_msg->first, raw_msg->second);
     }
   }
   return std::nullopt;
@@ -407,7 +407,7 @@ DockerAPI::get_logs(std::string_view id, bool get_stdout, bool get_stderr, int s
   if (auto conn = docker_connect(socket_path)) {
     auto api_url = fmt::format(
         "http://localhost/{}/containers/{}/logs?stdout={}&stderr={}&since={}&until={}&timestamps={}&follow=false",
-        DOCKER_API_VERSION,
+        docker_api_version,
         id,
         get_stdout,
         get_stderr,
@@ -427,7 +427,7 @@ DockerAPI::get_logs(std::string_view id, bool get_stdout, bool get_stderr, int s
 
 bool DockerAPI::exec(std::string_view id, const std::vector<std::string_view> &command, std::string_view user) const {
   if (auto conn = docker_connect(socket_path)) {
-    auto api_url = fmt::format("http://localhost/{}/containers/{}/exec", DOCKER_API_VERSION, id);
+    auto api_url = fmt::format("http://localhost/{}/containers/{}/exec", docker_api_version, id);
     auto post_params = json::object{
         {"Cmd", command},
         {"User", user},
@@ -441,14 +441,14 @@ bool DockerAPI::exec(std::string_view id, const std::vector<std::string_view> &c
       // Exec request created, start it
       auto json = parse_json(raw_msg->second);
       std::string exec_id = json.at("Id").as_string().data();
-      api_url = fmt::format("http://localhost/{}/exec/{}/start", DOCKER_API_VERSION, exec_id);
+      api_url = fmt::format("http://localhost/{}/exec/{}/start", docker_api_version, exec_id);
       post_params = json::object{{"Detach", false}, {"Tty", false}};
       json_payload = json::serialize(post_params);
       raw_msg = req(conn.value().get(), POST, api_url, json_payload);
       if (raw_msg && raw_msg->first == 200) {
         auto console = raw_msg->second;
         // Exec request completed, inspect the results
-        api_url = fmt::format("http://localhost/{}/exec/{}/json", DOCKER_API_VERSION, exec_id);
+        api_url = fmt::format("http://localhost/{}/exec/{}/json", docker_api_version, exec_id);
         raw_msg = req(conn.value().get(), GET, api_url);
         if (raw_msg && raw_msg->first == 200) {
           json = parse_json(raw_msg->second);
@@ -469,6 +469,23 @@ bool DockerAPI::exec(std::string_view id, const std::vector<std::string_view> &c
   }
 
   return false;
+}
+
+std::string DockerAPI::get_api_version() {
+  if (auto conn = docker_connect(socket_path)) {
+    auto raw_msg = req(conn.value().get(), GET, "http://localhost/version");
+    if (raw_msg && raw_msg->first == 200) {
+      auto json = parse_json(raw_msg->second);
+      try {
+        auto version = json.at("ApiVersion").as_string().c_str();
+        return fmt::format("v{}", version);
+      } catch (...) {
+        logs::log(logs::warning, "[DOCKER] Unable to retrieve docker API version {}", raw_msg->second);
+      }
+    }
+  }
+  logs::log(logs::warning, "[DOCKER] Unable to retrieve docker API version, falling back to default");
+  return "v1.40";
 }
 
 } // namespace wolf::core::docker

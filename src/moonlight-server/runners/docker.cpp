@@ -213,6 +213,7 @@ void RunDocker::run(std::string_view session_id,
     auto unplug_device_handler = this->ev_bus->register_handler<immer::box<events::UnplugDeviceEvent>>(
         [session_id, container_id, hw_db_path, this](const immer::box<events::UnplugDeviceEvent> &ev) {
           if (ev->session_id == session_id) {
+            logs::log(logs::debug, "[DOCKER] Received UnplugDeviceEvent for session: {}", ev->session_id);
             for (const auto &[filename, content] : ev->udev_hw_db_entries) {
               try {
                 std::filesystem::remove(hw_db_path / filename);
@@ -240,6 +241,7 @@ void RunDocker::run(std::string_view session_id,
       // Plug all devices that are waiting in the queue
       while (auto device_ev = plugged_devices_queue->pop(50ms)) {
         if (device_ev->get().session_id == session_id) {
+          logs::log(logs::debug, "[DOCKER] Plugging device from queue in session: {}", session_id);
           if (use_fake_udev) {
             create_udev_hw_files(hw_db_path, device_ev->get().udev_hw_db_entries);
           }

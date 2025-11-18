@@ -7,7 +7,6 @@
 #include <vector>
 
 namespace wolf::core::docker {
-constexpr auto DOCKER_API_VERSION = "v1.44";
 
 enum ContainerStatus {
   CREATED,
@@ -64,9 +63,12 @@ void init();
 class DockerAPI {
 private:
   std::string socket_path; // TODO: add B64 registry_auth
+  std::string docker_api_version;
 
 public:
-  inline explicit DockerAPI(std::string socket_path = "/var/run/docker.sock") : socket_path(std::move(socket_path)) {}
+  explicit DockerAPI(std::string socket_path = "/var/run/docker.sock") : socket_path(std::move(socket_path)) {
+    docker_api_version = get_api_version();
+  }
 
   /**
    * Get a list of all containers
@@ -168,6 +170,8 @@ public:
                        int since = 0,
                        int until = 0,
                        bool timestamps = false);
+
+  std::string get_api_version();
 };
 
 } // namespace wolf::core::docker

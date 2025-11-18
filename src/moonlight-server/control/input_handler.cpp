@@ -75,7 +75,10 @@ std::shared_ptr<events::JoypadTypes> create_new_joypad(const events::StreamSessi
   switch (final_type) {
   case wolf::config::ControllerType::AUTO:
   case wolf::config::ControllerType::XBOX: {
-    logs::log(logs::info, "Creating Xbox joypad for controller {}", controller_number);
+    logs::log(logs::info,
+              "Creating Xbox joypad for controller {} in session {}",
+              controller_number,
+              session.session_id);
     auto result =
         XboxOneJoypad::create({.name = "Wolf X-Box One (virtual) pad",
                                // https://github.com/torvalds/linux/blob/master/drivers/input/joystick/xpad.c#L147

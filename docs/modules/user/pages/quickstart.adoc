@@ -118,12 +118,13 @@ services:
       - /dev/dri
       - /dev/uinput
       - /dev/uhid
-    runtime: nvidia
     deploy:
       resources:
         reservations:
           devices:
-            - capabilities: [gpu]
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
     network_mode: host
     restart: unless-stopped
 ....
@@ -500,6 +501,202 @@ And if you have a multi GPU setup, don't forget to set the below env variable
 environment:
     - WOLF_RENDER_NODE=/dev/dri/renderD12X
 ----
+
+--
+Podman Quadlets::
++
+--
+
+The easiest way to run Wolf is to use a `rootful` service, this isn't a strict requirement; if you give access to the `/dev/dri` devices, `/etc/wolf` and install the required udev rules everything should work.
+
+Place your `wolf.container` file (populated with either the Nvidia or Intel/AMD examples below) in `/etc/containers/systemd`, then run `sudo systemctl daemon-reload` and `sudo systemctl start wolf.service` to start Wolf.
+
+**Nvidia**
+
+This example is based on Nvidia (Manual), you will need to create the Nvidia volume first before starting the service:
+
+1.{empty} Create a new image that will contain the Nvidia driver files:
+
+[source,bash]
+....
+sudo curl https://raw.githubusercontent.com/games-on-whales/gow/master/images/nvidia-driver/Dockerfile | sudo podman build -t gow/nvidia-driver:latest -f - --build-arg NV_VERSION=$(cat /sys/module/nvidia/version) .
+....
+
+2.{empty} Mount the image and create the new volume:
+
+[source,bash]
+....
+sudo podman create --rm --mount source=nvidia-driver-vol,destination=/usr/nvidia gow/nvidia-driver:latest sh
+....
+
+Check volume exists with:
+
+[source,bash]
+....
+sudo docker volume ls | grep nvidia-driver
+
+local     nvidia-driver-vol
+....
+
+3.{empty} This is an additional step for Podman. Start the temporary container you just created. `sudo podman ps -a` will show a container using a temporary name (e.g. `musing_pascal`) and your local `gow/nvidia-driver` image. Only once this container is started will your new volume be populated. Run:
+
+[source,bash]
+....
+sudo podman start musing_pascal
+....
+
+You can verify the contents of of your `nvidia-driver-vol` by running `sudo podman volume inspect nvidia-driver-vol` and then browsing the `Mountpoint`: `sudo la -la /var/lib/containers/storage/volumes/nvidia-driver-vol/_data`. You should see a non empty folder:
+
+[source,bash]
+....
+total 12
+drwxr-xr-x. 6 root root   54 Oct 27 22:06 .
+drwx------. 3 root root   19 Oct 28 14:40 ..
+drwxr-xr-x. 2 root root 4096 Oct 27 22:06 bin
+drwxr-xr-x. 5 root root 4096 Oct 28 14:44 lib
+drwxr-xr-x. 4 root root 4096 Oct 27 22:06 lib32
+drwxr-xr-x. 7 root root   77 Oct 27 22:07 share
+....
+
+4.{empty} Use the example below to create a `wolf.container` file in `/etc/containers/systemd`, then run `sudo systemctl daemon-reload` and `sudo systemctl start wolf.service` to start.
+
+[source,bash]
+....
+[Unit]
+Description=Wolf / Games On Whales
+Requires=network-online.target podman.socket
+After=network-online.target podman.socket
+
+[Service]
+TimeoutStartSec=900
+ExecStartPre=-/usr/bin/podman rm --force WolfPulseAudio
+Restart=on-failure
+RestartSec=5
+StartLimitBurst=5
+
+[Container]
+AutoUpdate=registry
+ContainerName=%p
+HostName=%p
+Image=ghcr.io/games-on-whales/wolf:stable
+Network=host
+SecurityLabelDisable=true
+PodmanArgs=--ipc=host --device-cgroup-rule "c 13:* rmw"
+AddDevice=/dev/dri
+AddDevice=/dev/uinput
+AddDevice=/dev/uhid
+AddDevice=/dev/nvidia-uvm
+AddDevice=/dev/nvidia-uvm-tools
+AddDevice=/dev/nvidia-caps/nvidia-cap1
+AddDevice=/dev/nvidia-caps/nvidia-cap2
+AddDevice=/dev/nvidiactl
+AddDevice=/dev/nvidia0
+AddDevice=/dev/nvidia-modeset
+Volume=nvidia-driver-vol:/usr/nvidia
+Volume=/dev/:/dev/:rw
+Volume=/run/udev:/run/udev:rw
+Volume=/etc/wolf/:/etc/wolf:z
+Volume=/run/podman/podman.sock:/var/run/docker.sock:ro
+Environment=WOLF_STOP_CONTAINER_ON_EXIT=TRUE
+Environment=NVIDIA_DRIVER_VOLUME_NAME=nvidia-driver-vol
+Environment=WOLF_RENDER_NODE=/dev/dri/renderD129
+
+[Install]
+WantedBy=multi-user.target
+....
+
+.The service won't start due to missing devices (e.g. /dev/nvidia-modeset)
+[%collapsible]
+====
+Using uCore (CoreOS), I needed to start https://docs.nvidia.com/deploy/driver-persistence/index.html#persistence-daemon[Nvidia persistenced] to get all the required devices in place:
+
+[source,bash]
+....
+sudo systemctl enable --now nvidia-persistenced.service
+....
+
+One last final check: we have to make sure that the `nvidia-drm` module has been loaded and that the module is loaded with the flag `modeset=1`.
+
+[source,bash]
+....
+sudo cat /sys/module/nvidia_drm/parameters/modeset
+Y
+....
+====
+
+.Multiple GPUs / finding the device ID for WOLF_RENDER_NODE
+[%collapsible]
+====
+If you have a multi GPU setup, you need to set the `WOLF_RENDER_NODE` environmnet variable to the correct card. You can find a list of attached graphics cards with:
+
+[source,bash]
+....
+ls -l /sys/class/drm/renderD*/device/driver
+
+lrwxrwxrwx. 1 root root 0 Oct 29 19:44 /sys/class/drm/renderD128/device/driver -> ../../../bus/pci/drivers/i915
+lrwxrwxrwx. 1 root root 0 Oct 29 19:44 /sys/class/drm/renderD129/device/driver -> ../../../../bus/pci/drivers/nvidia
+....
+====
+
+**Intel/AMD**
+
+1.{empty} Use the example below to create a `wolf.container` file in `/etc/containers/systemd`, then run `sudo systemctl daemon-reload` and `sudo systemctl start wolf.service` to start.
+
+[source,bash]
+....
+[Unit]
+Description=Wolf / Games On Whales
+Requires=network-online.target podman.socket
+After=network-online.target podman.socket
+
+[Service]
+TimeoutStartSec=900
+ExecStartPre=-/usr/bin/podman rm --force WolfPulseAudio
+Restart=on-failure
+RestartSec=5
+StartLimitBurst=5
+
+[Container]
+AutoUpdate=registry
+ContainerName=%p
+HostName=%p
+Image=ghcr.io/games-on-whales/wolf:stable
+Network=host
+SecurityLabelDisable=true
+PodmanArgs=--ipc=host --device-cgroup-rule "c 13:* rmw"
+AddDevice=/dev/dri
+AddDevice=/dev/uinput
+AddDevice=/dev/uhid
+Volume=/dev/:/dev/:rw
+Volume=/run/udev:/run/udev:rw
+Volume=/etc/wolf/:/etc/wolf:z
+Volume=/run/podman/podman.sock:/var/run/docker.sock:ro
+Environment=WOLF_STOP_CONTAINER_ON_EXIT=TRUE
+
+[Install]
+WantedBy=multi-user.target
+....
+
+.Issues with Podman socket or Podman socket missing
+[%collapsible]
+====
+Make sure your https://github.com/containers/podman/blob/main/docs/tutorials/socket_activation.md[Podman socket] service is running with `sudo systemctl enable --now podman.socket` and verify it has started correctly with `sudo systemctl status podman.socket`. The output should look like this:
+
+[source,bash]
+....
+● podman.socket - Podman API Socket
+     Loaded: loaded (/usr/lib/systemd/system/podman.socket; enabled; preset: disabled)
+     Active: active (listening) since Wed 2025-10-29 19:44:24 CET; 13min ago
+ Invocation: d15ecfcbb2b04de49af1c977925982e9
+   Triggers: ● podman.service
+       Docs: man:podman-system-service(1)
+     Listen: /run/podman/podman.sock (Stream)
+     CGroup: /system.slice/podman.socket
+....
+
+Make a note of where the socket is running (e.g `/run/podman/podman.sock` in the example above) and update your `wolf.container` if necessary.
+====
+
 --
 ======
 

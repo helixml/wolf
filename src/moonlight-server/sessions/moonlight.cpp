@@ -63,13 +63,19 @@ setup_moonlight_handlers(const immer::box<state::AppState> &app_state,
       }));
 
   handlers.push_back(app_state->event_bus->register_handler<immer::box<events::PlugDeviceEvent>>(
-      [plugged_devices_queue](const immer::box<events::PlugDeviceEvent> &hotplug_ev) {
+      [plugged_devices_queue, lobbies = app_state->lobbies](const immer::box<events::PlugDeviceEvent> &hotplug_ev) {
         logs::log(logs::debug, "{} received hot-plug device event", hotplug_ev->session_id);
 
-        if (auto session_devices_queue = plugged_devices_queue->load()->find(hotplug_ev->session_id)) {
-          session_devices_queue->get()->push(hotplug_ev);
+        // If we are currently in a lobby we don't want to plug the device to the original wolf-ui session
+        if (!state::get_lobby_by_connected_session(lobbies->load(), hotplug_ev->session_id)) {
+          if (auto session_devices_queue = plugged_devices_queue->load()->find(hotplug_ev->session_id)) {
+            session_devices_queue->get()->push(hotplug_ev);
+          } else {
+            logs::log(logs::warning, "Unable to find plugged_devices_queue for session {}", hotplug_ev->session_id);
+          }
         } else {
-          logs::log(logs::warning, "Unable to find plugged_devices_queue for session {}", hotplug_ev->session_id);
+          // This event will be picked up by the lobbies handler
+          logs::log(logs::debug, "Session {} is in a lobby, ignoring hot-plug device event", hotplug_ev->session_id);
         }
       }));
 
