@@ -497,7 +497,7 @@ void start_streaming_audio(immer::box<events::AudioSession> audio_session,
 
           /* NOW we're in the pipeline thread - safe to call g_object_set */
           auto pipe_name = fmt::format("interpipesrc_{}_audio", session_id);
-          auto pipeline_ptr = GST_ELEMENT(gst_message_get_src(msg));
+          auto pipeline_ptr = GST_ELEMENT(GST_MESSAGE_SRC(msg));
           if (auto src = gst_bin_get_by_name(GST_BIN(pipeline_ptr), pipe_name.c_str())) {
             logs::log(logs::warning, "[HANG_DEBUG] Switching audio interpipesrc listen-to: {} → {}", pipe_name, interpipe_id);
 
