@@ -121,13 +121,13 @@ RUN apt-get update -y && \
     binutils \
     && rm -rf /var/lib/apt/lists/*
 
-# Add ddebs repository for debug symbols (including security updates)
+# Add ddebs repository for debug symbols (including updates)
 # Download GPG key from official ddebs.ubuntu.com
+# Note: ddebs has plucky and plucky-updates, but NO plucky-security suite
 RUN apt-get update -y && \
     apt-get install -y --no-install-recommends wget ca-certificates gnupg && \
     wget -O- http://ddebs.ubuntu.com/dbgsym-release-key.asc | gpg --dearmor -o /usr/share/keyrings/ddebs-archive-keyring.gpg && \
     echo "deb [signed-by=/usr/share/keyrings/ddebs-archive-keyring.gpg] http://ddebs.ubuntu.com plucky main restricted universe multiverse" > /etc/apt/sources.list.d/ddebs.list && \
-    echo "deb [signed-by=/usr/share/keyrings/ddebs-archive-keyring.gpg] http://ddebs.ubuntu.com plucky-security main restricted universe multiverse" >> /etc/apt/sources.list.d/ddebs.list && \
     echo "deb [signed-by=/usr/share/keyrings/ddebs-archive-keyring.gpg] http://ddebs.ubuntu.com plucky-updates main restricted universe multiverse" >> /etc/apt/sources.list.d/ddebs.list && \
     rm -rf /var/lib/apt/lists/*
 
