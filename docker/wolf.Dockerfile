@@ -121,12 +121,23 @@ RUN apt-get update -y && \
     binutils \
     && rm -rf /var/lib/apt/lists/*
 
-# Core library debug symbols
+# Add ddebs repository for debug symbols (dbgsym packages)
+# Required for GStreamer, libstdc++, and other library debug symbols
+RUN echo "deb http://ddebs.ubuntu.com plucky main restricted universe multiverse" > /etc/apt/sources.list.d/ddebs.list && \
+    apt-get update -y --allow-insecure-repositories && \
+    apt-get install -y --no-install-recommends --allow-unauthenticated ubuntu-dbgsym-keyring && \
+    apt-get update -y
+
+# Core library and GStreamer debug symbols
 # Wolf binary compiled with -g3 -O0 -fno-omit-frame-pointer (full debug symbols)
-# System library symbols from libc6-dbg (pthread_mutex_lock, epoll_wait, etc.)
-RUN apt-get update -y && \
-    apt-get install -y --no-install-recommends \
+# System library symbols: pthread_mutex_lock, g_object_set, epoll_wait, futex, etc.
+RUN apt-get install -y --no-install-recommends \
     libc6-dbg \
+    libstdc++6-dbgsym \
+    libglib2.0-0t64-dbgsym \
+    libgstreamer1.0-0-dbgsym \
+    gstreamer1.0-plugins-base-dbgsym \
+    gstreamer1.0-plugins-good-dbgsym \
     && rm -rf /var/lib/apt/lists/*
 
 # gst-plugin-wayland runtime dependencies
