@@ -302,6 +302,39 @@ void start_streaming_video(immer::box<events::VideoSession> video_session,
 
     auto bus = gst_pipeline_get_bus(GST_PIPELINE(pipeline.get()));
     gst_bus_set_sync_handler(bus, bus_sync_handler, ctx_data_ptr.get(), nullptr);
+
+    // Bus message handler for switch-interpipe-src (runs in pipeline thread - safe for g_object_set)
+    auto sess_id_for_handler = video_session->session_id;
+    g_signal_connect(bus, "message::application", G_CALLBACK(+[](GstBus*, GstMessage* msg, gpointer user_data) {
+      const GstStructure* s = gst_message_get_structure(msg);
+      if (gst_structure_has_name(s, "switch-interpipe-src")) {
+        guint session_id;
+        const char* interpipe_id;
+        if (gst_structure_get_uint(s, "session-id", &session_id) &&
+            (interpipe_id = gst_structure_get_string(s, "interpipe-id"))) {
+
+          logs::log(logs::warning, "[HANG_DEBUG] Pipeline thread handling switch-interpipe-src: session {}, target {}", session_id, interpipe_id);
+
+          /* NOW we're in the pipeline thread - safe to call g_object_set */
+          auto pipe_name = fmt::format("interpipesrc_{}_video", session_id);
+          auto pipeline_ptr = GST_ELEMENT(gst_message_get_src(msg));
+          if (auto src = gst_bin_get_by_name(GST_BIN(pipeline_ptr), pipe_name.c_str())) {
+            logs::log(logs::warning, "[HANG_DEBUG] Switching interpipesrc listen-to: {} → {}", pipe_name, interpipe_id);
+
+            // Set allow-renegotiation to true to handle resolution changes
+            g_object_set(src, "allow-renegotiation", TRUE, nullptr);
+            g_object_set(src, "listen-to", interpipe_id, nullptr);
+
+            logs::log(logs::warning, "[HANG_DEBUG] Unrefing interpipesrc element");
+            gst_object_unref(src);
+            logs::log(logs::warning, "[HANG_DEBUG] Switch complete for session {}", session_id);
+          } else {
+            logs::log(logs::error, "[GSTREAMER] Failed to get video interpipesrc for {}", session_id);
+          }
+        }
+      }
+    }), &sess_id_for_handler);
+
     gst_object_unref(bus);
 
     // Guard against duplicate pause events
@@ -374,23 +407,22 @@ void start_streaming_video(immer::box<events::VideoSession> video_session,
                       sess_id,
                       switch_ev->interpipe_src_id,
                       gst_element_state_get_name(state));
-            /* Grab a reference to the interpipesrc */
-            auto pipe_name = fmt::format("interpipesrc_{}_video", sess_id);
-            if (auto src = gst_bin_get_by_name(GST_BIN(pipeline.get()), pipe_name.c_str())) {
-              /* Perform the switch */
-              auto video_interpipe = fmt::format("{}_video", switch_ev->interpipe_src_id);
-              logs::log(logs::warning, "[HANG_DEBUG] Switching interpipesrc listen-to: {} → {}", pipe_name, video_interpipe);
 
-              // Set allow-renegotiation to true to handle resolution changes
-              g_object_set(src, "allow-renegotiation", TRUE, nullptr);
-              g_object_set(src, "listen-to", video_interpipe.c_str(), nullptr);
+            /* DEADLOCK FIX: Post message to pipeline bus instead of calling g_object_set directly
+             * Problem: g_object_set acquires global GLib type lock - if this thread crashes while
+             * holding it, ALL pipeline creation blocks (can't create new sessions).
+             * Solution: Post application message to pipeline's bus, let pipeline thread handle it.
+             * Pipeline thread owns the GMainContext, so g_object_set runs in the right thread.
+             */
+            auto video_interpipe = fmt::format("{}_video", switch_ev->interpipe_src_id);
+            logs::log(logs::warning, "[HANG_DEBUG] Posting switch-interpipe-src message to pipeline bus: {}", video_interpipe);
 
-              logs::log(logs::warning, "[HANG_DEBUG] Unrefing interpipesrc element");
-              gst_object_unref(src);
-              logs::log(logs::warning, "[HANG_DEBUG] Switch complete for session {}", sess_id);
-            } else {
-              logs::log(logs::error, "[GSTREAMER] Failed to get video interpipesrc for {}", sess_id);
-            }
+            gst_element_post_message(pipeline.get(),
+              gst_message_new_application(GST_OBJECT(pipeline.get()),
+                gst_structure_new("switch-interpipe-src",
+                  "session-id", G_TYPE_UINT, sess_id,
+                  "interpipe-id", G_TYPE_STRING, video_interpipe.c_str(),
+                  nullptr)));
           }
         });
 
@@ -451,6 +483,37 @@ void start_streaming_audio(immer::box<events::AudioSession> audio_session,
       gst_object_unref(app_sink_el);
     }
 
+    // Bus message handler for switch-interpipe-src-audio (runs in pipeline thread - safe for g_object_set)
+    auto bus = gst_pipeline_get_bus(GST_PIPELINE(pipeline.get()));
+    g_signal_connect(bus, "message::application", G_CALLBACK(+[](GstBus*, GstMessage* msg, gpointer user_data) {
+      const GstStructure* s = gst_message_get_structure(msg);
+      if (gst_structure_has_name(s, "switch-interpipe-src-audio")) {
+        guint session_id;
+        const char* interpipe_id;
+        if (gst_structure_get_uint(s, "session-id", &session_id) &&
+            (interpipe_id = gst_structure_get_string(s, "interpipe-id"))) {
+
+          logs::log(logs::warning, "[HANG_DEBUG] Audio pipeline thread handling switch-interpipe-src: session {}, target {}", session_id, interpipe_id);
+
+          /* NOW we're in the pipeline thread - safe to call g_object_set */
+          auto pipe_name = fmt::format("interpipesrc_{}_audio", session_id);
+          auto pipeline_ptr = GST_ELEMENT(gst_message_get_src(msg));
+          if (auto src = gst_bin_get_by_name(GST_BIN(pipeline_ptr), pipe_name.c_str())) {
+            logs::log(logs::warning, "[HANG_DEBUG] Switching audio interpipesrc listen-to: {} → {}", pipe_name, interpipe_id);
+
+            g_object_set(src, "listen-to", interpipe_id, nullptr);
+
+            logs::log(logs::warning, "[HANG_DEBUG] Unrefing audio interpipesrc element");
+            gst_object_unref(src);
+            logs::log(logs::warning, "[HANG_DEBUG] Audio switch complete for session {}", session_id);
+          } else {
+            logs::log(logs::error, "[GSTREAMER] Failed to get audio interpipesrc for {}", session_id);
+          }
+        }
+      }
+    }), nullptr);
+    gst_object_unref(bus);
+
     // Guard against duplicate pause events
     auto pause_sent = std::make_shared<bool>(false);
 
@@ -502,15 +565,18 @@ void start_streaming_audio(immer::box<events::AudioSession> audio_session,
                       session_id,
                       switch_ev->interpipe_src_id);
 
-            auto pipe_name = fmt::format("interpipesrc_{}_audio", session_id);
-            if (auto src = gst_bin_get_by_name(GST_BIN(pipeline.get()), pipe_name.c_str())) {
-              /* Perform the switch */
-              auto audio_interpipe = fmt::format("{}_audio", switch_ev->interpipe_src_id);
-              g_object_set(src, "listen-to", audio_interpipe.c_str(), nullptr);
-              gst_object_unref(src);
-            } else {
-              logs::log(logs::error, "[GSTREAMER] Failed to get audio interpipesrc for {}", session_id);
-            }
+            /* DEADLOCK FIX: Post message to pipeline bus instead of calling g_object_set directly
+             * Same fix as video pipeline - prevents global GLib type lock deadlock
+             */
+            auto audio_interpipe = fmt::format("{}_audio", switch_ev->interpipe_src_id);
+            logs::log(logs::warning, "[HANG_DEBUG] Posting switch-interpipe-src-audio message to pipeline bus: {}", audio_interpipe);
+
+            gst_element_post_message(pipeline.get(),
+              gst_message_new_application(GST_OBJECT(pipeline.get()),
+                gst_structure_new("switch-interpipe-src-audio",
+                  "session-id", G_TYPE_UINT, session_id,
+                  "interpipe-id", G_TYPE_STRING, audio_interpipe.c_str(),
+                  nullptr)));
           }
         });
 
