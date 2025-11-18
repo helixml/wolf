@@ -121,23 +121,12 @@ RUN apt-get update -y && \
     binutils \
     && rm -rf /var/lib/apt/lists/*
 
-# Core library debug symbols (libc, libstdc++, libpthread)
+# Core library debug symbols
+# Wolf binary compiled with -g3 -O0 -fno-omit-frame-pointer (full debug symbols)
+# System library symbols from libc6-dbg (pthread_mutex_lock, epoll_wait, etc.)
 RUN apt-get update -y && \
     apt-get install -y --no-install-recommends \
     libc6-dbg \
-    libstdc++6-dbgsym \
-    libpthread-stubs0-dev \
-    || echo "Warning: Core library debug symbols not available" \
-    && rm -rf /var/lib/apt/lists/*
-
-# GStreamer debug symbols (best effort - may not be available for all versions)
-RUN apt-get update -y && \
-    apt-get install -y --no-install-recommends \
-    libgstreamer1.0-0-dbgsym \
-    libgstbase-1.0-0-dbgsym \
-    gstreamer1.0-plugins-base-dbgsym \
-    gstreamer1.0-plugins-good-dbgsym \
-    || echo "Warning: GStreamer debug symbols not available" \
     && rm -rf /var/lib/apt/lists/*
 
 # gst-plugin-wayland runtime dependencies
