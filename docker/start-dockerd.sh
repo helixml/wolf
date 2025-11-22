@@ -52,5 +52,15 @@ done
 echo "✅ Wolf's dockerd is ready!"
 docker info 2>&1 | head -5
 
+# Create helix_default network (required for sandboxes to communicate with API)
+# Wolf's dockerd is isolated, so it needs its own helix_default network
+if ! docker network inspect helix_default >/dev/null 2>&1; then
+    echo "Creating helix_default network in Wolf's dockerd..."
+    docker network create helix_default --subnet 172.19.0.0/16
+    echo "✅ helix_default network created"
+else
+    echo "helix_default network already exists"
+fi
+
 # dockerd continues running in background
 # Wolf will create sandbox containers in this dockerd
