@@ -6,6 +6,11 @@ set -e
 
 echo "🐳 Starting Wolf's isolated dockerd..."
 
+# Use iptables-legacy for DinD compatibility (fixes nested container networking)
+# Issue: https://github.com/docker-library/docker/issues/466
+export PATH="/usr/local/sbin/.iptables-legacy:$PATH"
+echo "Using iptables-legacy for Docker-in-Docker networking compatibility"
+
 # Configure dockerd to use NVIDIA runtime (if NVIDIA GPU present)
 # This allows sandboxes to use --gpus or --runtime=nvidia
 mkdir -p /etc/docker
