@@ -64,10 +64,12 @@ echo "✅ iptables FORWARD policy set to ACCEPT"
 
 # Create helix_default network (required for sandboxes to communicate with API)
 # Wolf's dockerd is isolated, so it needs its own helix_default network
+# CRITICAL: Use DIFFERENT subnet than host (host uses 172.19.0.0/16)
+# Using 172.20.0.0/16 prevents routing conflicts (sandboxes can reach host network via Wolf's eth0)
 if ! docker network inspect helix_default >/dev/null 2>&1; then
-    echo "Creating helix_default network in Wolf's dockerd..."
-    docker network create helix_default --subnet 172.19.0.0/16
-    echo "✅ helix_default network created"
+    echo "Creating helix_default network in Wolf's dockerd (subnet 172.20.0.0/16)..."
+    docker network create helix_default --subnet 172.20.0.0/16 --gateway 172.20.0.1
+    echo "✅ helix_default network created (isolated from host network)"
 else
     echo "helix_default network already exists"
 fi
