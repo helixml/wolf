@@ -52,6 +52,11 @@ done
 echo "✅ Wolf's dockerd is ready!"
 docker info 2>&1 | head -5
 
+# Enable forwarding for nested containers to reach external network
+# Required for DinD outbound connections (internet, RevDial to API, etc.)
+iptables -P FORWARD ACCEPT
+echo "✅ iptables FORWARD policy set to ACCEPT"
+
 # Create helix_default network (required for sandboxes to communicate with API)
 # Wolf's dockerd is isolated, so it needs its own helix_default network
 if ! docker network inspect helix_default >/dev/null 2>&1; then
