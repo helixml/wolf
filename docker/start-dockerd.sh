@@ -6,6 +6,12 @@ set -e
 
 echo "🐳 Starting Wolf's isolated dockerd..."
 
+# Clean up stale PID file if exists (common issue with Docker restarts)
+if [ -f /var/run/docker.pid ]; then
+    echo "🧹 Cleaning up stale docker.pid file"
+    rm -f /var/run/docker.pid
+fi
+
 # Use iptables-legacy for DinD compatibility (fixes nested container networking)
 # Issue: https://github.com/docker-library/docker/issues/466
 export PATH="/usr/local/sbin/.iptables-legacy:$PATH"
