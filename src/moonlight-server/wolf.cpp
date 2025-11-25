@@ -163,6 +163,57 @@ std::optional<sessions::AudioServer> setup_audio_server(const std::string &host_
 }
 
 /**
+ * @brief Test if Wolf's Unix socket API is responding
+ *
+ * Attempts to connect to the socket and make a simple HTTP request.
+ * Returns false if socket is dead (connection refused, timeout, etc.)
+ * This catches cases where an unhandled exception kills the io_context
+ * but the watchdog thread keeps running.
+ */
+bool test_socket_health(const std::string& socket_path) {
+  try {
+    boost::asio::io_context io_ctx;
+
+    // Set a 5-second timeout for the entire operation
+    boost::asio::local::stream_protocol::socket socket(io_ctx);
+    boost::asio::local::stream_protocol::endpoint endpoint(socket_path);
+
+    // Try to connect
+    boost::system::error_code ec;
+    socket.connect(endpoint, ec);
+    if (ec) {
+      logs::log(logs::debug, "[WATCHDOG] Socket connect failed: {}", ec.message());
+      return false;
+    }
+
+    // Send a simple HTTP request
+    std::string request = "GET /api/v1/system/health HTTP/1.0\r\n\r\n";
+    boost::asio::write(socket, boost::asio::buffer(request), ec);
+    if (ec) {
+      logs::log(logs::debug, "[WATCHDOG] Socket write failed: {}", ec.message());
+      return false;
+    }
+
+    // Read response (just need to get some data back)
+    std::array<char, 256> buf;
+    std::size_t len = socket.read_some(boost::asio::buffer(buf), ec);
+    if (ec && ec != boost::asio::error::eof) {
+      logs::log(logs::debug, "[WATCHDOG] Socket read failed: {}", ec.message());
+      return false;
+    }
+
+    // Check for HTTP 200 response
+    std::string response(buf.data(), len);
+    return response.find("HTTP/1.0 200") != std::string::npos ||
+           response.find("HTTP/1.1 200") != std::string::npos;
+
+  } catch (const std::exception& e) {
+    logs::log(logs::debug, "[WATCHDOG] Socket health check exception: {}", e.what());
+    return false;
+  }
+}
+
+/**
  * @brief Deadlock watchdog - monitors system health and dumps debug info on critical status
  *
  * Runs in separate thread, polls ThreadMonitor every 30s.
@@ -170,6 +221,9 @@ std::optional<sessions::AudioServer> setup_audio_server(const std::string &host_
  * 1. Fork child process (timeout protection - if debug gathering deadlocks, child dies after 60s)
  * 2. Write thread dump, generate core dump (timestamped files in /var/wolf-debug-dumps/)
  * 3. Exit main process for Docker restart
+ *
+ * Also monitors socket health - if the API socket is dead (connection refused),
+ * the system is considered critical even if pipeline creation works.
  */
 void start_watchdog() {
   std::thread([]() {
@@ -179,7 +233,11 @@ void start_watchdog() {
     const seconds CRITICAL_THRESHOLD{60};
     std::optional<steady_clock::time_point> critical_since;
 
-    logs::log(logs::info, "[WATCHDOG] Started monitoring system health");
+    // Get socket path from environment
+    auto default_socket = std::filesystem::path(utils::get_env("XDG_RUNTIME_DIR", "/var/run/wolf")) / "wolf.sock";
+    auto socket_path = utils::get_env("WOLF_SOCKET_PATH", default_socket.c_str());
+
+    logs::log(logs::info, "[WATCHDOG] Started monitoring system health (socket: {})", socket_path);
 
     while (true) {
       std::this_thread::sleep_for(CHECK_INTERVAL);
@@ -187,6 +245,9 @@ void start_watchdog() {
       // Test if new pipelines can be created (real failure condition)
       // Production deadlocked with only 35% threads stuck, but new sessions couldn't start
       bool pipelines_work = wolf::monitoring::ThreadMonitor::can_create_new_pipelines();
+
+      // Test if the Unix socket is responding (catches io_context death)
+      bool socket_alive = test_socket_health(socket_path);
 
       // Also check stuck thread count for context
       auto thread_statuses = wolf::monitoring::ThreadMonitor::get().get_all_threads();
@@ -197,16 +258,25 @@ void start_watchdog() {
         }
       }
 
-      // CRITICAL if: pipeline creation fails (type lock held)
-      // Thread count is just for logging context
-      bool is_critical = !pipelines_work;
+      // CRITICAL if: pipeline creation fails OR socket is dead
+      // Pipeline failure = GStreamer type lock held (old check)
+      // Socket dead = exception killed io_context (new check - catches PulseAudio crash)
+      bool is_critical = !pipelines_work || !socket_alive;
 
       if (is_critical) {
         if (!critical_since) {
           critical_since = steady_clock::now();
+          std::string reason;
+          if (!socket_alive && !pipelines_work) {
+            reason = "socket DEAD + pipeline creation FAILED";
+          } else if (!socket_alive) {
+            reason = "socket DEAD (API unreachable)";
+          } else {
+            reason = "pipeline creation FAILED (type lock held)";
+          }
           logs::log(logs::error,
-                    "[WATCHDOG] System entered CRITICAL state: pipeline creation FAILED (type lock held) - {}/{} threads stuck",
-                    stuck_count, thread_statuses.size());
+                    "[WATCHDOG] System entered CRITICAL state: {} - {}/{} threads stuck",
+                    reason, stuck_count, thread_statuses.size());
         }
 
         auto critical_duration = steady_clock::now() - *critical_since;
