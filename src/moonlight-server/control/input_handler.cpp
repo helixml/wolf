@@ -366,7 +366,20 @@ void keyboard_key(const KEYBOARD_PACKET &pkt, events::StreamSession &session) {
         std::visit([](auto &keyboard) { keyboard.release(M_META); }, session.keyboard->value());
 
     } else {
+      // Release the actual key
       std::visit([moonlight_key](auto &keyboard) { keyboard.release(moonlight_key); }, session.keyboard->value());
+
+      // FIX: Also release any modifiers that are NOT currently held according to the packet
+      // This prevents stuck modifiers when KEY_RELEASE events are lost or delayed
+      // (especially common on RHEL Moonlight clients)
+      if (!(pkt.modifiers & KEYBOARD_MODIFIERS::SHIFT))
+        std::visit([](auto &keyboard) { keyboard.release(M_SHIFT); }, session.keyboard->value());
+      if (!(pkt.modifiers & KEYBOARD_MODIFIERS::CTRL))
+        std::visit([](auto &keyboard) { keyboard.release(M_CTRL); }, session.keyboard->value());
+      if (!(pkt.modifiers & KEYBOARD_MODIFIERS::ALT))
+        std::visit([](auto &keyboard) { keyboard.release(M_ALT); }, session.keyboard->value());
+      if (!(pkt.modifiers & KEYBOARD_MODIFIERS::META))
+        std::visit([](auto &keyboard) { keyboard.release(M_META); }, session.keyboard->value());
     }
   } else {
     logs::log(logs::warning, "Received KEYBOARD_PACKET but no keyboard device is present");
