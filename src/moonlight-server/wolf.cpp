@@ -433,11 +433,13 @@ void start_periodic_dumps() {
             logs::log(logs::info, "[PERIODIC_DUMP] Core dump saved: {}.{}", prefix, getppid());
 
             // Rotate old hourly dumps (keep last MAX_HOURLY_DUMPS)
+            // Match ALL hourly-* files regardless of PID suffix - old dumps from
+            // previous Wolf runs have different PIDs and must still be cleaned up
             std::vector<std::filesystem::path> hourly_dumps;
             for (const auto& entry : std::filesystem::directory_iterator(debug_dir)) {
               std::string filename = entry.path().filename().string();
-              // Match hourly-* core dumps (not critical dumps)
-              if (filename.starts_with("hourly-") && (filename.find(".core.") != std::string::npos || filename.ends_with(fmt::format(".{}", getppid())))) {
+              // Match all hourly-* files (from any Wolf process)
+              if (filename.starts_with("hourly-")) {
                 hourly_dumps.push_back(entry.path());
               }
             }
