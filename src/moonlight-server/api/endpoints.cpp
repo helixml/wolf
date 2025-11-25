@@ -641,41 +641,52 @@ void UnixSocketServer::endpoint_DockerPullImage(const HTTPRequest &req, std::sha
   }
 }
 
-// Cache for GPU stats to prevent spamming nvidia-smi
-// nvidia-smi can be slow (50-200ms), so we cache for 2 seconds
+// Cache for GPU stats to prevent spamming nvidia-smi/rocm-smi
+// GPU tools can be slow (50-200ms), so we cache for 2 seconds
 static std::optional<GPUStats> cached_gpu_stats;
 static std::chrono::steady_clock::time_point last_gpu_query_time;
 static const std::chrono::seconds GPU_CACHE_DURATION{2};
 
-GPUStats queryGPUStats() {
-  auto now = std::chrono::steady_clock::now();
+// GPU vendor detection (cached)
+enum class GPUVendor { Unknown, NVIDIA, AMD };
+static GPUVendor detected_gpu_vendor = GPUVendor::Unknown;
+static bool gpu_vendor_detected = false;
 
-  // Return cached stats if less than 2 seconds old
-  if (cached_gpu_stats.has_value() &&
-      (now - last_gpu_query_time) < GPU_CACHE_DURATION) {
-    return *cached_gpu_stats;
+GPUVendor detectGPUVendor() {
+  if (gpu_vendor_detected) {
+    return detected_gpu_vendor;
   }
 
-  GPUStats stats{};
-  auto query_start = std::chrono::steady_clock::now();
+  // Check for nvidia-smi
+  if (std::system("which nvidia-smi > /dev/null 2>&1") == 0) {
+    detected_gpu_vendor = GPUVendor::NVIDIA;
+    gpu_vendor_detected = true;
+    logs::log(logs::info, "[GPU] Detected NVIDIA GPU (nvidia-smi available)");
+    return detected_gpu_vendor;
+  }
 
-  // Execute nvidia-smi to query GPU metrics
-  // Query: name,encoder.stats.sessionCount,encoder.stats.averageFps,encoder.stats.averageLatency,
-  //        utilization.encoder,utilization.gpu,utilization.memory,memory.used,memory.total,temperature.gpu
-  std::string cmd = "nvidia-smi --query-gpu=name,encoder.stats.sessionCount,encoder.stats.averageFps,"
-                    "encoder.stats.averageLatency,utilization.encoder,utilization.gpu,utilization.memory,"
-                    "memory.used,memory.total,temperature.gpu --format=csv,noheader,nounits";
+  // Check for rocm-smi (AMD)
+  if (std::system("which rocm-smi > /dev/null 2>&1") == 0) {
+    detected_gpu_vendor = GPUVendor::AMD;
+    gpu_vendor_detected = true;
+    logs::log(logs::info, "[GPU] Detected AMD GPU (rocm-smi available)");
+    return detected_gpu_vendor;
+  }
 
+  detected_gpu_vendor = GPUVendor::Unknown;
+  gpu_vendor_detected = true;
+  logs::log(logs::warning, "[GPU] No GPU monitoring tool found (neither nvidia-smi nor rocm-smi)");
+  return detected_gpu_vendor;
+}
+
+// Helper to execute command and get output
+std::pair<std::string, int> execCommand(const std::string& cmd) {
   std::array<char, 512> buffer{};
   std::string result;
 
   FILE* pipe = popen(cmd.c_str(), "r");
   if (!pipe) {
-    stats.error = "Failed to execute nvidia-smi";
-    stats.available = false;
-    cached_gpu_stats = stats;
-    last_gpu_query_time = now;
-    return stats;
+    return {"", -1};
   }
 
   while (fgets(buffer.data(), buffer.size(), pipe) != nullptr) {
@@ -683,6 +694,19 @@ GPUStats queryGPUStats() {
   }
 
   int return_code = pclose(pipe);
+  return {result, return_code};
+}
+
+GPUStats queryNVIDIAStats() {
+  GPUStats stats{};
+  auto query_start = std::chrono::steady_clock::now();
+
+  // Execute nvidia-smi to query GPU metrics
+  std::string cmd = "nvidia-smi --query-gpu=name,encoder.stats.sessionCount,encoder.stats.averageFps,"
+                    "encoder.stats.averageLatency,utilization.encoder,utilization.gpu,utilization.memory,"
+                    "memory.used,memory.total,temperature.gpu --format=csv,noheader,nounits";
+
+  auto [result, return_code] = execCommand(cmd);
 
   auto query_end = std::chrono::steady_clock::now();
   stats.query_duration_ms = std::chrono::duration_cast<std::chrono::milliseconds>(query_end - query_start).count();
@@ -690,8 +714,6 @@ GPUStats queryGPUStats() {
   if (return_code != 0) {
     stats.error = fmt::format("nvidia-smi exited with code {}", return_code);
     stats.available = false;
-    cached_gpu_stats = stats;
-    last_gpu_query_time = now;
     return stats;
   }
 
@@ -701,7 +723,6 @@ GPUStats queryGPUStats() {
   std::vector<std::string> fields;
 
   while (std::getline(iss, field, ',')) {
-    // Trim whitespace
     field.erase(0, field.find_first_not_of(" \t\r\n"));
     field.erase(field.find_last_not_of(" \t\r\n") + 1);
     fields.push_back(field);
@@ -710,12 +731,9 @@ GPUStats queryGPUStats() {
   if (fields.size() != 10) {
     stats.error = fmt::format("Unexpected nvidia-smi output: expected 10 fields, got {}", fields.size());
     stats.available = false;
-    cached_gpu_stats = stats;
-    last_gpu_query_time = now;
     return stats;
   }
 
-  // Parse fields
   stats.gpu_name = fields[0];
   stats.encoder_session_count = std::stoi(fields[1]);
   stats.encoder_average_fps = std::stod(fields[2]);
@@ -730,6 +748,121 @@ GPUStats queryGPUStats() {
 
   logs::log(logs::debug, "[GPU] nvidia-smi query took {}ms: {} NVENC sessions active",
             stats.query_duration_ms, stats.encoder_session_count);
+
+  return stats;
+}
+
+GPUStats queryAMDStats() {
+  GPUStats stats{};
+  auto query_start = std::chrono::steady_clock::now();
+
+  // Get GPU name from rocm-smi -a --json (reliable for GPU name)
+  auto [info_result, info_code] = execCommand("rocm-smi -a --json 2>/dev/null");
+  if (info_code == 0 && !info_result.empty()) {
+    // Parse JSON to extract "Device Name" field
+    // Format: {"card0": {"Device Name": "AMD Radeon Pro V710 MxGPU", ...}}
+    size_t name_pos = info_result.find("\"Device Name\":");
+    if (name_pos != std::string::npos) {
+      size_t quote_start = info_result.find('"', name_pos + 14);
+      if (quote_start != std::string::npos) {
+        size_t quote_end = info_result.find('"', quote_start + 1);
+        if (quote_end != std::string::npos) {
+          stats.gpu_name = info_result.substr(quote_start + 1, quote_end - quote_start - 1);
+        }
+      }
+    }
+  }
+
+  // Get VRAM info from rocm-smi --showmeminfo vram --json
+  // Format: {"card0": {"VRAM Total Memory (B)": "9126805504", "VRAM Total Used Memory (B)": "238620672"}}
+  auto [mem_result, mem_code] = execCommand("rocm-smi --showmeminfo vram --json 2>/dev/null");
+  if (mem_code == 0 && !mem_result.empty()) {
+    // Parse VRAM Total
+    size_t total_pos = mem_result.find("\"VRAM Total Memory (B)\":");
+    if (total_pos != std::string::npos) {
+      size_t quote_start = mem_result.find('"', total_pos + 24);
+      if (quote_start != std::string::npos) {
+        size_t quote_end = mem_result.find('"', quote_start + 1);
+        if (quote_end != std::string::npos) {
+          std::string total_str = mem_result.substr(quote_start + 1, quote_end - quote_start - 1);
+          try {
+            int64_t total_bytes = std::stoll(total_str);
+            stats.memory_total_mb = static_cast<int>(total_bytes / (1024 * 1024));
+          } catch (...) {}
+        }
+      }
+    }
+
+    // Parse VRAM Used
+    size_t used_pos = mem_result.find("\"VRAM Total Used Memory (B)\":");
+    if (used_pos != std::string::npos) {
+      size_t quote_start = mem_result.find('"', used_pos + 29);
+      if (quote_start != std::string::npos) {
+        size_t quote_end = mem_result.find('"', quote_start + 1);
+        if (quote_end != std::string::npos) {
+          std::string used_str = mem_result.substr(quote_start + 1, quote_end - quote_start - 1);
+          try {
+            int64_t used_bytes = std::stoll(used_str);
+            stats.memory_used_mb = static_cast<int>(used_bytes / (1024 * 1024));
+          } catch (...) {}
+        }
+      }
+    }
+
+    // Calculate memory utilization
+    if (stats.memory_total_mb > 0) {
+      stats.memory_utilization_percent = (stats.memory_used_mb * 100) / stats.memory_total_mb;
+    }
+  }
+
+  auto query_end = std::chrono::steady_clock::now();
+  stats.query_duration_ms = std::chrono::duration_cast<std::chrono::milliseconds>(query_end - query_start).count();
+
+  // AMD doesn't expose encoder stats like NVIDIA, so set defaults
+  stats.encoder_session_count = 0;
+  stats.encoder_average_fps = 0.0;
+  stats.encoder_average_latency_us = 0;
+  stats.encoder_utilization_percent = 0;
+  stats.gpu_utilization_percent = 0;  // Could be obtained from amd-smi metric but often N/A
+  stats.temperature_celsius = 0;  // Could be obtained from rocm-smi -t
+
+  // Mark as available if we got at least the GPU name or memory info
+  stats.available = !stats.gpu_name.empty() || stats.memory_total_mb > 0;
+
+  if (stats.available) {
+    logs::log(logs::debug, "[GPU] rocm-smi query took {}ms: {} ({} MB / {} MB used)",
+              stats.query_duration_ms, stats.gpu_name, stats.memory_used_mb, stats.memory_total_mb);
+  } else {
+    stats.error = "Failed to query AMD GPU stats via rocm-smi";
+  }
+
+  return stats;
+}
+
+GPUStats queryGPUStats() {
+  auto now = std::chrono::steady_clock::now();
+
+  // Return cached stats if less than 2 seconds old
+  if (cached_gpu_stats.has_value() &&
+      (now - last_gpu_query_time) < GPU_CACHE_DURATION) {
+    return *cached_gpu_stats;
+  }
+
+  GPUStats stats{};
+  GPUVendor vendor = detectGPUVendor();
+
+  switch (vendor) {
+    case GPUVendor::NVIDIA:
+      stats = queryNVIDIAStats();
+      break;
+    case GPUVendor::AMD:
+      stats = queryAMDStats();
+      break;
+    default:
+      stats.available = false;
+      stats.error = "No supported GPU monitoring tool found";
+      break;
+  }
 
   // Cache the result
   cached_gpu_stats = stats;
