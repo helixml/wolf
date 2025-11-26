@@ -269,13 +269,35 @@ struct KeyboardModifierState {
   bool meta = false;
 };
 
+// One layer of keyboard state (Wolf's view, inputtino's view, or evdev/kernel view)
+struct KeyboardLayerState {
+  std::vector<int32_t> pressed_keys;          // Key codes (Moonlight VK codes for wolf/inputtino, Linux KEY_* for evdev)
+  std::vector<std::string> pressed_key_names; // Human-readable names
+  KeyboardModifierState modifier_state;
+};
+
 struct SessionKeyboardState {
   std::string session_id;
   int64_t timestamp_ms;
-  std::vector<int32_t> pressed_keys;          // Linux key codes
-  std::vector<std::string> pressed_key_names; // Human-readable names
-  KeyboardModifierState modifier_state;
   std::string device_name;
+  std::string device_node;  // e.g., /dev/input/event15
+
+  // Three layers of keyboard state for debugging:
+  // 1. Wolf's view - what Moonlight events Wolf has received and tracked
+  KeyboardLayerState wolf_state;
+  // 2. Inputtino's view - what inputtino's internal cur_press_keys vector contains
+  KeyboardLayerState inputtino_state;
+  // 3. Evdev/kernel view - what the kernel thinks is pressed on the virtual device
+  KeyboardLayerState evdev_state;
+
+  // Mismatch detection - true if any layer disagrees (indicates a bug)
+  bool has_mismatch = false;
+  std::string mismatch_description;
+
+  // Legacy fields for backwards compatibility
+  std::vector<int32_t> pressed_keys;          // Same as wolf_state.pressed_keys
+  std::vector<std::string> pressed_key_names; // Same as wolf_state.pressed_key_names
+  KeyboardModifierState modifier_state;       // Same as wolf_state.modifier_state
 };
 
 struct KeyboardStateRequest {

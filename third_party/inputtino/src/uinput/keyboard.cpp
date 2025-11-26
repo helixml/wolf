@@ -2,9 +2,13 @@
 
 #include <algorithm>
 #include <cstring>
+#include <fcntl.h>
 #include <inputtino/protected_types.hpp>
 #include <inputtino/keyboard.hpp>
+#include <linux/input.h>
+#include <sys/ioctl.h>
 #include <thread>
+#include <unistd.h>
 
 namespace inputtino {
 
@@ -115,6 +119,67 @@ void Keyboard::release(short key_code) {
       libevdev_uinput_write_event(keyboard, EV_SYN, SYN_REPORT, 0);
     }
   }
+}
+
+std::vector<short> Keyboard::get_pressed_keys() const {
+  // Return a copy of inputtino's internal pressed keys state
+  return _state->cur_press_keys;
+}
+
+bool Keyboard::query_evdev_key_state(int linux_keycode) const {
+  // Query the kernel's evdev state for this key via EVIOCGKEY ioctl
+  if (auto kb = _state->kb.get()) {
+    // Get the device node path
+    const char* devnode = libevdev_uinput_get_devnode(kb);
+    if (!devnode) return false;
+
+    int fd = open(devnode, O_RDONLY);
+    if (fd < 0) return false;
+
+    // EVIOCGKEY returns a bitmask of currently pressed keys
+    // We need (KEY_MAX + 7) / 8 bytes to hold the full bitmask
+    unsigned char key_states[(KEY_MAX + 7) / 8] = {0};
+    if (ioctl(fd, EVIOCGKEY(sizeof(key_states)), key_states) < 0) {
+      close(fd);
+      return false;
+    }
+    close(fd);
+
+    // Check if the specific key is pressed in the bitmask
+    return (key_states[linux_keycode / 8] >> (linux_keycode % 8)) & 1;
+  }
+  return false;
+}
+
+std::vector<int> Keyboard::get_evdev_pressed_keys() const {
+  std::vector<int> pressed;
+
+  if (auto kb = _state->kb.get()) {
+    const char* devnode = libevdev_uinput_get_devnode(kb);
+    if (!devnode) return pressed;
+
+    int fd = open(devnode, O_RDONLY);
+    if (fd < 0) return pressed;
+
+    unsigned char key_states[(KEY_MAX + 7) / 8] = {0};
+    if (ioctl(fd, EVIOCGKEY(sizeof(key_states)), key_states) < 0) {
+      close(fd);
+      return pressed;
+    }
+    close(fd);
+
+    // Iterate through all keys we support and check if they're pressed
+    for (const auto& mapping : keyboard::key_mappings) {
+      int linux_code = mapping.second.linux_code;
+      if (linux_code > 0 && linux_code < KEY_MAX) {
+        if ((key_states[linux_code / 8] >> (linux_code % 8)) & 1) {
+          pressed.push_back(linux_code);
+        }
+      }
+    }
+  }
+
+  return pressed;
 }
 
 } // namespace inputtino

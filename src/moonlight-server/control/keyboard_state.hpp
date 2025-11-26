@@ -172,4 +172,68 @@ inline bool is_meta_pressed(const std::set<short>& keys) {
   return keys.count(VK_LWIN) || keys.count(VK_RWIN);
 }
 
+// Helper to get human-readable key name from Linux keycode (KEY_*)
+// These are the codes used by evdev/kernel
+inline std::string linux_key_to_name(int key_code) {
+  static const std::map<int, std::string> key_names = {
+    {1, "Escape"}, {2, "1"}, {3, "2"}, {4, "3"}, {5, "4"}, {6, "5"}, {7, "6"},
+    {8, "7"}, {9, "8"}, {10, "9"}, {11, "0"}, {12, "-"}, {13, "="}, {14, "Backspace"},
+    {15, "Tab"}, {16, "Q"}, {17, "W"}, {18, "E"}, {19, "R"}, {20, "T"}, {21, "Y"},
+    {22, "U"}, {23, "I"}, {24, "O"}, {25, "P"}, {26, "["}, {27, "]"}, {28, "Enter"},
+    {29, "LCtrl"}, {30, "A"}, {31, "S"}, {32, "D"}, {33, "F"}, {34, "G"}, {35, "H"},
+    {36, "J"}, {37, "K"}, {38, "L"}, {39, ";"}, {40, "'"}, {41, "`"}, {42, "LShift"},
+    {43, "\\"}, {44, "Z"}, {45, "X"}, {46, "C"}, {47, "V"}, {48, "B"}, {49, "N"},
+    {50, "M"}, {51, ","}, {52, "."}, {53, "/"}, {54, "RShift"}, {55, "Numpad*"},
+    {56, "LAlt"}, {57, "Space"}, {58, "CapsLock"},
+    {59, "F1"}, {60, "F2"}, {61, "F3"}, {62, "F4"}, {63, "F5"}, {64, "F6"},
+    {65, "F7"}, {66, "F8"}, {67, "F9"}, {68, "F10"},
+    {69, "NumLock"}, {70, "ScrollLock"},
+    {71, "Numpad7"}, {72, "Numpad8"}, {73, "Numpad9"}, {74, "Numpad-"},
+    {75, "Numpad4"}, {76, "Numpad5"}, {77, "Numpad6"}, {78, "Numpad+"},
+    {79, "Numpad1"}, {80, "Numpad2"}, {81, "Numpad3"},
+    {82, "Numpad0"}, {83, "Numpad."},
+    {87, "F11"}, {88, "F12"},
+    {96, "NumpadEnter"}, {97, "RCtrl"}, {98, "Numpad/"}, {99, "SysRq"},
+    {100, "RAlt"}, {102, "Home"}, {103, "Up"}, {104, "PageUp"},
+    {105, "Left"}, {106, "Right"}, {107, "End"}, {108, "Down"},
+    {109, "PageDown"}, {110, "Insert"}, {111, "Delete"},
+    {125, "LMeta"}, {126, "RMeta"}, {127, "Menu"},
+  };
+
+  auto it = key_names.find(key_code);
+  if (it != key_names.end()) {
+    return it->second;
+  }
+  return "KEY_" + std::to_string(key_code);
+}
+
+// Check if modifier is pressed in a vector of Linux keycodes
+inline bool is_shift_pressed_linux(const std::vector<int>& keys) {
+  for (int key : keys) {
+    if (key == 42 || key == 54) return true;  // KEY_LEFTSHIFT, KEY_RIGHTSHIFT
+  }
+  return false;
+}
+
+inline bool is_ctrl_pressed_linux(const std::vector<int>& keys) {
+  for (int key : keys) {
+    if (key == 29 || key == 97) return true;  // KEY_LEFTCTRL, KEY_RIGHTCTRL
+  }
+  return false;
+}
+
+inline bool is_alt_pressed_linux(const std::vector<int>& keys) {
+  for (int key : keys) {
+    if (key == 56 || key == 100) return true;  // KEY_LEFTALT, KEY_RIGHTALT
+  }
+  return false;
+}
+
+inline bool is_meta_pressed_linux(const std::vector<int>& keys) {
+  for (int key : keys) {
+    if (key == 125 || key == 126) return true;  // KEY_LEFTMETA, KEY_RIGHTMETA
+  }
+  return false;
+}
+
 } // namespace wolf::control

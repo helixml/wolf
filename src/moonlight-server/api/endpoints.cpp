@@ -1068,28 +1068,84 @@ void UnixSocketServer::endpoint_SystemHealth(const HTTPRequest &req, std::shared
 void UnixSocketServer::endpoint_KeyboardState(const HTTPRequest &req, std::shared_ptr<UnixSocket> socket) {
   auto res = KeyboardStateResponse{};
 
-  // Get keyboard state from our tracker
+  // Get keyboard state from our tracker (Wolf's view)
   auto& tracker = wolf::control::KeyboardStateTracker::get();
-  auto sessions = tracker.get_all_sessions();
+  auto tracker_sessions = tracker.get_all_sessions();
 
-  for (const auto& session : sessions) {
+  // Get running sessions to access inputtino keyboards
+  auto running_sessions = state_->app_state->running_sessions->load();
+
+  for (const auto& wolf_session : tracker_sessions) {
     SessionKeyboardState state;
-    state.session_id = std::to_string(session.session_id);
-    state.timestamp_ms = session.last_update_ms;
+    state.session_id = std::to_string(wolf_session.session_id);
+    state.timestamp_ms = wolf_session.last_update_ms;
+    state.device_name = wolf_session.device_name.empty() ? "Wolf Virtual Keyboard" : wolf_session.device_name;
 
-    // Convert pressed keys to vectors
-    for (short key : session.pressed_keys) {
-      state.pressed_keys.push_back(static_cast<int32_t>(key));
-      state.pressed_key_names.push_back(wolf::control::moonlight_key_to_name(key));
+    // === Layer 1: Wolf's view (from KeyboardStateTracker) ===
+    for (short key : wolf_session.pressed_keys) {
+      state.wolf_state.pressed_keys.push_back(static_cast<int32_t>(key));
+      state.wolf_state.pressed_key_names.push_back(wolf::control::moonlight_key_to_name(key));
+    }
+    state.wolf_state.modifier_state.shift = wolf::control::is_shift_pressed(wolf_session.pressed_keys);
+    state.wolf_state.modifier_state.ctrl = wolf::control::is_ctrl_pressed(wolf_session.pressed_keys);
+    state.wolf_state.modifier_state.alt = wolf::control::is_alt_pressed(wolf_session.pressed_keys);
+    state.wolf_state.modifier_state.meta = wolf::control::is_meta_pressed(wolf_session.pressed_keys);
+
+    // === Layer 2 & 3: Inputtino's view and Evdev state ===
+    // Find the running session to access the inputtino keyboard
+    for (const auto& running : running_sessions.get()) {
+      if (running.session_id == wolf_session.session_id && running.keyboard->has_value()) {
+        std::visit([&state](auto &keyboard) {
+          // Get device node for display
+          auto nodes = keyboard.get_nodes();
+          if (!nodes.empty()) {
+            state.device_node = nodes[0];
+          }
+
+          // Layer 2: Inputtino's internal cur_press_keys vector
+          auto inputtino_keys = keyboard.get_pressed_keys();
+          for (short key : inputtino_keys) {
+            state.inputtino_state.pressed_keys.push_back(static_cast<int32_t>(key));
+            state.inputtino_state.pressed_key_names.push_back(wolf::control::moonlight_key_to_name(key));
+          }
+          std::set<short> inputtino_set(inputtino_keys.begin(), inputtino_keys.end());
+          state.inputtino_state.modifier_state.shift = wolf::control::is_shift_pressed(inputtino_set);
+          state.inputtino_state.modifier_state.ctrl = wolf::control::is_ctrl_pressed(inputtino_set);
+          state.inputtino_state.modifier_state.alt = wolf::control::is_alt_pressed(inputtino_set);
+          state.inputtino_state.modifier_state.meta = wolf::control::is_meta_pressed(inputtino_set);
+
+          // Layer 3: Evdev/kernel state (Linux keycodes)
+          auto evdev_keys = keyboard.get_evdev_pressed_keys();
+          for (int key : evdev_keys) {
+            state.evdev_state.pressed_keys.push_back(static_cast<int32_t>(key));
+            state.evdev_state.pressed_key_names.push_back(wolf::control::linux_key_to_name(key));
+          }
+          state.evdev_state.modifier_state.shift = wolf::control::is_shift_pressed_linux(evdev_keys);
+          state.evdev_state.modifier_state.ctrl = wolf::control::is_ctrl_pressed_linux(evdev_keys);
+          state.evdev_state.modifier_state.alt = wolf::control::is_alt_pressed_linux(evdev_keys);
+          state.evdev_state.modifier_state.meta = wolf::control::is_meta_pressed_linux(evdev_keys);
+        }, running.keyboard->value());
+        break;
+      }
     }
 
-    // Determine modifier state
-    state.modifier_state.shift = wolf::control::is_shift_pressed(session.pressed_keys);
-    state.modifier_state.ctrl = wolf::control::is_ctrl_pressed(session.pressed_keys);
-    state.modifier_state.alt = wolf::control::is_alt_pressed(session.pressed_keys);
-    state.modifier_state.meta = wolf::control::is_meta_pressed(session.pressed_keys);
+    // === Mismatch detection ===
+    // Compare all three layers - if they disagree, something is wrong
+    auto wolf_key_count = state.wolf_state.pressed_keys.size();
+    auto inputtino_key_count = state.inputtino_state.pressed_keys.size();
+    auto evdev_key_count = state.evdev_state.pressed_keys.size();
 
-    state.device_name = session.device_name.empty() ? "Wolf Virtual Keyboard" : session.device_name;
+    if (wolf_key_count != inputtino_key_count || inputtino_key_count != evdev_key_count) {
+      state.has_mismatch = true;
+      state.mismatch_description = "Key count mismatch: Wolf=" + std::to_string(wolf_key_count) +
+                                   " Inputtino=" + std::to_string(inputtino_key_count) +
+                                   " Evdev=" + std::to_string(evdev_key_count);
+    }
+
+    // Legacy fields for backwards compatibility
+    state.pressed_keys = state.wolf_state.pressed_keys;
+    state.pressed_key_names = state.wolf_state.pressed_key_names;
+    state.modifier_state = state.wolf_state.modifier_state;
 
     res.sessions.push_back(state);
   }

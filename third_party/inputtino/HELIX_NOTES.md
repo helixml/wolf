@@ -12,3 +12,6 @@ that was causing keys to get stuck or stop working on RHEL (kernel 5.14).
 
 See git history for this directory. Key changes:
 - Removed the buggy auto-repeat thread in `src/uinput/keyboard.cpp`
+- Added `Keyboard::get_pressed_keys()` to expose internal `cur_press_keys` vector for debugging
+- Added `Keyboard::get_evdev_pressed_keys()` to query kernel's evdev state via EVIOCGKEY ioctl
+- Added `Keyboard::query_evdev_key_state(int)` to query individual key state from kernel

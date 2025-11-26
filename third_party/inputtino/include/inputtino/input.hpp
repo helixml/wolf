@@ -255,6 +255,25 @@ public:
 
   void release(short key_code);
 
+  /**
+   * Get the list of currently pressed keys (Moonlight/VK key codes).
+   * This is inputtino's internal state, independent of the kernel's evdev state.
+   */
+  std::vector<short> get_pressed_keys() const;
+
+  /**
+   * Query the kernel's evdev state for a specific key.
+   * Returns true if the kernel thinks the key is currently pressed.
+   * @param linux_keycode The Linux KEY_* code (not Moonlight/VK code)
+   */
+  bool query_evdev_key_state(int linux_keycode) const;
+
+  /**
+   * Query all pressed keys from the kernel's evdev state.
+   * Returns a vector of Linux KEY_* codes that the kernel thinks are pressed.
+   */
+  std::vector<int> get_evdev_pressed_keys() const;
+
 protected:
   typedef struct KeyboardState KeyboardState;
   std::shared_ptr<KeyboardState> _state;
