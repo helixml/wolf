@@ -321,6 +321,32 @@ UnixSocketServer::UnixSocketServer(boost::asio::io_context &io_context,
                        .handler = [this](auto req, auto socket) { endpoint_SystemHealth(req, socket); },
                    });
 
+  /**
+   * Keyboard State API - for debugging stuck modifier keys
+   */
+
+  state_->http.add(HTTPMethod::GET,
+                   "/api/v1/keyboard/state",
+                   {
+                       .summary = "Get keyboard state for all sessions",
+                       .description = "Returns currently pressed keys and modifier state for each streaming session. "
+                                      "Useful for debugging stuck modifier keys (Ctrl, Shift, Alt, Meta).",
+                       .response_description = {{200, {.json_schema = rfl::json::to_schema<KeyboardStateResponse>()}}},
+                       .handler = [this](auto req, auto socket) { endpoint_KeyboardState(req, socket); },
+                   });
+
+  state_->http.add(HTTPMethod::POST,
+                   "/api/v1/keyboard/reset",
+                   {
+                       .summary = "Reset keyboard state for a session",
+                       .description = "Releases all modifier keys (Ctrl, Shift, Alt, Meta) for a specific session. "
+                                      "Use this to fix stuck modifier keys without disconnecting.",
+                       .request_description = APIDescription{.json_schema = rfl::json::to_schema<KeyboardResetRequest>()},
+                       .response_description = {{200, {.json_schema = rfl::json::to_schema<KeyboardResetResponse>()}},
+                                                {500, {.json_schema = rfl::json::to_schema<GenericErrorResponse>()}}},
+                       .handler = [this](auto req, auto socket) { endpoint_KeyboardReset(req, socket); },
+                   });
+
   state_->http.add(
       HTTPMethod::GET,
       "/api/v1/docker/images/inspect",

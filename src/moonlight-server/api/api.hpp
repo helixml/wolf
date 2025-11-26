@@ -261,6 +261,42 @@ struct SystemMemoryResponse {
   std::optional<GStreamerPipelineStats> gstreamer_pipelines; // Actual pipeline count from state
 };
 
+// Keyboard state observability for debugging stuck modifier keys
+struct KeyboardModifierState {
+  bool shift = false;
+  bool ctrl = false;
+  bool alt = false;
+  bool meta = false;
+};
+
+struct SessionKeyboardState {
+  std::string session_id;
+  int64_t timestamp_ms;
+  std::vector<int32_t> pressed_keys;          // Linux key codes
+  std::vector<std::string> pressed_key_names; // Human-readable names
+  KeyboardModifierState modifier_state;
+  std::string device_name;
+};
+
+struct KeyboardStateRequest {
+  std::optional<std::string> session_id;  // Optional: filter by session
+};
+
+struct KeyboardStateResponse {
+  bool success = true;
+  std::vector<SessionKeyboardState> sessions;
+};
+
+struct KeyboardResetRequest {
+  std::string session_id;  // Required: which session to reset
+};
+
+struct KeyboardResetResponse {
+  bool success = true;
+  std::vector<std::string> released_keys;
+  std::string message;
+};
+
 struct UnixSocket {
   boost::asio::local::stream_protocol::socket socket;
   bool is_alive = true;
@@ -313,6 +349,8 @@ private:
   void endpoint_DockerPullImage(const HTTPRequest &req, std::shared_ptr<UnixSocket> socket);
   void endpoint_SystemMemory(const HTTPRequest &req, std::shared_ptr<UnixSocket> socket);
   void endpoint_SystemHealth(const HTTPRequest &req, std::shared_ptr<UnixSocket> socket);
+  void endpoint_KeyboardState(const HTTPRequest &req, std::shared_ptr<UnixSocket> socket);
+  void endpoint_KeyboardReset(const HTTPRequest &req, std::shared_ptr<UnixSocket> socket);
 
   void sse_broadcast(const std::string &payload);
   void sse_keepalive(const boost::system::error_code &e);

@@ -1,5 +1,6 @@
 #include <api/api.hpp>
 #include <control/input_handler.hpp>
+#include <control/keyboard_state.hpp>
 #include <core/docker.hpp>
 #include <monitoring/thread-monitor.hpp>
 #include <rtp/udp-ping.hpp>
@@ -366,8 +367,8 @@ void UnixSocketServer::endpoint_StreamSessionHandleInput(const HTTPRequest &req,
     if (auto session = state::get_session_by_id(sessions.get(), session_id)) {
       auto hex_pkt = input_request.value().input_packet_hex.get();
       auto pkt_parsed = crypto::hex_to_str(hex_pkt);
-      control::INPUT_PKT *input_pkt = reinterpret_cast<control::INPUT_PKT *>(pkt_parsed.data());
-      control::handle_input(session.value(), {}, input_pkt);
+      moonlight::control::pkts::INPUT_PKT *input_pkt = reinterpret_cast<moonlight::control::pkts::INPUT_PKT *>(pkt_parsed.data());
+      ::control::handle_input(session.value(), {}, input_pkt);
 
       send_http(socket, 200, rfl::json::write(GenericSuccessResponse{.success = true}));
     } else {
@@ -1060,6 +1061,84 @@ void UnixSocketServer::endpoint_SystemHealth(const HTTPRequest &req, std::shared
   logs::log(logs::debug, "[HEALTH] Status={} threads={} stuck={} pipelines={}",
             res.overall_status, res.total_thread_count, res.stuck_thread_count,
             res.can_create_new_pipelines ? "OK" : "BLOCKED");
+
+  send_http(socket, 200, rfl::json::write(res));
+}
+
+void UnixSocketServer::endpoint_KeyboardState(const HTTPRequest &req, std::shared_ptr<UnixSocket> socket) {
+  auto res = KeyboardStateResponse{};
+
+  // Get keyboard state from our tracker
+  auto& tracker = wolf::control::KeyboardStateTracker::get();
+  auto sessions = tracker.get_all_sessions();
+
+  for (const auto& session : sessions) {
+    SessionKeyboardState state;
+    state.session_id = std::to_string(session.session_id);
+    state.timestamp_ms = session.last_update_ms;
+
+    // Convert pressed keys to vectors
+    for (short key : session.pressed_keys) {
+      state.pressed_keys.push_back(static_cast<int32_t>(key));
+      state.pressed_key_names.push_back(wolf::control::moonlight_key_to_name(key));
+    }
+
+    // Determine modifier state
+    state.modifier_state.shift = wolf::control::is_shift_pressed(session.pressed_keys);
+    state.modifier_state.ctrl = wolf::control::is_ctrl_pressed(session.pressed_keys);
+    state.modifier_state.alt = wolf::control::is_alt_pressed(session.pressed_keys);
+    state.modifier_state.meta = wolf::control::is_meta_pressed(session.pressed_keys);
+
+    state.device_name = session.device_name.empty() ? "Wolf Virtual Keyboard" : session.device_name;
+
+    res.sessions.push_back(state);
+  }
+
+  logs::log(logs::debug, "[KEYBOARD] Returning state for {} sessions", res.sessions.size());
+  send_http(socket, 200, rfl::json::write(res));
+}
+
+void UnixSocketServer::endpoint_KeyboardReset(const HTTPRequest &req, std::shared_ptr<UnixSocket> socket) {
+  auto req_data = rfl::json::read<KeyboardResetRequest>(req.body);
+  if (!req_data) {
+    auto res = GenericErrorResponse{.error = "Invalid JSON: " + std::string(req_data.error().what())};
+    send_http(socket, 400, rfl::json::write(res));
+    return;
+  }
+
+  auto session_id_str = req_data.value().session_id;
+  std::size_t session_id;
+  try {
+    session_id = std::stoull(session_id_str);
+  } catch (...) {
+    auto res = GenericErrorResponse{.error = "Invalid session_id format"};
+    send_http(socket, 400, rfl::json::write(res));
+    return;
+  }
+
+  // Get keyboard state and reset it
+  auto& tracker = wolf::control::KeyboardStateTracker::get();
+  auto released_keys = tracker.reset_session(session_id);
+
+  // Also release keys on the inputtino keyboard
+  auto sessions = state_->app_state->running_sessions->load();
+  for (const auto& session : sessions.get()) {
+    if (session.session_id == session_id && session.keyboard->has_value()) {
+      for (short key : released_keys) {
+        std::visit([key](auto &keyboard) { keyboard.release(key); }, session.keyboard->value());
+      }
+      logs::log(logs::info, "[KEYBOARD] Reset keyboard state for session {}, released {} keys",
+                session_id, released_keys.size());
+      break;
+    }
+  }
+
+  KeyboardResetResponse res;
+  res.success = true;
+  for (short key : released_keys) {
+    res.released_keys.push_back(wolf::control::moonlight_key_to_name(key));
+  }
+  res.message = "Released " + std::to_string(released_keys.size()) + " stuck keys";
 
   send_http(socket, 200, rfl::json::write(res));
 }

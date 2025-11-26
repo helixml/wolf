@@ -56,6 +56,7 @@ ENV CCACHE_DIR=/cache/ccache
 ENV CMAKE_BUILD_DIR=/cache/cmake-build
 ARG BUILD_JOBS=8
 # DEBUG BUILD (current) - Full debug symbols for deadlock investigation
+# WOLF_CUSTOM_INPUTTINO_SRC uses our vendored inputtino with bugfix for RHEL keyboard issues
 RUN --mount=type=cache,target=/cache/ccache \
     cmake -B$CMAKE_BUILD_DIR \
     -DCMAKE_BUILD_TYPE=Debug \
@@ -67,6 +68,7 @@ RUN --mount=type=cache,target=/cache/ccache \
     -DBoost_USE_STATIC_LIBS=ON \
     -DBUILD_FAKE_UDEV_CLI=ON \
     -DBUILD_TESTING=OFF \
+    -DWOLF_CUSTOM_INPUTTINO_SRC=/wolf/third_party/inputtino \
     -G Ninja && \
     ninja -j $BUILD_JOBS -C $CMAKE_BUILD_DIR wolf && \
     ninja -j $BUILD_JOBS -C $CMAKE_BUILD_DIR fake-udev && \
