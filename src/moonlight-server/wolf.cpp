@@ -388,9 +388,10 @@ void start_watchdog() {
  * Uses gcore which pauses process briefly (~3s) to get consistent snapshot.
  * May cause brief stream glitches during dump, but process keeps running.
  *
- * Keeps last N hours of dumps + rotates old ones.
- * Core dumps are ~8GB each. Configure via WOLF_MAX_DUMPS env var.
- * Default: 6 dumps = ~48GB max disk usage.
+ * Keeps last N dumps + enforces size quota.
+ * Core dumps are ~8GB each. Configure via env vars:
+ *   WOLF_MAX_DUMPS (default: 6) - max number of dumps
+ *   WOLF_MAX_DUMPS_GB (default: 20) - max total size in GB
  */
 void start_periodic_dumps() {
   std::thread([]() {
@@ -406,7 +407,7 @@ void start_periodic_dumps() {
 
     uint64_t max_size_bytes = 20ULL * 1024 * 1024 * 1024;  // Default: 20GB
     if (const char* env = std::getenv("WOLF_MAX_DUMPS_GB")) {
-      max_size_bytes = std::max(1ULL, static_cast<uint64_t>(std::atoi(env))) * 1024 * 1024 * 1024;
+      max_size_bytes = std::max(uint64_t{1}, static_cast<uint64_t>(std::atoi(env))) * 1024 * 1024 * 1024;
     }
 
     logs::log(logs::info, "[PERIODIC_DUMP] Started (max {} dumps, {}GB quota)", max_dumps, max_size_bytes / (1024*1024*1024));
@@ -443,9 +444,8 @@ void start_periodic_dumps() {
           if (gcore_result == 0) {
             logs::log(logs::info, "[PERIODIC_DUMP] Core dump saved: {}.{}", prefix, getppid());
 
-            // Rotate old hourly dumps (keep last MAX_HOURLY_DUMPS)
-            // Match ALL hourly-* files regardless of PID suffix - old dumps from
-            // previous Wolf runs have different PIDs and must still be cleaned up
+            // Rotate old hourly dumps - match ALL hourly-* files regardless of
+            // PID suffix (old dumps from previous Wolf runs must be cleaned too)
             std::vector<std::filesystem::path> hourly_dumps;
             for (const auto& entry : std::filesystem::directory_iterator(debug_dir)) {
               std::string filename = entry.path().filename().string();
