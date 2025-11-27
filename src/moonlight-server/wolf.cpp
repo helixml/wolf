@@ -388,17 +388,28 @@ void start_watchdog() {
  * Uses gcore which pauses process briefly (~3s) to get consistent snapshot.
  * May cause brief stream glitches during dump, but process keeps running.
  *
- * Keeps last 48 hours of dumps + rotates old ones.
- * Core dumps are ~8GB each: 48 × 8GB = ~400GB disk space required.
+ * Keeps last N hours of dumps + rotates old ones.
+ * Core dumps are ~8GB each. Configure via WOLF_MAX_DUMPS env var.
+ * Default: 6 dumps = ~48GB max disk usage.
  */
 void start_periodic_dumps() {
   std::thread([]() {
     using namespace std::chrono;
 
     const hours DUMP_INTERVAL{1};  // Dump every hour
-    const int MAX_HOURLY_DUMPS = 48;  // Keep 48 hours of dumps
 
-    logs::log(logs::info, "[PERIODIC_DUMP] Started hourly core dump thread");
+    // Configurable limits via env vars
+    int max_dumps = 6;  // Default: 6 dumps
+    if (const char* env = std::getenv("WOLF_MAX_DUMPS")) {
+      max_dumps = std::max(1, std::atoi(env));
+    }
+
+    uint64_t max_size_bytes = 20ULL * 1024 * 1024 * 1024;  // Default: 20GB
+    if (const char* env = std::getenv("WOLF_MAX_DUMPS_GB")) {
+      max_size_bytes = std::max(1ULL, static_cast<uint64_t>(std::atoi(env))) * 1024 * 1024 * 1024;
+    }
+
+    logs::log(logs::info, "[PERIODIC_DUMP] Started (max {} dumps, {}GB quota)", max_dumps, max_size_bytes / (1024*1024*1024));
 
     // First dump after 5 minutes to verify gcore works (don't wait a full hour)
     const minutes INITIAL_DELAY{5};
@@ -447,13 +458,26 @@ void start_periodic_dumps() {
             // Sort by timestamp (filename is hourly-{timestamp}.{pid})
             std::sort(hourly_dumps.begin(), hourly_dumps.end());
 
-            // Remove oldest dumps if we have more than MAX_HOURLY_DUMPS
-            if (hourly_dumps.size() > MAX_HOURLY_DUMPS) {
-              int to_remove = hourly_dumps.size() - MAX_HOURLY_DUMPS;
-              for (int i = 0; i < to_remove; i++) {
-                logs::log(logs::info, "[PERIODIC_DUMP] Rotating out old dump: {}", hourly_dumps[i].string());
-                std::filesystem::remove(hourly_dumps[i]);
+            // Remove oldest dumps if we have more than max_dumps
+            while (hourly_dumps.size() > static_cast<size_t>(max_dumps)) {
+              logs::log(logs::info, "[PERIODIC_DUMP] Count limit: removing {}", hourly_dumps[0].string());
+              std::filesystem::remove(hourly_dumps[0]);
+              hourly_dumps.erase(hourly_dumps.begin());
+            }
+
+            // Enforce size quota - delete oldest until under limit
+            auto calc_total_size = [&]() {
+              uint64_t total = 0;
+              for (const auto& p : hourly_dumps) {
+                try { total += std::filesystem::file_size(p); } catch (...) {}
               }
+              return total;
+            };
+
+            while (!hourly_dumps.empty() && calc_total_size() > max_size_bytes) {
+              logs::log(logs::info, "[PERIODIC_DUMP] Size quota: removing {}", hourly_dumps[0].string());
+              std::filesystem::remove(hourly_dumps[0]);
+              hourly_dumps.erase(hourly_dumps.begin());
             }
           } else {
             logs::log(logs::warning, "[PERIODIC_DUMP] gcore failed with code {}", gcore_result);
