@@ -134,6 +134,14 @@ std::optional<sessions::AudioServer> setup_audio_server(const std::string &host_
       logs::log(logs::warning, "Failed to remove old PulseAudio socket: {}", e.what());
     }
 
+    /* Mount low-memory PulseAudio config from Wolf container
+     * Config file is at /opt/wolf-defaults/pulse-lowmem.conf in Wolf image
+     * This disables shared memory to save ~64MB per session */
+    auto pulse_config_path = utils::get_env("WOLF_PULSE_LOWMEM_CONFIG", "/opt/wolf-defaults/pulse-lowmem.conf");
+    std::vector<docker::MountPoint> mounts = {
+        docker::MountPoint{.source = host_runtime_dir, .destination = "/tmp/pulse/", .mode = "rw"},
+        docker::MountPoint{.source = pulse_config_path, .destination = "/etc/pulse/daemon.conf.d/99-wolf-low-memory.conf", .mode = "ro"}};
+
     auto container = docker_api.create(
         docker::Container{
             .id = "",
@@ -141,7 +149,7 @@ std::optional<sessions::AudioServer> setup_audio_server(const std::string &host_
             .image = utils::get_env("WOLF_PULSE_IMAGE", "ghcr.io/games-on-whales/pulseaudio:master"),
             .status = docker::CREATED,
             .ports = {},
-            .mounts = {docker::MountPoint{.source = host_runtime_dir, .destination = "/tmp/pulse/", .mode = "rw"}},
+            .mounts = mounts,
             .env = {"XDG_RUNTIME_DIR=/tmp/pulse/", "UNAME=retro", "UID=1000", "GID=1000"}},
         // The following is needed when using podman (or any container that uses SELINUX). This way we can access the
         // socket that is created by PulseAudio from other containers (including this one).

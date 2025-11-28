@@ -202,6 +202,10 @@ COPY docker/config.toml.template /opt/wolf-defaults/config.toml.template
 COPY docker/init-wolf-config.sh /etc/cont-init.d/05-init-wolf-config.sh
 RUN chmod +x /etc/cont-init.d/05-init-wolf-config.sh
 
+# Add PulseAudio low-memory config for sandboxes
+# Disables shared memory to save ~64MB per session
+COPY docker/pulse-lowmem.conf /opt/wolf-defaults/pulse-lowmem.conf
+
 # Add dockerd startup script (runs before Wolf via cont-init.d system)
 COPY docker/start-dockerd.sh /etc/cont-init.d/04-start-dockerd.sh
 RUN chmod +x /etc/cont-init.d/04-start-dockerd.sh
