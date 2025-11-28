@@ -11,4 +11,5 @@
 !docker/init-wolf-config.sh
 !docker/start-dockerd.sh
 !docker/config.toml.template
+!docker/pulse-lowmem.conf
 !third_party

@@ -518,6 +518,55 @@ void start_periodic_dumps() {
 }
 
 /**
+ * @brief Monitors sessions for inactivity and fires PauseStreamEvent for stale sessions.
+ *
+ * This prevents memory leaks from orphaned sessions when clients disconnect abruptly
+ * (browser crash, network failure) without sending proper ENET disconnect or TERMINATION packet.
+ *
+ * Sessions that haven't received any ENET packets for SESSION_TIMEOUT seconds will be paused,
+ * which triggers cleanup of GStreamer pipelines and Docker containers.
+ *
+ * @param app_state Box containing AppState with running_sessions and event_bus
+ */
+void start_session_timeout_monitor(immer::box<state::AppState> app_state) {
+  std::thread([app_state]() {
+    using namespace std::chrono;
+
+    const seconds CHECK_INTERVAL{10};      // Check every 10 seconds
+    const seconds SESSION_TIMEOUT{60};     // Sessions idle >60s are considered stale
+
+    logs::log(logs::info, "[SESSION_TIMEOUT] Started session timeout monitor (timeout={}s, check_interval={}s)",
+              SESSION_TIMEOUT.count(), CHECK_INTERVAL.count());
+
+    while (true) {
+      std::this_thread::sleep_for(CHECK_INTERVAL);
+
+      auto now = steady_clock::now();
+      auto sessions = app_state->running_sessions->load();
+
+      for (const auto& session : *sessions) {
+        if (!session.last_activity) {
+          continue;  // Skip sessions without activity tracking (shouldn't happen)
+        }
+
+        auto last_activity = session.last_activity->load();
+        auto idle_duration = duration_cast<seconds>(now - last_activity);
+
+        if (idle_duration > SESSION_TIMEOUT) {
+          logs::log(logs::warning,
+                    "[SESSION_TIMEOUT] Session {} idle for {}s (>{}s), firing PauseStreamEvent to clean up",
+                    session.session_id, idle_duration.count(), SESSION_TIMEOUT.count());
+
+          // Fire PauseStreamEvent to trigger cleanup (same event as ENET disconnect)
+          app_state->event_bus->fire_event(
+              immer::box<events::PauseStreamEvent>(events::PauseStreamEvent{.session_id = session.session_id}));
+        }
+      }
+    }
+  }).detach();
+}
+
+/**
  * @brief here's where the magic starts
  */
 void run() {
@@ -604,6 +653,9 @@ void run() {
 
   // Start periodic core dumps (every hour, keeps last 3)
   start_periodic_dumps();
+
+  // Start session timeout monitor (cleans up orphaned sessions after 60s of inactivity)
+  start_session_timeout_monitor(local_state);
 
   // Monitor main thread - parked on http_thread.join()
   // Add simple heartbeat to prove main thread is alive

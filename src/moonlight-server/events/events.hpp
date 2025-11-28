@@ -2,6 +2,8 @@
 
 #define BOOST_THREAD_PROVIDES_FUTURE_CONTINUATION
 #define BOOST_THREAD_PROVIDES_FUTURE
+#include <atomic>
+#include <chrono>
 #include <boost/thread.hpp>
 #include <boost/thread/future.hpp>
 #include <core/audio.hpp>
@@ -438,6 +440,15 @@ struct StreamSession {
 
   std::shared_ptr<std::optional<input::PenTablet>> pen_tablet =
       std::make_shared<std::optional<input::PenTablet>>(); /* Optional, will be set on first use */
+
+  /**
+   * Tracks last activity time for session timeout detection.
+   * Updated on ENET packet receive (input, control, etc).
+   * Sessions idle for >60s will be paused to prevent memory leaks.
+   * Using shared_ptr<atomic> to allow mutable updates within immer's immutable model.
+   */
+  std::shared_ptr<std::atomic<std::chrono::steady_clock::time_point>> last_activity =
+      std::make_shared<std::atomic<std::chrono::steady_clock::time_point>>(std::chrono::steady_clock::now());
 };
 
 } // namespace wolf::core::events

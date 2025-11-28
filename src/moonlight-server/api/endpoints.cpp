@@ -1075,7 +1075,18 @@ void UnixSocketServer::endpoint_KeyboardState(const HTTPRequest &req, std::share
   // Get running sessions to access inputtino keyboards
   auto running_sessions = state_->app_state->running_sessions->load();
 
+  logs::log(logs::debug, "[KEYBOARD] Tracker has {} sessions, running_sessions has {} entries",
+            tracker_sessions.size(), running_sessions.get().size());
+
+  // Log all running session IDs for comparison
+  for (const auto& running : running_sessions.get()) {
+    logs::log(logs::debug, "[KEYBOARD] Running session ID: {}, has_keyboard: {}",
+              running.session_id, running.keyboard->has_value());
+  }
+
   for (const auto& wolf_session : tracker_sessions) {
+    logs::log(logs::debug, "[KEYBOARD] Processing tracker session ID: {}, pressed_keys: {}",
+              wolf_session.session_id, wolf_session.pressed_keys.size());
     SessionKeyboardState state;
     state.session_id = std::to_string(wolf_session.session_id);
     state.timestamp_ms = wolf_session.last_update_ms;
@@ -1093,13 +1104,19 @@ void UnixSocketServer::endpoint_KeyboardState(const HTTPRequest &req, std::share
 
     // === Layer 2 & 3: Inputtino's view and Evdev state ===
     // Find the running session to access the inputtino keyboard
+    bool found_running_session = false;
     for (const auto& running : running_sessions.get()) {
+      logs::log(logs::debug, "[KEYBOARD] Comparing running session {} with tracker session {}",
+                running.session_id, wolf_session.session_id);
       if (running.session_id == wolf_session.session_id && running.keyboard->has_value()) {
+        found_running_session = true;
         std::visit([&state](auto &keyboard) {
           using T = std::decay_t<decltype(keyboard)>;
+          logs::log(logs::debug, "[KEYBOARD] Keyboard type: {}", typeid(T).name());
 
           // Only wolf::core::input::Keyboard (which inherits from inputtino::Keyboard) has introspection methods
           if constexpr (std::is_same_v<T, wolf::core::input::Keyboard>) {
+            logs::log(logs::debug, "[KEYBOARD] Using wolf::core::input::Keyboard - introspection available");
             // Get device node for display
             auto nodes = keyboard.get_nodes();
             if (!nodes.empty()) {
@@ -1128,12 +1145,23 @@ void UnixSocketServer::endpoint_KeyboardState(const HTTPRequest &req, std::share
             state.evdev_state.modifier_state.ctrl = wolf::control::is_ctrl_pressed_linux(evdev_keys);
             state.evdev_state.modifier_state.alt = wolf::control::is_alt_pressed_linux(evdev_keys);
             state.evdev_state.modifier_state.meta = wolf::control::is_meta_pressed_linux(evdev_keys);
+          } else {
+            logs::log(logs::debug, "[KEYBOARD] Using WaylandKeyboard - NO introspection available");
           }
-          // WaylandKeyboard doesn't have introspection methods - inputtino/evdev state unavailable
         }, running.keyboard->value());
         break;
       }
     }
+
+    if (!found_running_session) {
+      logs::log(logs::debug, "[KEYBOARD] No matching running session found for tracker session {}",
+                wolf_session.session_id);
+    }
+
+    logs::log(logs::debug, "[KEYBOARD] Final state: wolf={}, inputtino={}, evdev={}",
+              state.wolf_state.pressed_keys.size(),
+              state.inputtino_state.pressed_keys.size(),
+              state.evdev_state.pressed_keys.size());
 
     // === Mismatch detection ===
     // Compare all three layers - if they disagree, something is wrong
