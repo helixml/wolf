@@ -37,17 +37,12 @@ ARG RUST_VERSION=1.89.0
 ENV RUST_VERSION=$RUST_VERSION
 RUN rustup install $RUST_VERSION && rustup default $RUST_VERSION
 
-WORKDIR /tmp/
-RUN <<_GST_WAYLAND_DISPLAY
-    #!/bin/bash
-    set -e
-
-    git clone https://github.com/games-on-whales/gst-wayland-display
-    cd gst-wayland-display
-    git checkout e89d9f5d
-    cargo install cargo-c
+# Copy and build gst-wayland-display from local source
+# (Fixed to support case-insensitive SOFTWARE render node for llvmpipe)
+COPY gst-wayland-display /tmp/gst-wayland-display
+WORKDIR /tmp/gst-wayland-display
+RUN cargo install cargo-c && \
     cargo cinstall -p gst-plugin-wayland-display --prefix=/usr/local/lib/x86_64-linux-gnu/ --libdir=/usr/local/lib/x86_64-linux-gnu/gstreamer-1.0
-_GST_WAYLAND_DISPLAY
 
 COPY . /wolf/
 WORKDIR /wolf

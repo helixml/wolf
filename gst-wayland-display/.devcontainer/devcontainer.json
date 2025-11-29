@@ -1,0 +1,26 @@
+{
+  "name": "gst-wayland-comp-dev",
+  "build": {
+    "context": "..",
+    "dockerfile": "Dockerfile"
+  },
+  "features": {},
+  "runArgs": ["--runtime=nvidia"],
+  "hostRequirements": {
+    "gpu": true
+  },
+  "privileged": true,
+  "containerEnv": {
+    "XDG_RUNTIME_DIR": "/home/retro/"
+  },
+  "remoteEnv": {
+    "XDG_RUNTIME_DIR": "/tmp/sockets",
+    "RUST_BACKTRACE": "full",
+    "RUST_LOG": "INFO"
+  },
+  "customizations": {
+    "vscode": {
+      "extensions": ["rust-lang.rust-analyzer"]
+    }
+  }
+}
