@@ -1,5 +1,6 @@
 #include <core/audio.hpp>
 #include <helpers/logger.hpp>
+#include <atomic>
 #include <memory>
 #include <pulse/pulseaudio.h>
 
@@ -55,13 +56,17 @@ struct Server {
   pa_mainloop *loop;
   boost::promise<bool> on_ready;
   boost::future<bool> on_ready_fut;
+  std::atomic<bool> promise_set{false};  // Guard against double-setting promise
 };
 
 std::shared_ptr<Server> connect(std::string_view server) {
   {
     auto loop = pa_mainloop_new();
     auto ctx = pa_context_new(pa_mainloop_get_api(loop), "wolf");
-    auto state = std::make_shared<Server>(Server{.ctx = ctx, .loop = loop, .on_ready = boost::promise<bool>()});
+    auto state = std::make_shared<Server>();
+    state->ctx = ctx;
+    state->loop = loop;
+    state->on_ready = boost::promise<bool>();
     state->on_ready_fut = state->on_ready.get_future();
 
     pa_context_set_state_callback(
@@ -72,15 +77,28 @@ std::shared_ptr<Server> connect(std::string_view server) {
           switch (pa_context_get_state(ctx)) {
           case PA_CONTEXT_READY:
             logs::log(logs::debug, "[PULSE] Pulse connection ready");
-            state->on_ready.set_value(true);
+            // Only set promise once - state can transition READY -> FAILED
+            if (!state->promise_set.exchange(true)) {
+              state->on_ready.set_value(true);
+            }
             break;
           case PA_CONTEXT_TERMINATED:
             logs::log(logs::debug, "[PULSE] Terminated connection");
-            state->on_ready.set_value(false);
+            // Only set promise once - avoid "promise already satisfied" exception
+            if (!state->promise_set.exchange(true)) {
+              state->on_ready.set_value(false);
+            } else {
+              logs::log(logs::warning, "[PULSE] Connection terminated after initial ready state");
+            }
             break;
           case PA_CONTEXT_FAILED:
             logs::log(logs::debug, "[PULSE] Context failed");
-            state->on_ready.set_value(false);
+            // Only set promise once - avoid "promise already satisfied" exception
+            if (!state->promise_set.exchange(true)) {
+              state->on_ready.set_value(false);
+            } else {
+              logs::log(logs::warning, "[PULSE] Connection failed after initial ready state");
+            }
             break;
           case PA_CONTEXT_CONNECTING:
             logs::log(logs::debug, "[PULSE] Connecting...");

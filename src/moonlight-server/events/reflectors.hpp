@@ -159,9 +159,21 @@ template <> struct Reflector<events::StreamSession> {
     int audio_channel_count;
 
     wolf::config::ClientSettings client_settings;
+
+    // Observability: seconds since last ENET packet received
+    // Used by session timeout monitor to detect stale sessions
+    int idle_seconds;
   };
 
   static ReflType from(const events::StreamSession &v) {
+    // Compute idle_seconds from last_activity timestamp
+    int idle_seconds = 0;
+    if (v.last_activity) {
+      auto now = std::chrono::steady_clock::now();
+      auto last = v.last_activity->load();
+      idle_seconds = std::chrono::duration_cast<std::chrono::seconds>(now - last).count();
+    }
+
     return {.app_id = v.app->base.id,
             .client_id = std::to_string(v.session_id),
             .client_ip = v.ip,
@@ -173,7 +185,8 @@ template <> struct Reflector<events::StreamSession> {
             .video_height = v.display_mode.height,
             .video_refresh_rate = v.display_mode.refreshRate,
             .audio_channel_count = v.audio_channel_count,
-            .client_settings = v.client_settings};
+            .client_settings = v.client_settings,
+            .idle_seconds = idle_seconds};
   }
 };
 

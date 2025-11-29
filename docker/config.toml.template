@@ -64,7 +64,9 @@ video/x-raw(memory:CUDAMemory),format=NV12, width={width}, height={height}, pixe
     video_params = '''videoconvertscale !
 video/x-raw, chroma-site={color_range}, width={width}, height={height}, format=NV12,
 colorimetry={color_space}, pixel-aspect-ratio=1/1'''
-    video_params_zero_copy = '''vapostproc add-borders=true !
+    # Intel VA-API BGRA/ARGB bug fix: use msdkvpp instead of vapostproc (GPU-accelerated)
+    # vapostproc has color channel bug on Intel (intel/media-driver#644, #1820)
+    video_params_zero_copy = '''msdkvpp add-borders=true !
 video/x-raw(memory:VAMemory), format=NV12, width={width}, height={height}, pixel-aspect-ratio=1/1'''
 
     [gstreamer.video.defaults.va]
@@ -147,11 +149,25 @@ video/x-h264, profile=main, stream-format=byte-stream'''
 
     [[gstreamer.video.h264_encoders]]
     check_elements = [ 'x264enc' ]
-    encoder_pipeline = '''x264enc pass=qual tune=zerolatency speed-preset=superfast b-adapt=false bframes=0 ref=1
-sliced-threads=true threads={slices_per_frame} option-string="slices={slices_per_frame}:keyint=infinite:open-gop=0"
-b-adapt=false bitrate={bitrate} aud=false !
-video/x-h264, profile=high, stream-format=byte-stream'''
+    # Software H.264 encoder for CPU-only rendering (llvmpipe)
+    # Optimized for minimum CPU usage:
+    # - ultrafast preset: fastest encoding, lowest CPU
+    # - baseline profile: simpler encoding than high profile
+    # - no CABAC (cabac=0): uses CAVLC which is faster
+    # - no deblocking filter: saves CPU
+    # - single reference frame: minimum memory/compute
+    # - key-int-max: set via GOP_SIZE env var (default 120 = 2 sec at 60fps)
+    # Low-latency optimizations:
+    # - tune=zerolatency: disables frame reordering, minimal lookahead
+    # - sync-lookahead=0: no lookahead buffering
+    # - rc-lookahead=0: no rate control lookahead
+    # - vbv-maxrate/vbv-bufsize: small VBV buffer for faster response
+    encoder_pipeline = '''x264enc tune=zerolatency speed-preset=ultrafast bitrate={bitrate} sliced-threads=true threads={slices_per_frame} bframes=0 ref=1 key-int-max=120 option-string="slices={slices_per_frame}:open-gop=0:cabac=0:deblock=0,0:sync-lookahead=0:rc-lookahead=0:vbv-maxrate={bitrate}:vbv-bufsize={bitrate}" ! video/x-h264, profile=baseline, stream-format=byte-stream'''
     plugin_name = 'x264'
+    # Software encoder needs explicit videoconvert for format conversion
+    # Removed videorate (adds latency), added leaky queue for low-latency
+    video_params = '''queue max-size-buffers=1 leaky=downstream ! videoconvertscale ! video/x-raw, width={width}, height={height}, format=I420, chroma-site={color_range}, colorimetry={color_space}'''
+    video_params_zero_copy = '''queue max-size-buffers=1 leaky=downstream ! videoconvertscale ! video/x-raw, width={width}, height={height}, format=I420, chroma-site={color_range}, colorimetry={color_space}'''
 
     [[gstreamer.video.hevc_encoders]]
     check_elements = [ 'nvh265enc', 'cudaconvertscale', 'cudaupload' ]
