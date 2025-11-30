@@ -1,4 +1,3 @@
-use crate::GstVideoInfo;
 use crate::comp::{ClientState, NixInterface, State};
 use crate::tests::client::WaylandClient;
 use crate::utils::RenderTarget;
@@ -126,7 +125,7 @@ impl Fixture {
         let allocator = GsGlesbuffer::new(&mut self.server.renderer, video_info.clone())
             .expect("Failed to create GsGlesbuffer");
         self.server.output_buffer = Some(GsBufferType::RAW(allocator));
-        self.server.video_info = Some(GstVideoInfo::RAW(video_info));
+        self.server.video_info = Some(video_info);
     }
 
     pub fn round_trip(&mut self) {

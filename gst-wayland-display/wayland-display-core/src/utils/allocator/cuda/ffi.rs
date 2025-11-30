@@ -7,8 +7,9 @@ use gst::ffi as gst_ffi;
 use gst::ffi::{GstContext, GstElement, GstQuery};
 use gst::glib::ffi as glib_ffi;
 use gst_video::VideoInfoDmaDrm;
+use gst_video::ffi::GstVideoInfo;
 use gst_video::glib::gobject_ffi;
-use gst_video::glib::translate::ToGlibPtr;
+use gst_video::glib::translate::{FromGlibPtrNone, ToGlibPtr};
 use libloading::{Library, Symbol};
 use smithay::backend::egl::ffi::egl::types::{EGLDisplay, EGLImageKHR, EGLint};
 use std::ffi::c_void;
@@ -16,7 +17,7 @@ use std::os::raw::{c_int, c_uint};
 use std::ptr;
 use std::sync::{Arc, OnceLock};
 
-pub(crate) type GstCudaContext = *mut c_void;
+pub type GstCudaContext = *mut c_void;
 
 #[macro_export]
 macro_rules! cuda_call {
@@ -33,6 +34,29 @@ macro_rules! cuda_call {
 type GstCudaStream = *mut c_void;
 pub(crate) type GstBufferPool = *mut c_void;
 pub(crate) type GstCudaStreamHandle = *mut c_void;
+#[repr(C)]
+struct GstCudaMemory {
+    mem: gst_ffi::GstMemory,
+    context: GstCudaContext,
+    info: GstVideoInfo,
+    priv_: *mut c_void,              // GstCudaMemoryPrivate pointer
+    _gst_reserved: [*mut c_void; 4], // GST_PADDING (see gstconfig.h)
+}
+
+impl GstCudaMemory {
+    /// Safely borrow the GstVideoInfo from a GstMemory pointer
+    fn from_gst_memory<'a>(mem: *const gst_ffi::GstMemory) -> Option<&'a Self> {
+        if mem.is_null() {
+            return None;
+        }
+        Some(unsafe { &*(mem as *const GstCudaMemory) })
+    }
+
+    /// Get a safe VideoInfo wrapper
+    pub fn video_info_safe(&self) -> gst_video::VideoInfo {
+        unsafe { gst_video::VideoInfo::from_glib_none(&self.info as *const _) }
+    }
+}
 
 #[repr(C)]
 pub(crate) struct CUeglFrame {
@@ -213,8 +237,8 @@ pub fn get_cuda_egl_functions() -> Result<&'static CudaEglFunctions, String> {
 
 fn gst_dma_video_info_to_video_info(
     dma_video_info: &VideoInfoDmaDrm,
-) -> Result<gst_video::ffi::GstVideoInfo, String> {
-    let mut video_info: gst_video::ffi::GstVideoInfo = unsafe { std::mem::zeroed() };
+) -> Result<GstVideoInfo, String> {
+    let mut video_info: GstVideoInfo = unsafe { std::mem::zeroed() };
     unsafe { gst_video::ffi::gst_video_info_init(&mut video_info) };
 
     let result = unsafe {
@@ -298,6 +322,7 @@ unsafe extern "C" {
     pub(crate) fn gst_cuda_stream_new(context: *mut GstCudaContext) -> GstCudaStreamHandle;
     pub(crate) fn gst_cuda_stream_ref(stream: GstCudaStreamHandle);
     pub(crate) fn gst_cuda_stream_unref(stream: GstCudaStreamHandle);
+    pub(crate) fn gst_clear_cuda_stream(stream: GstCudaStreamHandle);
 
     // GstCudaMemory functions
     fn gst_cuda_allocator_alloc(
@@ -370,6 +395,38 @@ pub(crate) fn gst_is_cuda_buffer_pool(obj: *mut gst::ffi::GstBufferPool) -> bool
     }
 }
 
+fn alloc_cuda_buffer(
+    cuda_context: &CUDAContext,
+    video_info: &VideoInfoDmaDrm,
+) -> Result<gst::Buffer, Box<dyn std::error::Error>> {
+    let mut gst_video_info = gst_dma_video_info_to_video_info(video_info)?;
+
+    // Use the stream from the context if available
+    let stream = cuda_context
+        .stream()
+        .as_ref()
+        .map(|s| s.stream)
+        .unwrap_or(unsafe { std::mem::zeroed() });
+
+    let gst_memory = unsafe {
+        gst_cuda_allocator_alloc(
+            ptr::null_mut(),
+            cuda_context.ptr,
+            stream,
+            &mut gst_video_info,
+        )
+    };
+    if gst_memory.is_null() {
+        return Err("Failed to allocate GST CUDA memory".into());
+    }
+
+    let mut buffer = gst::Buffer::new();
+    let buffer_ref = buffer.get_mut().unwrap();
+    buffer_ref.append_memory(unsafe { gst::Memory::from_glib_full(gst_memory) });
+
+    Ok(buffer)
+}
+
 pub(crate) fn acquire_or_alloc_buffer(
     buffer_pool: Option<GstBufferPool>,
     cuda_context: &CUDAContext,
@@ -387,7 +444,8 @@ pub(crate) fn acquire_or_alloc_buffer(
         };
 
         if result != gst_ffi::GST_FLOW_OK {
-            return Err(format!("Failed to acquire buffer from pool: {}", result).into());
+            tracing::info!("Failed to acquire buffer from pool: {:?}", result);
+            return alloc_cuda_buffer(cuda_context, video_info);
         }
 
         if gst_buffer.is_null() {
@@ -397,26 +455,8 @@ pub(crate) fn acquire_or_alloc_buffer(
         Ok(unsafe { gst::Buffer::from_glib_full(gst_buffer) })
     } else {
         // Fallback to direct allocation
-        tracing::debug!("No buffer pool available, allocating directly");
-        let mut gst_video_info = gst_dma_video_info_to_video_info(video_info)?;
-        let stream = unsafe { std::mem::zeroed() };
-        let gst_memory = unsafe {
-            gst_cuda_allocator_alloc(
-                ptr::null_mut(),
-                cuda_context.ptr,
-                stream,
-                &mut gst_video_info,
-            )
-        };
-        if gst_memory.is_null() {
-            return Err("Failed to allocate GST CUDA memory".into());
-        }
-
-        let mut buffer = gst::Buffer::new();
-        let buffer_ref = buffer.get_mut().unwrap();
-        buffer_ref.append_memory(unsafe { gst::Memory::from_glib_full(gst_memory) });
-
-        Ok(buffer)
+        tracing::info!("No buffer pool available, allocating directly");
+        alloc_cuda_buffer(cuda_context, video_info)
     }
 }
 
@@ -424,12 +464,9 @@ pub(crate) fn copy_to_gst_buffer(
     egl_frame: CUeglFrame,
     gst_buffer: &mut gst::Buffer,
     cuda_context: &CUDAContext,
-    dma_video_info: &VideoInfoDmaDrm,
-) -> Result<(), Box<dyn std::error::Error>> {
-    let video_info = gst_dma_video_info_to_video_info(dma_video_info)?;
-
+) -> Result<gst_video::VideoInfo, Box<dyn std::error::Error>> {
     let stream_handle = cuda_context
-        .stream
+        .stream()
         .as_ref()
         .map(|s| unsafe { gst_cuda_stream_get_handle(s.stream) })
         .unwrap_or(unsafe { std::mem::zeroed() });
@@ -440,6 +477,10 @@ pub(crate) fn copy_to_gst_buffer(
     if gst_memory.is_null() {
         return Err("Failed to get memory from buffer".into());
     }
+
+    let video_info = GstCudaMemory::from_gst_memory(gst_memory)
+        .ok_or("Failed to get GstCudaMemory")?
+        .video_info_safe();
 
     // Map the GStreamer memory
     let mut map_info: gst_ffi::GstMapInfo = unsafe { std::mem::zeroed() };
@@ -464,48 +505,36 @@ pub(crate) fn copy_to_gst_buffer(
         let mut copy_params: CUDA_MEMCPY2D = unsafe { std::mem::zeroed() };
 
         // Set up source (from EGL frame)
-        unsafe {
-            match egl_frame.frame_type {
-                // Array type
-                0 => {
-                    copy_params.srcMemoryType = CU_MEMORYTYPE_ARRAY;
-                    copy_params.srcArray = egl_frame.frame.p_array[plane];
-                }
-                // Pitched pointer type
-                1 => {
-                    copy_params.srcMemoryType = CU_MEMORYTYPE_DEVICE;
-                    copy_params.srcDevice = egl_frame.frame.p_pitch[plane] as CUdeviceptr;
-                    copy_params.srcPitch = egl_frame.pitch as usize;
-                }
-                _ => {
-                    return Err("Unsupported EGL frame type".into());
-                }
+        match egl_frame.frame_type {
+            // Array type
+            0 => {
+                copy_params.srcMemoryType = CU_MEMORYTYPE_ARRAY;
+                copy_params.srcArray = unsafe { egl_frame.frame.p_array[plane] };
+            }
+            // Pitched pointer type
+            1 => {
+                copy_params.srcMemoryType = CU_MEMORYTYPE_DEVICE;
+                copy_params.srcDevice = unsafe { egl_frame.frame.p_pitch[plane] as CUdeviceptr };
+                copy_params.srcPitch = egl_frame.pitch as usize;
+            }
+            _ => {
+                return Err("Unsupported EGL frame type".into());
             }
         }
 
         copy_params.dstMemoryType = CU_MEMORYTYPE_DEVICE;
-        copy_params.dstDevice = dst_device_ptr + video_info.offset[plane] as u64;
-        copy_params.dstPitch = video_info.stride[plane] as usize;
-        copy_params.WidthInBytes = video_info.stride[plane] as usize;
-        // Set copy dimensions
-        copy_params.Height = match plane {
-            0 => dma_video_info.height() as usize, // Y plane (or single plane)
-            _ => {
-                // For YUV formats, UV planes are typically half height
-                let plane_height = match dma_video_info.format().to_string().as_str() {
-                    "NV12" | "NV21" | "I420" | "YV12" => dma_video_info.height() as usize / 2,
-                    _ => dma_video_info.height() as usize, // For other formats, assume same height
-                };
-                plane_height
-            }
-        };
+        copy_params.dstDevice = dst_device_ptr + video_info.offset()[plane] as u64;
+        copy_params.dstPitch = video_info.stride()[plane] as usize;
+        copy_params.WidthInBytes = video_info.comp_width(plane as u8) as usize
+            * video_info.comp_pstride(plane as u8) as usize;
+        copy_params.Height = video_info.comp_height(plane as u8) as usize;
 
         cuda_call!(CuMemcpy2DAsync(&copy_params, stream_handle))?;
     }
 
     // Safe to unmap without synchronization as the copy is async
     unsafe { gst_ffi::gst_memory_unmap(gst_memory, &mut map_info) };
-    Ok(())
+    Ok(video_info)
 }
 
 pub(crate) fn cuda_result_to_string(result: CUresult) -> &'static str {

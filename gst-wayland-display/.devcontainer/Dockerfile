@@ -1,4 +1,4 @@
-FROM ghcr.io/games-on-whales/gstreamer:1.26.2
+FROM ghcr.io/games-on-whales/gstreamer:1.26.7
 
 ARG HOME="/home/$UNAME"
 ENV HOME=$HOME

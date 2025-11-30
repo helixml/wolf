@@ -1,11 +1,5 @@
-use std::fmt::Debug;
-use std::ops::DerefMut;
-use std::sync::Mutex;
-
-use gst::message::Application;
-use gst_video::{VideoCapsBuilder, VideoFormat, VideoInfo, VideoInfoDmaDrm};
-
 use crate::utils::{CAT, GstLayer};
+use gst::message::Application;
 use gst::query::Allocation;
 use gst::subclass::prelude::*;
 use gst::{Context, Event, Fraction, glib};
@@ -14,7 +8,11 @@ use gst::{Structure, prelude::*};
 use gst_base::prelude::BaseSrcExt;
 use gst_base::subclass::base_src::CreateSuccess;
 use gst_base::subclass::prelude::*;
+use gst_video::{VideoCapsBuilder, VideoFormat, VideoInfo, VideoInfoDmaDrm};
 use once_cell::sync::Lazy;
+use std::ops::DerefMut;
+use std::sync::atomic::AtomicPtr;
+use std::sync::{Arc, Mutex};
 use tracing_subscriber::Registry;
 use tracing_subscriber::layer::SubscriberExt;
 #[cfg(feature = "cuda")]
@@ -55,9 +53,9 @@ pub struct Settings {
     input_devices: Vec<String>,
     disable_intel_workaround: bool,
     #[cfg(feature = "cuda")]
-    cuda_context: Option<cuda::CUDAContext>,
+    cuda_context: Option<Arc<Mutex<cuda::CUDAContext>>>,
     #[cfg(feature = "cuda")]
-    cudabuffer_pool: Option<CUDABufferPool>,
+    cuda_raw_ptr: AtomicPtr<cuda::GstCudaContext>,
 }
 
 pub struct State {
@@ -231,7 +229,7 @@ impl ObjectImpl for WaylandDisplaySrc {
             }
             #[cfg(feature = "cuda")]
             "cuda-device-id" => {
-                let cuda_context = {
+                let mut cuda_context = {
                     let device_id = value.get().unwrap();
                     if device_id != -1 {
                         match CUDAContext::new(device_id) {
@@ -249,7 +247,11 @@ impl ObjectImpl for WaylandDisplaySrc {
                     }
                 };
                 let mut settings = self.settings.lock().unwrap();
-                settings.cuda_context = cuda_context;
+                settings.cuda_context = if cuda_context.is_some() {
+                    Some(Arc::new(Mutex::new(cuda_context.take().unwrap())))
+                } else {
+                    None
+                };
             }
             "mouse" => {
                 let actual_val = value
@@ -415,15 +417,15 @@ impl ElementImpl for WaylandDisplaySrc {
     #[cfg(feature = "cuda")]
     fn set_context(&self, context: &Context) {
         let elem = self.obj().upcast_ref::<gst::Element>().to_owned();
-        let cuda_context = {
+        let cuda_raw_ptr = {
             let settings = self.settings.lock().unwrap();
-            settings.cuda_context.clone()
+            settings.cuda_raw_ptr.as_ptr()
         };
-        match CUDAContext::new_from_set_context(&elem, &context, -1, cuda_context) {
+        match CUDAContext::new_from_set_context(&elem, &context, -1, cuda_raw_ptr) {
             Ok(ctx) => {
                 let mut settings = self.settings.lock().unwrap();
                 if settings.cuda_context.is_none() {
-                    settings.cuda_context = Some(ctx);
+                    settings.cuda_context = Some(Arc::new(Mutex::new(ctx)));
                 }
             }
             Err(e) => {
@@ -442,10 +444,11 @@ impl BaseSrcImpl for WaylandDisplaySrc {
             match settings.cuda_context {
                 Some(ref cuda_context) => {
                     tracing::info!("Handling context query with CUDA");
+                    let cuda_context = cuda_context.lock().unwrap();
                     cuda::gst_cuda_handle_context_query_wrapped(
                         self.obj().as_ref().as_ref(),
                         query,
-                        cuda_context,
+                        &cuda_context,
                     )
                 }
                 None => BaseSrcImplExt::parent_query(self, query),
@@ -569,11 +572,11 @@ impl BaseSrcImpl for WaylandDisplaySrc {
             .features(0)
             .expect("Failed to get features")
             .contains(cuda::CAPS_FEATURE_MEMORY_CUDA_MEMORY);
-        let mut settings = self.settings.lock().unwrap();
+        let settings = self.settings.lock().unwrap();
         if settings.cuda_context.is_none() || !is_cuda {
             return self.parent_decide_allocation(query);
         }
-        let cuda_ctx = settings.cuda_context.as_ref().unwrap();
+        let cuda_ctx = settings.cuda_context.as_ref().unwrap().lock().unwrap();
 
         // Let's get the pool from the query, if it's not there, we'll create one
         let pools = query.allocation_pools();
@@ -608,7 +611,8 @@ impl BaseSrcImpl for WaylandDisplaySrc {
         match pool {
             Ok(pool) => {
                 let caps = unsafe { gst::Caps::from_glib_full(outcaps.unwrap().as_ptr()) };
-                pool.configure(&caps, cuda_ctx.stream().unwrap(), size, min, max)
+                let stream = cuda_ctx.stream().expect("failed to get CUDA stream");
+                pool.configure(&caps, &stream, size, min, max)
                     .expect("failed to configure CUDA pool");
 
                 let updated_size = pool.get_updated_size().expect("failed to get updated size");
@@ -624,9 +628,9 @@ impl BaseSrcImpl for WaylandDisplaySrc {
                 // Send the pool to the compositor
                 let _ = self
                     .command_tx
-                    .send(Command::UpdateCUDABufferPool(pool.clone()));
-
-                settings.cudabuffer_pool = Some(pool);
+                    .send(Command::UpdateCUDABufferPool(Arc::new(Mutex::new(Some(
+                        pool,
+                    )))));
             }
             Err(err) => {
                 tracing::warn!("Failed to create CUDA buffer pool: {}", err);
@@ -647,8 +651,11 @@ impl BaseSrcImpl for WaylandDisplaySrc {
                     .features(0)
                     .expect("Failed to get features")
                     .contains(cuda::CAPS_FEATURE_MEMORY_CUDA_MEMORY);
-                let settings = self.settings.lock().unwrap();
-                if is_cuda && settings.cuda_context.is_some() {
+                let cuda_context = {
+                    let settings = self.settings.lock().unwrap();
+                    settings.cuda_context.clone()
+                };
+                if is_cuda && cuda_context.is_some() {
                     // memory:CUDAMemory will only get us a base format without modifiers,
                     // let's pick the first DRM format that matches the base format
                     let state = self.state.lock().unwrap();
@@ -666,8 +673,7 @@ impl BaseSrcImpl for WaylandDisplaySrc {
                         VideoInfoDmaDrm::new(base_video_info, format.code as u32, modifier);
                     GstVideoInfo::CUDA(CUDAParams {
                         video_info,
-                        cuda_context: settings.cuda_context.clone().unwrap(),
-                        buffer_pool: settings.cudabuffer_pool.clone(),
+                        cuda_context: cuda_context.unwrap(),
                     })
                 } else {
                     GstVideoInfo::RAW(base_video_info)
@@ -691,12 +697,12 @@ impl BaseSrcImpl for WaylandDisplaySrc {
         }
 
         #[cfg(feature = "cuda")]
-        let (render_node, input_devices, cuda_context) = {
+        let (render_node, input_devices, have_cuda_context) = {
             let settings = self.settings.lock().unwrap();
             (
                 settings.render_node.clone(),
                 settings.input_devices.clone(),
-                settings.cuda_context.clone(),
+                settings.cuda_context.is_some(),
             )
         };
 
@@ -729,22 +735,20 @@ impl BaseSrcImpl for WaylandDisplaySrc {
         #[cfg(feature = "cuda")]
         match display.get_render_device() {
             Some(render_device) => {
-                if *render_device.pci_vendor() == PCIVendor::NVIDIA && cuda_context.is_none() {
+                if *render_device.pci_vendor() == PCIVendor::NVIDIA && !have_cuda_context {
                     tracing::info!(
                         "Acquiring a CudaContext from the pipeline, you can manually set the `cuda-device-id` property to override this behavior"
                     );
-                    let cuda_context = {
+                    let cuda_raw_ptr = {
                         let settings = self.settings.lock().unwrap();
-                        settings.cuda_context.clone()
+                        settings.cuda_raw_ptr.as_ptr()
                     };
-                    // TODO: here we should share the raw C pointer between
-                    //       CUDAContext::new_from_set_context and CUDAContext::new_from_gstreamer
-                    match CUDAContext::new_from_gstreamer(&elem, -1, cuda_context) {
+                    match CUDAContext::new_from_gstreamer(&elem, -1, cuda_raw_ptr) {
                         Ok(cuda_context) => {
                             let mut settings = self.settings.lock().unwrap();
                             if settings.cuda_context.is_none() {
                                 tracing::info!("Acquired a CudaContext via new_from_gstreamer");
-                                settings.cuda_context = Some(cuda_context);
+                                settings.cuda_context = Some(Arc::new(Mutex::new(cuda_context)));
                             } else {
                                 tracing::info!("Acquired a CudaContext via set_context");
                             }
@@ -780,7 +784,7 @@ impl BaseSrcImpl for WaylandDisplaySrc {
         let mut state = self.state.lock().unwrap();
         if let Some(state) = state.take() {
             let subscriber = Registry::default().with(GstLayer);
-            tracing::subscriber::with_default(subscriber, || std::mem::drop(state.display));
+            tracing::subscriber::with_default(subscriber, || drop(state.display));
         }
         Ok(())
     }

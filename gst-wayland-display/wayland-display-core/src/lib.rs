@@ -13,6 +13,7 @@ use smithay::utils::{Logical, Point};
 use std::ffi::{CString, c_char, c_void};
 use std::str::FromStr;
 use std::sync::mpsc::{self, Receiver, SyncSender};
+use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 use utils::RenderTarget;
 
@@ -32,7 +33,7 @@ pub enum Command {
         Option<Tracer>,
     ),
     #[cfg(feature = "cuda")]
-    UpdateCUDABufferPool(CUDABufferPool),
+    UpdateCUDABufferPool(Arc<Mutex<Option<CUDABufferPool>>>),
     KeyboardInput(u32, KeyState),
     PointerMotion(Point<f64, Logical>),
     PointerMotionAbsolute(Point<f64, Logical>),

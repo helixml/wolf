@@ -15,6 +15,7 @@ pub enum RenderTarget {
 impl FromStr for RenderTarget {
     type Err = CreateDrmNodeError;
     fn from_str(s: &str) -> Result<Self, CreateDrmNodeError> {
+        // Case-insensitive match for "software" to support WOLF_RENDER_NODE=SOFTWARE
         Ok(match s.to_ascii_lowercase().as_str() {
             "software" => RenderTarget::Software,
             _ => RenderTarget::Hardware(DrmNode::from_path(s)?),

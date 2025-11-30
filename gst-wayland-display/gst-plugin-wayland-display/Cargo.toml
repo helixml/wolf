@@ -14,7 +14,7 @@ crate-type = ["cdylib", "rlib"]
 path = "src/lib.rs"
 
 [features]
-default = ["cuda"]
+default = []
 static = []
 capi = []
 doc = []

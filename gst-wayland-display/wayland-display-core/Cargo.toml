@@ -13,7 +13,7 @@ crate-type = ["cdylib", "staticlib", "rlib"]
 path = "src/lib.rs"
 
 [features]
-default = ["cuda"]
+default = []
 cuda = ["dep:libloading"]
 
 [dependencies]

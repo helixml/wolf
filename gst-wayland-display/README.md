@@ -68,6 +68,10 @@ gst-launch-1.0 waylanddisplaysrc  ! 'video/x-raw(memory:DMABuf),width=1920,heigh
 
 ### Support for Nvidia CUDAMemory
 
+> [!IMPORTANT]
+> This is gated behind the `cuda` feature flag. To enable it, you'll need to install `gst-cuda-1.0` and have access to
+> `libcuda.so` at runtime.
+
 This plugin supports outputting **CUDA buffers** for low-latency Nvidia pipelines. By not using `glupload` and
 `glcolorconvert` we can not only be way more efficient, but it'll also allow us to re-use the GL context that we already
 have in Smithay.
@@ -85,8 +89,6 @@ gst-launch-1.0 waylanddisplaysrc cuda-device-id=0 ! 'video/x-raw(memory:CUDAMemo
 In order to support this we leverage `gst-cuda-1.0` which adds a single build dependency to this project.
 At runtime, you'll need to have access to `libcuda.so` but only to access and use `CUDAMemory`; you can still use
 `DMABuf` when running this plugin on a platform that doesn't support it.
-
-It's also possible to completely remove this functionality by disabling the Cargo `cuda` feature.
 
 ## C Bindings
 
