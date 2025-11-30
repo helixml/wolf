@@ -209,19 +209,7 @@ impl State {
         let space = Space::default();
 
         let mut seat = seat_state.new_wl_seat(&dh, "seat-0");
-        // CRITICAL: Configure keyboard layouts to match what Sway expects (us,gb,fr)
-        // Using XkbConfig::default() would use only US layout, causing conflicts when
-        // the nested Sway compositor has multiple layouts configured. When outer and
-        // inner compositor XKB configs don't match, modifier keys like Shift can cause
-        // unexpected layout switches because the outer compositor's XKB state machine
-        // processes key events differently than Sway expects.
-        // See: helix/wolf/sway-config/config for the matching Sway config.
-        let xkb_config = XkbConfig {
-            layout: "us,gb,fr",
-            options: Some("caps:ctrl_nocaps".into()),
-            ..XkbConfig::default()
-        };
-        seat.add_keyboard(xkb_config, 200, 25)
+        seat.add_keyboard(XkbConfig::default(), 200, 25)
             .expect("Failed to add keyboard to seat");
         seat.add_pointer();
         seat.add_touch();
