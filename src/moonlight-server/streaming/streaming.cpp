@@ -308,9 +308,9 @@ void start_streaming_video(immer::box<events::VideoSession> video_session,
     g_signal_connect(bus, "message::application", G_CALLBACK(+[](GstBus*, GstMessage* msg, gpointer user_data) {
       const GstStructure* s = gst_message_get_structure(msg);
       if (gst_structure_has_name(s, "switch-interpipe-src")) {
-        guint session_id;
+        guint64 session_id;
         const char* interpipe_id;
-        if (gst_structure_get_uint(s, "session-id", &session_id) &&
+        if (gst_structure_get_uint64(s, "session-id", &session_id) &&
             (interpipe_id = gst_structure_get_string(s, "interpipe-id"))) {
 
           logs::log(logs::warning, "[HANG_DEBUG] Pipeline thread handling switch-interpipe-src: session {}, target {}", session_id, interpipe_id);
@@ -420,7 +420,7 @@ void start_streaming_video(immer::box<events::VideoSession> video_session,
             gst_element_post_message(pipeline.get(),
               gst_message_new_application(GST_OBJECT(pipeline.get()),
                 gst_structure_new("switch-interpipe-src",
-                  "session-id", G_TYPE_UINT, sess_id,
+                  "session-id", G_TYPE_UINT64, (guint64)sess_id,
                   "interpipe-id", G_TYPE_STRING, video_interpipe.c_str(),
                   nullptr)));
           }
@@ -488,9 +488,9 @@ void start_streaming_audio(immer::box<events::AudioSession> audio_session,
     g_signal_connect(bus, "message::application", G_CALLBACK(+[](GstBus*, GstMessage* msg, gpointer user_data) {
       const GstStructure* s = gst_message_get_structure(msg);
       if (gst_structure_has_name(s, "switch-interpipe-src-audio")) {
-        guint session_id;
+        guint64 session_id;
         const char* interpipe_id;
-        if (gst_structure_get_uint(s, "session-id", &session_id) &&
+        if (gst_structure_get_uint64(s, "session-id", &session_id) &&
             (interpipe_id = gst_structure_get_string(s, "interpipe-id"))) {
 
           logs::log(logs::warning, "[HANG_DEBUG] Audio pipeline thread handling switch-interpipe-src: session {}, target {}", session_id, interpipe_id);
@@ -574,7 +574,7 @@ void start_streaming_audio(immer::box<events::AudioSession> audio_session,
             gst_element_post_message(pipeline.get(),
               gst_message_new_application(GST_OBJECT(pipeline.get()),
                 gst_structure_new("switch-interpipe-src-audio",
-                  "session-id", G_TYPE_UINT, session_id,
+                  "session-id", G_TYPE_UINT64, (guint64)session_id,
                   "interpipe-id", G_TYPE_STRING, audio_interpipe.c_str(),
                   nullptr)));
           }

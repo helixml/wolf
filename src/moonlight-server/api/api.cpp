@@ -7,6 +7,7 @@
 #include <memory>
 #include <monitoring/thread-monitor.hpp>
 #include <rfl/json.hpp>
+#include <thread>
 
 namespace wolf::api {
 
@@ -44,7 +45,51 @@ void start_server(std::string_view runtime_dir, immer::box<state::AppState> app_
   heartbeat_timer->expires_after(std::chrono::seconds(1));
   heartbeat_timer->async_wait(*heartbeat_callback);
 
-  io_context.run();
+  // Run the io_context in a loop, restarting on exceptions
+  // This ensures the socket stays alive even if handlers throw exceptions
+  // (e.g., PulseAudio callback throwing "promise already satisfied")
+  int consecutive_errors = 0;
+  const int MAX_CONSECUTIVE_ERRORS = 10;
+
+  while (true) {
+    try {
+      // Reset io_context if it was stopped by an exception
+      if (io_context.stopped()) {
+        io_context.restart();
+      }
+
+      io_context.run();
+
+      // If run() returns normally (no work left), we're done
+      logs::log(logs::info, "[API] io_context.run() completed normally");
+      break;
+
+    } catch (const std::exception& e) {
+      consecutive_errors++;
+      logs::log(logs::error, "[API] Exception in io_context: {} (error {}/{})",
+                e.what(), consecutive_errors, MAX_CONSECUTIVE_ERRORS);
+
+      if (consecutive_errors >= MAX_CONSECUTIVE_ERRORS) {
+        logs::log(logs::fatal, "[API] Too many consecutive errors, socket server stopping");
+        throw;  // Re-throw to let process crash and restart
+      }
+
+      // Brief pause before restarting
+      std::this_thread::sleep_for(std::chrono::milliseconds(100));
+
+    } catch (...) {
+      consecutive_errors++;
+      logs::log(logs::error, "[API] Unknown exception in io_context (error {}/{})",
+                consecutive_errors, MAX_CONSECUTIVE_ERRORS);
+
+      if (consecutive_errors >= MAX_CONSECUTIVE_ERRORS) {
+        logs::log(logs::fatal, "[API] Too many consecutive errors, socket server stopping");
+        throw;
+      }
+
+      std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    }
+  }
 }
 
 } // namespace wolf::api

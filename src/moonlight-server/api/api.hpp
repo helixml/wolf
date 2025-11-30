@@ -261,6 +261,64 @@ struct SystemMemoryResponse {
   std::optional<GStreamerPipelineStats> gstreamer_pipelines; // Actual pipeline count from state
 };
 
+// Keyboard state observability for debugging stuck modifier keys
+struct KeyboardModifierState {
+  bool shift = false;
+  bool ctrl = false;
+  bool alt = false;
+  bool meta = false;
+};
+
+// One layer of keyboard state (Wolf's view, inputtino's view, or evdev/kernel view)
+struct KeyboardLayerState {
+  std::vector<int32_t> pressed_keys;          // Key codes (Moonlight VK codes for wolf/inputtino, Linux KEY_* for evdev)
+  std::vector<std::string> pressed_key_names; // Human-readable names
+  KeyboardModifierState modifier_state;
+};
+
+struct SessionKeyboardState {
+  std::string session_id;
+  int64_t timestamp_ms;
+  std::string device_name;
+  std::string device_node;  // e.g., /dev/input/event15
+
+  // Three layers of keyboard state for debugging:
+  // 1. Wolf's view - what Moonlight events Wolf has received and tracked
+  KeyboardLayerState wolf_state;
+  // 2. Inputtino's view - what inputtino's internal cur_press_keys vector contains
+  KeyboardLayerState inputtino_state;
+  // 3. Evdev/kernel view - what the kernel thinks is pressed on the virtual device
+  KeyboardLayerState evdev_state;
+
+  // Mismatch detection - true if any layer disagrees (indicates a bug)
+  bool has_mismatch = false;
+  std::string mismatch_description;
+
+  // Legacy fields for backwards compatibility
+  std::vector<int32_t> pressed_keys;          // Same as wolf_state.pressed_keys
+  std::vector<std::string> pressed_key_names; // Same as wolf_state.pressed_key_names
+  KeyboardModifierState modifier_state;       // Same as wolf_state.modifier_state
+};
+
+struct KeyboardStateRequest {
+  std::optional<std::string> session_id;  // Optional: filter by session
+};
+
+struct KeyboardStateResponse {
+  bool success = true;
+  std::vector<SessionKeyboardState> sessions;
+};
+
+struct KeyboardResetRequest {
+  std::string session_id;  // Required: which session to reset
+};
+
+struct KeyboardResetResponse {
+  bool success = true;
+  std::vector<std::string> released_keys;
+  std::string message;
+};
+
 struct UnixSocket {
   boost::asio::local::stream_protocol::socket socket;
   bool is_alive = true;
@@ -313,6 +371,8 @@ private:
   void endpoint_DockerPullImage(const HTTPRequest &req, std::shared_ptr<UnixSocket> socket);
   void endpoint_SystemMemory(const HTTPRequest &req, std::shared_ptr<UnixSocket> socket);
   void endpoint_SystemHealth(const HTTPRequest &req, std::shared_ptr<UnixSocket> socket);
+  void endpoint_KeyboardState(const HTTPRequest &req, std::shared_ptr<UnixSocket> socket);
+  void endpoint_KeyboardReset(const HTTPRequest &req, std::shared_ptr<UnixSocket> socket);
 
   void sse_broadcast(const std::string &payload);
   void sse_keepalive(const boost::system::error_code &e);

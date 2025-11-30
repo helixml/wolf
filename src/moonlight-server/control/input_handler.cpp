@@ -1,6 +1,7 @@
 #include <boost/endian/conversion.hpp>
 #include <boost/locale.hpp>
 #include <control/input_handler.hpp>
+#include <control/keyboard_state.hpp>
 #include <events/events.hpp>
 #include <helpers/logger.hpp>
 #include <immer/box.hpp>
@@ -343,8 +344,15 @@ void mouse_h_scroll(const MOUSE_HSCROLL_PACKET &pkt, events::StreamSession &sess
 void keyboard_key(const KEYBOARD_PACKET &pkt, events::StreamSession &session) {
   // moonlight always sets the high bit; not sure why but mask it off here
   short moonlight_key = (short)boost::endian::little_to_native(pkt.key_code) & (short)0x7fff;
+
+  // Track keyboard state for observability
+  auto& tracker = wolf::control::KeyboardStateTracker::get();
+
   if (session.keyboard->has_value()) {
     if (pkt.type == KEY_PRESS) {
+      // Track key press in our state tracker
+      tracker.key_press(session.session_id, moonlight_key);
+
       // Press the virtual modifiers
       if (pkt.modifiers & KEYBOARD_MODIFIERS::SHIFT && moonlight_key != M_SHIFT)
         std::visit([](auto &keyboard) { keyboard.press(M_SHIFT); }, session.keyboard->value());
@@ -369,7 +377,23 @@ void keyboard_key(const KEYBOARD_PACKET &pkt, events::StreamSession &session) {
         std::visit([](auto &keyboard) { keyboard.release(M_META); }, session.keyboard->value());
 
     } else {
+      // Track key release in our state tracker
+      tracker.key_release(session.session_id, moonlight_key);
+
+      // Release the actual key
       std::visit([moonlight_key](auto &keyboard) { keyboard.release(moonlight_key); }, session.keyboard->value());
+
+      // FIX: Also release any modifiers that are NOT currently held according to the packet
+      // This prevents stuck modifiers when KEY_RELEASE events are lost or delayed
+      // (especially common on RHEL Moonlight clients)
+      if (!(pkt.modifiers & KEYBOARD_MODIFIERS::SHIFT))
+        std::visit([](auto &keyboard) { keyboard.release(M_SHIFT); }, session.keyboard->value());
+      if (!(pkt.modifiers & KEYBOARD_MODIFIERS::CTRL))
+        std::visit([](auto &keyboard) { keyboard.release(M_CTRL); }, session.keyboard->value());
+      if (!(pkt.modifiers & KEYBOARD_MODIFIERS::ALT))
+        std::visit([](auto &keyboard) { keyboard.release(M_ALT); }, session.keyboard->value());
+      if (!(pkt.modifiers & KEYBOARD_MODIFIERS::META))
+        std::visit([](auto &keyboard) { keyboard.release(M_META); }, session.keyboard->value());
     }
   } else {
     logs::log(logs::warning, "Received KEYBOARD_PACKET but no keyboard device is present");

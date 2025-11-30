@@ -168,6 +168,10 @@ void run_control(int port,
       auto [client_ip, client_port] = get_ip((sockaddr *)&event.peer->address.address);
       auto client_session = get_current_session(connected_clients, running_sessions, client_ip, event);
       if (client_session) {
+        // Update session activity timestamp on any ENET event (prevents session timeout)
+        if (client_session->last_activity) {
+          client_session->last_activity->store(std::chrono::steady_clock::now());
+        }
         switch (event.type) {
         case ENET_EVENT_TYPE_NONE:
           break;

@@ -16,10 +16,11 @@ if [ ! -f "$CONFIG_FILE" ] || [ ! -s "$CONFIG_FILE" ]; then
         echo "🆔 Generated UUID: $WOLF_UUID"
     fi
 
-    # Set hostname from env var (default: "local" if not set)
-    HELIX_HOSTNAME=${HELIX_HOSTNAME:-local}
-    sed -i "s/{{HELIX_HOSTNAME}}/$HELIX_HOSTNAME/g" "$CONFIG_FILE"
-    echo "🏷️  Set hostname: Helix ($HELIX_HOSTNAME)"
+    # Set hostname from WOLF_INSTANCE_ID (unique per sandbox machine)
+    # This allows multiple sandboxes to be distinguished in Moonlight's host list
+    WOLF_INSTANCE_ID=${WOLF_INSTANCE_ID:-local}
+    sed -i "s/{{HELIX_HOSTNAME}}/$WOLF_INSTANCE_ID/g" "$CONFIG_FILE"
+    echo "🏷️  Set hostname: Helix ($WOLF_INSTANCE_ID)"
 
     # Set pairing PIN from env var if provided
     if [ ! -z "$MOONLIGHT_INTERNAL_PAIRING_PIN" ]; then
@@ -32,8 +33,12 @@ if [ ! -f "$CONFIG_FILE" ] || [ ! -s "$CONFIG_FILE" ]; then
 
     # Set GOP size (keyframe interval) from env var
     # Default: 120 (keyframe every 2 seconds at 60fps)
+    # Note: Different encoders use different parameter names:
+    # - Hardware encoders (nvenc, vaapi): gop-size=N
+    # - Software x264enc: key-int-max=N
     GOP_SIZE=${GOP_SIZE:-120}
     sed -i "s/gop-size=[0-9-]*/gop-size=$GOP_SIZE/g" "$CONFIG_FILE"
+    sed -i "s/key-int-max=[0-9]*/key-int-max=$GOP_SIZE/g" "$CONFIG_FILE"
     echo "🎬 Set GOP size (keyframe interval): $GOP_SIZE frames"
 
     echo "✅ Wolf config initialized"

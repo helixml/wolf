@@ -134,6 +134,14 @@ std::optional<sessions::AudioServer> setup_audio_server(const std::string &host_
       logs::log(logs::warning, "Failed to remove old PulseAudio socket: {}", e.what());
     }
 
+    /* Mount low-memory PulseAudio config from Wolf container
+     * Config file is at /opt/wolf-defaults/pulse-lowmem.conf in Wolf image
+     * This disables shared memory to save ~64MB per session */
+    auto pulse_config_path = utils::get_env("WOLF_PULSE_LOWMEM_CONFIG", "/opt/wolf-defaults/pulse-lowmem.conf");
+    std::vector<docker::MountPoint> mounts = {
+        docker::MountPoint{.source = host_runtime_dir, .destination = "/tmp/pulse/", .mode = "rw"},
+        docker::MountPoint{.source = pulse_config_path, .destination = "/etc/pulse/daemon.conf.d/99-wolf-low-memory.conf", .mode = "ro"}};
+
     auto container = docker_api.create(
         docker::Container{
             .id = "",
@@ -141,7 +149,7 @@ std::optional<sessions::AudioServer> setup_audio_server(const std::string &host_
             .image = utils::get_env("WOLF_PULSE_IMAGE", "ghcr.io/games-on-whales/pulseaudio:master"),
             .status = docker::CREATED,
             .ports = {},
-            .mounts = {docker::MountPoint{.source = host_runtime_dir, .destination = "/tmp/pulse/", .mode = "rw"}},
+            .mounts = mounts,
             .env = {"XDG_RUNTIME_DIR=/tmp/pulse/", "UNAME=retro", "UID=1000", "GID=1000"}},
         // The following is needed when using podman (or any container that uses SELINUX). This way we can access the
         // socket that is created by PulseAudio from other containers (including this one).
@@ -163,6 +171,57 @@ std::optional<sessions::AudioServer> setup_audio_server(const std::string &host_
 }
 
 /**
+ * @brief Test if Wolf's Unix socket API is responding
+ *
+ * Attempts to connect to the socket and make a simple HTTP request.
+ * Returns false if socket is dead (connection refused, timeout, etc.)
+ * This catches cases where an unhandled exception kills the io_context
+ * but the watchdog thread keeps running.
+ */
+bool test_socket_health(const std::string& socket_path) {
+  try {
+    boost::asio::io_context io_ctx;
+
+    // Set a 5-second timeout for the entire operation
+    boost::asio::local::stream_protocol::socket socket(io_ctx);
+    boost::asio::local::stream_protocol::endpoint endpoint(socket_path);
+
+    // Try to connect
+    boost::system::error_code ec;
+    socket.connect(endpoint, ec);
+    if (ec) {
+      logs::log(logs::debug, "[WATCHDOG] Socket connect failed: {}", ec.message());
+      return false;
+    }
+
+    // Send a simple HTTP request
+    std::string request = "GET /api/v1/system/health HTTP/1.0\r\n\r\n";
+    boost::asio::write(socket, boost::asio::buffer(request), ec);
+    if (ec) {
+      logs::log(logs::debug, "[WATCHDOG] Socket write failed: {}", ec.message());
+      return false;
+    }
+
+    // Read response (just need to get some data back)
+    std::array<char, 256> buf;
+    std::size_t len = socket.read_some(boost::asio::buffer(buf), ec);
+    if (ec && ec != boost::asio::error::eof) {
+      logs::log(logs::debug, "[WATCHDOG] Socket read failed: {}", ec.message());
+      return false;
+    }
+
+    // Check for HTTP 200 response
+    std::string response(buf.data(), len);
+    return response.find("HTTP/1.0 200") != std::string::npos ||
+           response.find("HTTP/1.1 200") != std::string::npos;
+
+  } catch (const std::exception& e) {
+    logs::log(logs::debug, "[WATCHDOG] Socket health check exception: {}", e.what());
+    return false;
+  }
+}
+
+/**
  * @brief Deadlock watchdog - monitors system health and dumps debug info on critical status
  *
  * Runs in separate thread, polls ThreadMonitor every 30s.
@@ -170,6 +229,9 @@ std::optional<sessions::AudioServer> setup_audio_server(const std::string &host_
  * 1. Fork child process (timeout protection - if debug gathering deadlocks, child dies after 60s)
  * 2. Write thread dump, generate core dump (timestamped files in /var/wolf-debug-dumps/)
  * 3. Exit main process for Docker restart
+ *
+ * Also monitors socket health - if the API socket is dead (connection refused),
+ * the system is considered critical even if pipeline creation works.
  */
 void start_watchdog() {
   std::thread([]() {
@@ -179,7 +241,11 @@ void start_watchdog() {
     const seconds CRITICAL_THRESHOLD{60};
     std::optional<steady_clock::time_point> critical_since;
 
-    logs::log(logs::info, "[WATCHDOG] Started monitoring system health");
+    // Get socket path from environment
+    auto default_socket = std::filesystem::path(utils::get_env("XDG_RUNTIME_DIR", "/var/run/wolf")) / "wolf.sock";
+    auto socket_path = utils::get_env("WOLF_SOCKET_PATH", default_socket.c_str());
+
+    logs::log(logs::info, "[WATCHDOG] Started monitoring system health (socket: {})", socket_path);
 
     while (true) {
       std::this_thread::sleep_for(CHECK_INTERVAL);
@@ -187,6 +253,9 @@ void start_watchdog() {
       // Test if new pipelines can be created (real failure condition)
       // Production deadlocked with only 35% threads stuck, but new sessions couldn't start
       bool pipelines_work = wolf::monitoring::ThreadMonitor::can_create_new_pipelines();
+
+      // Test if the Unix socket is responding (catches io_context death)
+      bool socket_alive = test_socket_health(socket_path);
 
       // Also check stuck thread count for context
       auto thread_statuses = wolf::monitoring::ThreadMonitor::get().get_all_threads();
@@ -197,16 +266,25 @@ void start_watchdog() {
         }
       }
 
-      // CRITICAL if: pipeline creation fails (type lock held)
-      // Thread count is just for logging context
-      bool is_critical = !pipelines_work;
+      // CRITICAL if: pipeline creation fails OR socket is dead
+      // Pipeline failure = GStreamer type lock held (old check)
+      // Socket dead = exception killed io_context (new check - catches PulseAudio crash)
+      bool is_critical = !pipelines_work || !socket_alive;
 
       if (is_critical) {
         if (!critical_since) {
           critical_since = steady_clock::now();
+          std::string reason;
+          if (!socket_alive && !pipelines_work) {
+            reason = "socket DEAD + pipeline creation FAILED";
+          } else if (!socket_alive) {
+            reason = "socket DEAD (API unreachable)";
+          } else {
+            reason = "pipeline creation FAILED (type lock held)";
+          }
           logs::log(logs::error,
-                    "[WATCHDOG] System entered CRITICAL state: pipeline creation FAILED (type lock held) - {}/{} threads stuck",
-                    stuck_count, thread_statuses.size());
+                    "[WATCHDOG] System entered CRITICAL state: {} - {}/{} threads stuck",
+                    reason, stuck_count, thread_statuses.size());
         }
 
         auto critical_duration = steady_clock::now() - *critical_since;
@@ -318,17 +396,29 @@ void start_watchdog() {
  * Uses gcore which pauses process briefly (~3s) to get consistent snapshot.
  * May cause brief stream glitches during dump, but process keeps running.
  *
- * Keeps last 48 hours of dumps + rotates old ones.
- * Core dumps are ~8GB each: 48 × 8GB = ~400GB disk space required.
+ * Keeps last N dumps + enforces size quota.
+ * Core dumps are ~8GB each. Configure via env vars:
+ *   WOLF_MAX_DUMPS (default: 6) - max number of dumps
+ *   WOLF_MAX_DUMPS_GB (default: 20) - max total size in GB
  */
 void start_periodic_dumps() {
   std::thread([]() {
     using namespace std::chrono;
 
     const hours DUMP_INTERVAL{1};  // Dump every hour
-    const int MAX_HOURLY_DUMPS = 48;  // Keep 48 hours of dumps
 
-    logs::log(logs::info, "[PERIODIC_DUMP] Started hourly core dump thread");
+    // Configurable limits via env vars
+    int max_dumps = 6;  // Default: 6 dumps
+    if (const char* env = std::getenv("WOLF_MAX_DUMPS")) {
+      max_dumps = std::max(1, std::atoi(env));
+    }
+
+    uint64_t max_size_bytes = 20ULL * 1024 * 1024 * 1024;  // Default: 20GB
+    if (const char* env = std::getenv("WOLF_MAX_DUMPS_GB")) {
+      max_size_bytes = std::max(uint64_t{1}, static_cast<uint64_t>(std::atoi(env))) * 1024 * 1024 * 1024;
+    }
+
+    logs::log(logs::info, "[PERIODIC_DUMP] Started (max {} dumps, {}GB quota)", max_dumps, max_size_bytes / (1024*1024*1024));
 
     // First dump after 5 minutes to verify gcore works (don't wait a full hour)
     const minutes INITIAL_DELAY{5};
@@ -362,12 +452,13 @@ void start_periodic_dumps() {
           if (gcore_result == 0) {
             logs::log(logs::info, "[PERIODIC_DUMP] Core dump saved: {}.{}", prefix, getppid());
 
-            // Rotate old hourly dumps (keep last MAX_HOURLY_DUMPS)
+            // Rotate old hourly dumps - match ALL hourly-* files regardless of
+            // PID suffix (old dumps from previous Wolf runs must be cleaned too)
             std::vector<std::filesystem::path> hourly_dumps;
             for (const auto& entry : std::filesystem::directory_iterator(debug_dir)) {
               std::string filename = entry.path().filename().string();
-              // Match hourly-* core dumps (not critical dumps)
-              if (filename.starts_with("hourly-") && (filename.find(".core.") != std::string::npos || filename.ends_with(fmt::format(".{}", getppid())))) {
+              // Match all hourly-* files (from any Wolf process)
+              if (filename.starts_with("hourly-")) {
                 hourly_dumps.push_back(entry.path());
               }
             }
@@ -375,13 +466,26 @@ void start_periodic_dumps() {
             // Sort by timestamp (filename is hourly-{timestamp}.{pid})
             std::sort(hourly_dumps.begin(), hourly_dumps.end());
 
-            // Remove oldest dumps if we have more than MAX_HOURLY_DUMPS
-            if (hourly_dumps.size() > MAX_HOURLY_DUMPS) {
-              int to_remove = hourly_dumps.size() - MAX_HOURLY_DUMPS;
-              for (int i = 0; i < to_remove; i++) {
-                logs::log(logs::info, "[PERIODIC_DUMP] Rotating out old dump: {}", hourly_dumps[i].string());
-                std::filesystem::remove(hourly_dumps[i]);
+            // Remove oldest dumps if we have more than max_dumps
+            while (hourly_dumps.size() > static_cast<size_t>(max_dumps)) {
+              logs::log(logs::info, "[PERIODIC_DUMP] Count limit: removing {}", hourly_dumps[0].string());
+              std::filesystem::remove(hourly_dumps[0]);
+              hourly_dumps.erase(hourly_dumps.begin());
+            }
+
+            // Enforce size quota - delete oldest until under limit
+            auto calc_total_size = [&]() {
+              uint64_t total = 0;
+              for (const auto& p : hourly_dumps) {
+                try { total += std::filesystem::file_size(p); } catch (...) {}
               }
+              return total;
+            };
+
+            while (!hourly_dumps.empty() && calc_total_size() > max_size_bytes) {
+              logs::log(logs::info, "[PERIODIC_DUMP] Size quota: removing {}", hourly_dumps[0].string());
+              std::filesystem::remove(hourly_dumps[0]);
+              hourly_dumps.erase(hourly_dumps.begin());
             }
           } else {
             logs::log(logs::warning, "[PERIODIC_DUMP] gcore failed with code {}", gcore_result);
@@ -409,6 +513,55 @@ void start_periodic_dumps() {
 
       // Sleep until next dump (1 hour)
       std::this_thread::sleep_for(DUMP_INTERVAL);
+    }
+  }).detach();
+}
+
+/**
+ * @brief Monitors sessions for inactivity and fires PauseStreamEvent for stale sessions.
+ *
+ * This prevents memory leaks from orphaned sessions when clients disconnect abruptly
+ * (browser crash, network failure) without sending proper ENET disconnect or TERMINATION packet.
+ *
+ * Sessions that haven't received any ENET packets for SESSION_TIMEOUT seconds will be paused,
+ * which triggers cleanup of GStreamer pipelines and Docker containers.
+ *
+ * @param app_state Box containing AppState with running_sessions and event_bus
+ */
+void start_session_timeout_monitor(immer::box<state::AppState> app_state) {
+  std::thread([app_state]() {
+    using namespace std::chrono;
+
+    const seconds CHECK_INTERVAL{10};      // Check every 10 seconds
+    const seconds SESSION_TIMEOUT{60};     // Sessions idle >60s are considered stale
+
+    logs::log(logs::info, "[SESSION_TIMEOUT] Started session timeout monitor (timeout={}s, check_interval={}s)",
+              SESSION_TIMEOUT.count(), CHECK_INTERVAL.count());
+
+    while (true) {
+      std::this_thread::sleep_for(CHECK_INTERVAL);
+
+      auto now = steady_clock::now();
+      auto sessions = app_state->running_sessions->load();
+
+      for (const auto& session : *sessions) {
+        if (!session.last_activity) {
+          continue;  // Skip sessions without activity tracking (shouldn't happen)
+        }
+
+        auto last_activity = session.last_activity->load();
+        auto idle_duration = duration_cast<seconds>(now - last_activity);
+
+        if (idle_duration > SESSION_TIMEOUT) {
+          logs::log(logs::warning,
+                    "[SESSION_TIMEOUT] Session {} idle for {}s (>{}s), firing PauseStreamEvent to clean up",
+                    session.session_id, idle_duration.count(), SESSION_TIMEOUT.count());
+
+          // Fire PauseStreamEvent to trigger cleanup (same event as ENET disconnect)
+          app_state->event_bus->fire_event(
+              immer::box<events::PauseStreamEvent>(events::PauseStreamEvent{.session_id = session.session_id}));
+        }
+      }
     }
   }).detach();
 }
@@ -500,6 +653,9 @@ void run() {
 
   // Start periodic core dumps (every hour, keeps last 3)
   start_periodic_dumps();
+
+  // Start session timeout monitor (cleans up orphaned sessions after 60s of inactivity)
+  start_session_timeout_monitor(local_state);
 
   // Monitor main thread - parked on http_thread.join()
   // Add simple heartbeat to prove main thread is alive
