@@ -209,29 +209,20 @@ impl State {
         let space = Space::default();
 
         let mut seat = seat_state.new_wl_seat(&dh, "seat-0");
-        // CRITICAL: Use single-layout XKB config for outer compositor.
-        //
-        // Root cause of keyboard layout reset bug:
-        // - Outer compositor maintains its own XKB state with layout_effective index
-        // - When modifier keys are pressed (e.g., Shift), outer sends wl_keyboard.modifiers
-        //   to Sway with layout_effective = 0 (outer's layout never changes)
-        // - Sway receives layout_effective = 0 and resets its layout to group 0 (US)
-        //
-        // Fix: Use single "us" layout in outer compositor. Since there's only one layout,
-        // layout_effective = 0 is always correct and doesn't interfere with Sway's
-        // multi-layout configuration.
-        //
-        // The inner compositor (Sway) manages its own keyboard layouts independently
-        // via its config file or XKB_DEFAULT_LAYOUT environment variable.
-        seat.add_keyboard(
-            XkbConfig {
-                layout: "us",
-                ..XkbConfig::default()
-            },
-            200,
-            25,
-        )
-        .expect("Failed to add keyboard to seat");
+        // CRITICAL: Configure keyboard layouts to match what Sway expects (us,gb,fr)
+        // Using XkbConfig::default() would use only US layout, causing conflicts when
+        // the nested Sway compositor has multiple layouts configured. When outer and
+        // inner compositor XKB configs don't match, modifier keys like Shift can cause
+        // unexpected layout switches because the outer compositor's XKB state machine
+        // processes key events differently than Sway expects.
+        // See: helix/wolf/sway-config/config for the matching Sway config.
+        let xkb_config = XkbConfig {
+            layout: "us,gb,fr",
+            options: Some("caps:ctrl_nocaps".into()),
+            ..XkbConfig::default()
+        };
+        seat.add_keyboard(xkb_config, 200, 25)
+            .expect("Failed to add keyboard to seat");
         seat.add_pointer();
         seat.add_touch();
 
