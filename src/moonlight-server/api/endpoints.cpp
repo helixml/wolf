@@ -397,6 +397,30 @@ void UnixSocketServer::endpoint_LobbyCreate(const wolf::api::HTTPRequest &req, s
     auto default_client_settings = state::ClientSettings{};
     auto client_settings = event.value().client_settings.value().value_or(PartialClientSettings{});
     auto lobby_id = state::gen_uuid();
+
+    // Apply defaults to video settings if not provided
+    // This allows API callers to omit GPU-specific settings and let Wolf auto-detect
+    auto video_settings = event.value().video_settings;
+    if (video_settings.video_producer_buffer_caps.empty() ||
+        video_settings.wayland_render_node.empty() ||
+        video_settings.runner_render_node.empty()) {
+      auto defaults = state::compute_pipeline_defaults(this->state_->app_state->config->config_source);
+      auto default_render_node = utils::get_env("WOLF_RENDER_NODE", "/dev/dri/renderD128");
+
+      if (video_settings.video_producer_buffer_caps.empty()) {
+        video_settings.video_producer_buffer_caps = defaults.video_producer_buffer_caps;
+        logs::log(logs::info, "[API] Using default video_producer_buffer_caps: {}", defaults.video_producer_buffer_caps);
+      }
+      if (video_settings.wayland_render_node.empty()) {
+        video_settings.wayland_render_node = default_render_node;
+        logs::log(logs::info, "[API] Using default wayland_render_node: {}", default_render_node);
+      }
+      if (video_settings.runner_render_node.empty()) {
+        video_settings.runner_render_node = default_render_node;
+        logs::log(logs::info, "[API] Using default runner_render_node: {}", default_render_node);
+      }
+    }
+
     auto create_lobby_ev = events::CreateLobbyEvent{
         .id = lobby_id,
         .profile_id = event.value().profile_id.get(),
@@ -405,7 +429,7 @@ void UnixSocketServer::endpoint_LobbyCreate(const wolf::api::HTTPRequest &req, s
         .pin = event.value().pin.get(),
         .multi_user = event.value().multi_user,
         .stop_when_everyone_leaves = event.value().stop_when_everyone_leaves,
-        .video_settings = event.value().video_settings,
+        .video_settings = video_settings,
         .audio_settings = event.value().audio_settings,
         .client_settings =
             state::ClientSettings{
