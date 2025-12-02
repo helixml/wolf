@@ -50,6 +50,15 @@ impl State {
         let serial = SERIAL_COUNTER.next_serial();
         let keyboard = self.seat.get_keyboard().unwrap();
 
+        // Debug: Log keyboard focus state
+        let focus_info = keyboard.current_focus()
+            .map(|f| format!("{:?}", f))
+            .unwrap_or_else(|| "NONE".to_string());
+        tracing::info!(
+            "[SMITHAY-KB] keyboard_input: keycode={:?} state={:?} focus={}",
+            keycode, state, focus_info
+        );
+
         keyboard.input::<(), _>(
             self,
             keycode,
@@ -57,6 +66,12 @@ impl State {
             serial,
             event_time_msec,
             |data, modifiers, handle| {
+                // Debug: Log key details inside filter
+                tracing::info!(
+                    "[SMITHAY-KB] filter: keysym={:?} modifiers={{ctrl={}, shift={}, alt={}, logo={}}}",
+                    handle.modified_sym(), modifiers.ctrl, modifiers.shift, modifiers.alt, modifiers.logo
+                );
+
                 if state == KeyState::Pressed {
                     if modifiers.ctrl && modifiers.shift && !modifiers.alt && !modifiers.logo {
                         match handle.modified_sym() {

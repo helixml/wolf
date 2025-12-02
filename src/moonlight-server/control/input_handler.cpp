@@ -345,6 +345,9 @@ void keyboard_key(const KEYBOARD_PACKET &pkt, events::StreamSession &session) {
   // moonlight always sets the high bit; not sure why but mask it off here
   short moonlight_key = (short)boost::endian::little_to_native(pkt.key_code) & (short)0x7fff;
 
+  logs::log(logs::info, "[WOLF-KB] keyboard_key called: key=0x{:02X}, type={}, modifiers=0x{:02X}, session_id={}",
+            moonlight_key, pkt.type == KEY_PRESS ? "PRESS" : "RELEASE", pkt.modifiers, session.session_id);
+
   // Track keyboard state for observability
   auto& tracker = wolf::control::KeyboardStateTracker::get();
 

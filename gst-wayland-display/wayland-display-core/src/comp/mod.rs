@@ -547,8 +547,10 @@ pub(crate) fn init(
                     state.should_quit = true;
                 }
                 Event::Msg(Command::KeyboardInput(scancode, key_state)) => {
+                    tracing::info!("[SMITHAY-KB] Received KeyboardInput command: scancode={} key_state={:?}", scancode, key_state);
                     let time: Duration = state.clock.now().into();
                     let keycode = state.scancode_to_keycode(scancode);
+                    tracing::info!("[SMITHAY-KB] Converted to keycode={:?}, calling keyboard_input", keycode);
                     state.keyboard_input(time.as_millis() as u32, keycode, key_state);
                 }
                 Event::Msg(Command::PointerMotion(position)) => {

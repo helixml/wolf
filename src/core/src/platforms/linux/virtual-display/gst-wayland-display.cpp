@@ -170,16 +170,20 @@ static const std::map<unsigned int, unsigned int> key_mappings = {
 };
 
 void WaylandKeyboard::press(unsigned int key_code) {
+  logs::log(logs::info, "[WAYLAND-KB] press() called: moonlight_key=0x{:02X}", key_code);
   if (key_mappings.contains(key_code)) {
+    auto linux_key = key_mappings.at(key_code);
+    logs::log(logs::info, "[WAYLAND-KB] Mapped to linux_key={}, sending GStreamer message", linux_key);
     auto msg = /* clang-format off */
                            gst_structure_new("KeyboardKey",
-                             "key", G_TYPE_UINT, key_mappings.at(key_code),
+                             "key", G_TYPE_UINT, linux_key,
                              "pressed", G_TYPE_BOOLEAN, true,
                              NULL);
     /* clang-format on */
     gstreamer::send_message(w_state->wayland_plugin.get(), msg);
+    logs::log(logs::info, "[WAYLAND-KB] GStreamer message sent for press");
   } else {
-    logs::log(logs::warning, "Key code not found: {}", key_code);
+    logs::log(logs::warning, "[WAYLAND-KB] Key code not found: 0x{:02X}", key_code);
   }
 }
 

@@ -233,9 +233,12 @@ setup_lobbies_handlers(const immer::box<state::AppState> &app_state,
 
         // switch mouse and keyboard in session to use the lobby wayland server
         auto wl_state = lobby->wayland_display->load();
+        logs::log(logs::info, "[LOBBY-KB] Switching session {} keyboard to lobby {} wayland display",
+                  session->session_id, lobby->id);
         session->mouse->emplace(virtual_display::WaylandMouse(wl_state));
         session->keyboard->emplace(virtual_display::WaylandKeyboard(wl_state));
         session->touch_screen->emplace(virtual_display::WaylandTouchScreen(wl_state));
+        logs::log(logs::info, "[LOBBY-KB] Keyboard switched successfully for session {}", session->session_id);
 
         // Switch over all joypads present in the session into the lobby
         events::JoypadList joypads = session->joypads->load();

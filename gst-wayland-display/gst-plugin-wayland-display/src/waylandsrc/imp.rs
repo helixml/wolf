@@ -140,6 +140,8 @@ impl EventHandler for WaylandDisplaySrc {
                     .get::<bool>("pressed")
                     .expect("Should contain pressed");
 
+                gst::info!(CAT, "[GST-KB] Received KeyboardKey message: key={} pressed={}", key, pressed);
+
                 let _ = self.command_tx.send(Command::KeyboardInput(
                     key,
                     if pressed {
@@ -148,6 +150,8 @@ impl EventHandler for WaylandDisplaySrc {
                         KeyState::Released
                     },
                 ));
+
+                gst::info!(CAT, "[GST-KB] Sent KeyboardInput command to Smithay");
 
                 return true;
             } else if structure.has_name("TouchDown") {
