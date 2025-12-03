@@ -48,6 +48,16 @@ void start_audio_producer(const std::string &session_id,
                           const std::string &sink_name,
                           const std::string &server_name);
 
+/**
+ * Start a test pattern producer pipeline for apps that don't use waylanddisplaysrc.
+ * Creates: {source_pipeline} ! interpipesink name={session_id}_video
+ * This allows lobby switching to work for placeholder apps (e.g., Blank app with videotestsrc).
+ */
+void start_test_pattern_producer(const std::string &session_id,
+                                 const std::string &source_pipeline,
+                                 const wolf::core::virtual_display::DisplayMode &display_mode,
+                                 std::shared_ptr<events::EventBusType> event_bus);
+
 void start_streaming_video(immer::box<events::VideoSession> video_session,
                            const std::shared_ptr<events::EventBusType> &event_bus,
                            std::string client_ip,

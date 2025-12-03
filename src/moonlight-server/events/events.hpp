@@ -77,6 +77,14 @@ struct App {
   bool start_virtual_compositor;
   bool start_audio_server;
   std::shared_ptr<Runner> runner;
+
+  /**
+   * Optional: custom video source for test pattern producer.
+   * When start_virtual_compositor=false but this is set, Wolf will start a
+   * test pattern producer pipeline (e.g., videotestsrc ! interpipesink).
+   * This allows lobby switching to work for placeholder apps.
+   */
+  std::optional<std::string> video_producer_source;
 };
 
 struct Profile {

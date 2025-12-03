@@ -189,6 +189,43 @@ void start_audio_producer(const std::string &session_id,
   });
 }
 
+void start_test_pattern_producer(const std::string &session_id,
+                                 const std::string &source_pipeline,
+                                 const wolf::core::virtual_display::DisplayMode &display_mode,
+                                 std::shared_ptr<events::EventBusType> event_bus) {
+  // Format the source pipeline with display mode parameters
+  auto formatted_source = fmt::format(fmt::runtime(source_pipeline),
+                                      fmt::arg("width", display_mode.width),
+                                      fmt::arg("height", display_mode.height),
+                                      fmt::arg("fps", display_mode.refreshRate));
+
+  auto pipeline = fmt::format("{source} ! "
+                              "interpipesink sync=true async=false name={session_id}_video max-buffers=5",
+                              fmt::arg("source", formatted_source),
+                              fmt::arg("session_id", session_id));
+  logs::log(logs::debug, "[GSTREAMER] Starting test pattern producer: {}", pipeline);
+
+  run_pipeline(pipeline, [=](auto pipeline, auto loop) {
+    auto stop_handler = event_bus->register_handler<immer::box<events::StopStreamEvent>>(
+        [session_id, loop](const immer::box<events::StopStreamEvent> &ev) {
+          if (std::to_string(ev->session_id) == session_id) {
+            logs::log(logs::debug, "[GSTREAMER] Stopping test pattern producer: {} (quitting main loop)", session_id);
+            g_main_loop_quit(loop.get());
+          }
+        });
+
+    auto stop_lobby_handler = event_bus->register_handler<immer::box<events::StopLobbyEvent>>(
+        [session_id, loop](const immer::box<events::StopLobbyEvent> &ev) {
+          if (ev->lobby_id == session_id) {
+            logs::log(logs::debug, "[GSTREAMER] Stopping test pattern producer: {} (quitting main loop)", session_id);
+            g_main_loop_quit(loop.get());
+          }
+        });
+
+    return immer::array<immer::box<events::EventBusHandlers>>{std::move(stop_handler), std::move(stop_lobby_handler)};
+  });
+}
+
 namespace custom_sink {
 
 struct UDPSink {

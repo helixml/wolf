@@ -130,6 +130,23 @@ setup_moonlight_handlers(const immer::box<state::AppState> &app_state,
                                         .udev_hw_db_entries = keyboard_ptr.get_udev_hw_db_entries()}));
             session->keyboard->emplace(std::move(keyboard_ptr));
           }
+
+          // If app has custom video source, start test pattern producer pipeline
+          // This allows lobby switching to work for placeholder apps (e.g., Blank with videotestsrc)
+          if (session->app->video_producer_source.has_value()) {
+            logs::log(logs::debug, "[STREAM_SESSION] Starting test pattern producer for session {}",
+                      session->session_id);
+            std::thread([session]() {
+              streaming::start_test_pattern_producer(
+                  std::to_string(session->session_id),
+                  session->app->video_producer_source.value(),
+                  {.width = session->display_mode.width,
+                   .height = session->display_mode.height,
+                   .refreshRate = session->display_mode.refreshRate},
+                  session->event_bus);
+            }).detach();
+          }
+
           on_ready->set_value({});
         }
 

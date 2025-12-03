@@ -305,9 +305,34 @@ parse_apps(const std::vector<BaseApp> &apps,
         auto app_video_settings = app.video.value_or(default_video_settings);
         auto app_audio_settings = app.audio.value_or(default_audio_settings);
 
+        // Determine if this app uses a custom video source for test pattern producer
+        // When start_virtual_compositor=false and app has custom source, we:
+        // 1. Store the custom source in video_producer_source (for test pattern producer)
+        // 2. Use default interpipesrc in consumer pipeline (so lobby switching works)
+        auto start_compositor = app.start_virtual_compositor.value_or(true);
+        auto has_custom_source = app_video_settings.source.has_value() &&
+                                 app_video_settings.source.value() != default_video_settings.source.value();
+
+        std::optional<std::string> video_producer_source = std::nullopt;
+        std::string consumer_source = default_video_settings.source.value();
+
+        if (!start_compositor && has_custom_source) {
+          // App has custom source (e.g., videotestsrc) - store it for test pattern producer
+          // but use default interpipesrc for consumer pipeline (enables lobby switching)
+          video_producer_source = app_video_settings.source.value();
+          logs::log(logs::debug, "App '{}' has custom video source for test pattern producer: {}",
+                    app.title, video_producer_source.value());
+        } else if (start_compositor) {
+          // Normal app with waylanddisplaysrc - use default interpipesrc
+          consumer_source = default_video_settings.source.value();
+        } else {
+          // No custom source and no compositor - use default (though this is unusual)
+          consumer_source = app_video_settings.source.value_or(default_video_settings.source.value());
+        }
+
         auto h264_gst_pipeline = fmt::format(
             "{} !\n{} !\n{} !\n{}", //
-            app_video_settings.source.value_or(default_video_settings.source.value()),
+            consumer_source,
             app_video_settings.video_params.value_or(h264_video_params),
             app_video_settings.h264_encoder.value_or(default_video_settings.h264_encoder.value()),
             app_video_settings.sink.value_or(default_video_settings.sink.value()));
@@ -315,7 +340,7 @@ parse_apps(const std::vector<BaseApp> &apps,
         auto hevc_gst_pipeline =
             default_video_settings.hevc_encoder.has_value()
                 ? fmt::format("{} !\n{} !\n{} !\n{}", //
-                              app_video_settings.source.value_or(default_video_settings.source.value()),
+                              consumer_source,
                               app_video_settings.video_params.value_or(hevc_video_params),
                               app_video_settings.hevc_encoder.value_or(default_video_settings.hevc_encoder.value()),
                               app_video_settings.sink.value_or(default_video_settings.sink.value()))
@@ -324,7 +349,7 @@ parse_apps(const std::vector<BaseApp> &apps,
         auto av1_gst_pipeline =
             default_video_settings.av1_encoder.has_value()
                 ? fmt::format("{} !\n{} !\n{} !\n{}", //
-                              app_video_settings.source.value_or(default_video_settings.source.value()),
+                              consumer_source,
                               app_video_settings.video_params.value_or(av1_video_params),
                               app_video_settings.av1_encoder.value_or(default_video_settings.av1_encoder.value()),
                               app_video_settings.sink.value_or(default_video_settings.sink.value()))
@@ -349,9 +374,10 @@ parse_apps(const std::vector<BaseApp> &apps,
                         .render_node = app_render_node,
 
                         .opus_gst_pipeline = opus_gst_pipeline,
-                        .start_virtual_compositor = app.start_virtual_compositor.value_or(true),
+                        .start_virtual_compositor = start_compositor,
                         .start_audio_server = app.start_audio_server.value_or(true),
-                        .runner = get_runner(app.runner, ev_bus)}};
+                        .runner = get_runner(app.runner, ev_bus),
+                        .video_producer_source = video_producer_source}};
       }) |                                                  //
       ranges::to<immer::vector<immer::box<events::App>>>(); //
 
