@@ -518,13 +518,18 @@ void start_periodic_dumps() {
 }
 
 /**
- * @brief Monitors sessions for inactivity and fires PauseStreamEvent for stale sessions.
+ * @brief Monitors sessions for inactivity and stops orphaned sessions.
  *
  * This prevents memory leaks from orphaned sessions when clients disconnect abruptly
- * (browser crash, network failure) without sending proper ENET disconnect or TERMINATION packet.
+ * (browser crash, network failure, WebSocket disconnect without proper cleanup).
  *
- * Sessions that haven't received any ENET packets for SESSION_TIMEOUT seconds will be paused,
- * which triggers cleanup of GStreamer pipelines and Docker containers.
+ * Sessions that haven't received any ENET packets for SESSION_TIMEOUT seconds will be stopped,
+ * which triggers cleanup of GStreamer pipelines, interpipesrc consumers, and session records.
+ *
+ * NOTE: We fire StopStreamEvent (not PauseStreamEvent) because:
+ * - PauseStreamEvent only quits the pipeline, leaving the session in running_sessions
+ * - StopStreamEvent removes the session from running_sessions, properly cleaning up resources
+ * - Orphaned sessions (no client activity for 60s) should be fully stopped, not just paused
  *
  * @param app_state Box containing AppState with running_sessions and event_bus
  */
@@ -533,7 +538,7 @@ void start_session_timeout_monitor(immer::box<state::AppState> app_state) {
     using namespace std::chrono;
 
     const seconds CHECK_INTERVAL{10};      // Check every 10 seconds
-    const seconds SESSION_TIMEOUT{60};     // Sessions idle >60s are considered stale
+    const seconds SESSION_TIMEOUT{60};     // Sessions idle >60s are considered orphaned
 
     logs::log(logs::info, "[SESSION_TIMEOUT] Started session timeout monitor (timeout={}s, check_interval={}s)",
               SESSION_TIMEOUT.count(), CHECK_INTERVAL.count());
@@ -554,12 +559,14 @@ void start_session_timeout_monitor(immer::box<state::AppState> app_state) {
 
         if (idle_duration > SESSION_TIMEOUT) {
           logs::log(logs::warning,
-                    "[SESSION_TIMEOUT] Session {} idle for {}s (>{}s), firing PauseStreamEvent to clean up",
+                    "[SESSION_TIMEOUT] Session {} idle for {}s (>{}s), firing StopStreamEvent to clean up orphaned session",
                     session.session_id, idle_duration.count(), SESSION_TIMEOUT.count());
 
-          // Fire PauseStreamEvent to trigger cleanup (same event as ENET disconnect)
+          // Fire StopStreamEvent to fully stop and remove the session
+          // (PauseStreamEvent only pauses the pipeline but leaves session in running_sessions,
+          //  causing orphaned interpipesrc consumers to accumulate)
           app_state->event_bus->fire_event(
-              immer::box<events::PauseStreamEvent>(events::PauseStreamEvent{.session_id = session.session_id}));
+              immer::box<events::StopStreamEvent>(events::StopStreamEvent{.session_id = session.session_id}));
         }
       }
     }
