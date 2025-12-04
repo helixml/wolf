@@ -222,7 +222,16 @@ void start_test_pattern_producer(const std::string &session_id,
           }
         });
 
-    return immer::array<immer::box<events::EventBusHandlers>>{std::move(stop_handler), std::move(stop_lobby_handler)};
+    // FIX: Also stop on PauseStreamEvent - ENET disconnect fires Pause before cancel reaches Wolf
+    auto pause_handler = event_bus->register_handler<immer::box<events::PauseStreamEvent>>(
+        [session_id, loop](const immer::box<events::PauseStreamEvent> &ev) {
+          if (ev->session_id == std::stoull(session_id)) {
+            logs::log(logs::debug, "[GSTREAMER] Stopping test pattern producer on pause: {} (quitting main loop)", session_id);
+            g_main_loop_quit(loop.get());
+          }
+        });
+
+    return immer::array<immer::box<events::EventBusHandlers>>{std::move(stop_handler), std::move(stop_lobby_handler), std::move(pause_handler)};
   });
 }
 
@@ -266,7 +275,16 @@ void start_test_audio_producer(const std::string &session_id,
           }
         });
 
-    return immer::array<immer::box<events::EventBusHandlers>>{std::move(stop_handler), std::move(stop_lobby_handler)};
+    // FIX: Also stop on PauseStreamEvent - ENET disconnect fires Pause before cancel reaches Wolf
+    auto pause_handler = event_bus->register_handler<immer::box<events::PauseStreamEvent>>(
+        [session_id, loop](const immer::box<events::PauseStreamEvent> &ev) {
+          if (ev->session_id == std::stoull(session_id)) {
+            logs::log(logs::debug, "[GSTREAMER] Stopping test audio producer on pause: {} (quitting main loop)", session_id);
+            g_main_loop_quit(loop.get());
+          }
+        });
+
+    return immer::array<immer::box<events::EventBusHandlers>>{std::move(stop_handler), std::move(stop_lobby_handler), std::move(pause_handler)};
   });
 }
 
