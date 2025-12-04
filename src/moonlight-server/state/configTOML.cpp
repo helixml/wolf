@@ -336,18 +336,18 @@ parse_apps(const std::vector<BaseApp> &apps,
                                        app_audio_settings.source.value() != default_audio_settings.source.value();
 
         std::optional<std::string> audio_producer_source = std::nullopt;
+        // Consumer ALWAYS uses interpipesrc for lobby switching to work
+        // Producer outputs to interpipesink (either PulseAudio or test audio producer)
         std::string audio_consumer_source = default_audio_settings.source.value();
 
         if (!start_audio && has_custom_audio_source) {
           // App has custom audio source (e.g., audiotestsrc) - store it for test audio producer
-          // but use default interpipesrc for consumer pipeline (enables lobby switching)
           audio_producer_source = app_audio_settings.source.value();
           logs::log(logs::debug, "App '{}' has custom audio source for test audio producer: {}",
                     app.title, audio_producer_source.value());
-        } else {
-          // Normal app with PulseAudio or no custom source - use default interpipesrc
-          audio_consumer_source = app_audio_settings.source.value_or(default_audio_settings.source.value());
         }
+        // Note: audio_consumer_source stays at default interpipesrc in ALL cases
+        // because lobby switching requires interpipe architecture
 
         auto h264_gst_pipeline = fmt::format(
             "{} !\n{} !\n{} !\n{}", //
