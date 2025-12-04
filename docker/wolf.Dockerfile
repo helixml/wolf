@@ -193,10 +193,10 @@ ENV WOLF_CFG_FOLDER=/etc/wolf/cfg
 COPY --from=wolf-builder /wolf/wolf /wolf/wolf
 COPY --from=wolf-builder /wolf/fake-udev /wolf/fake-udev
 
-# Add Helix init script and config template for Wolf initialization
-# Template goes to /opt/wolf-defaults (NOT bind-mounted, always available from image)
+# Add Helix init script for Wolf initialization
+# Note: config.toml.template is added by the Helix build system (Dockerfile.sandbox)
+# to ensure single source of truth for Wolf config (lives in helix repo, not here)
 RUN mkdir -p /opt/wolf-defaults
-COPY docker/config.toml.template /opt/wolf-defaults/config.toml.template
 COPY docker/init-wolf-config.sh /etc/cont-init.d/05-init-wolf-config.sh
 RUN chmod +x /etc/cont-init.d/05-init-wolf-config.sh
 
