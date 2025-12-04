@@ -310,13 +310,13 @@ parse_apps(const std::vector<BaseApp> &apps,
         // 1. Store the custom source in video_producer_source (for test pattern producer)
         // 2. Use default interpipesrc in consumer pipeline (so lobby switching works)
         auto start_compositor = app.start_virtual_compositor.value_or(true);
-        auto has_custom_source = app_video_settings.source.has_value() &&
-                                 app_video_settings.source.value() != default_video_settings.source.value();
+        auto has_custom_video_source = app_video_settings.source.has_value() &&
+                                       app_video_settings.source.value() != default_video_settings.source.value();
 
         std::optional<std::string> video_producer_source = std::nullopt;
         std::string consumer_source = default_video_settings.source.value();
 
-        if (!start_compositor && has_custom_source) {
+        if (!start_compositor && has_custom_video_source) {
           // App has custom source (e.g., videotestsrc) - store it for test pattern producer
           // but use default interpipesrc for consumer pipeline (enables lobby switching)
           video_producer_source = app_video_settings.source.value();
@@ -328,6 +328,25 @@ parse_apps(const std::vector<BaseApp> &apps,
         } else {
           // No custom source and no compositor - use default (though this is unusual)
           consumer_source = app_video_settings.source.value_or(default_video_settings.source.value());
+        }
+
+        // Same pattern for audio: detect custom audio source for test audio producer
+        auto start_audio = app.start_audio_server.value_or(true);
+        auto has_custom_audio_source = app_audio_settings.source.has_value() &&
+                                       app_audio_settings.source.value() != default_audio_settings.source.value();
+
+        std::optional<std::string> audio_producer_source = std::nullopt;
+        std::string audio_consumer_source = default_audio_settings.source.value();
+
+        if (!start_audio && has_custom_audio_source) {
+          // App has custom audio source (e.g., audiotestsrc) - store it for test audio producer
+          // but use default interpipesrc for consumer pipeline (enables lobby switching)
+          audio_producer_source = app_audio_settings.source.value();
+          logs::log(logs::debug, "App '{}' has custom audio source for test audio producer: {}",
+                    app.title, audio_producer_source.value());
+        } else {
+          // Normal app with PulseAudio or no custom source - use default interpipesrc
+          audio_consumer_source = app_audio_settings.source.value_or(default_audio_settings.source.value());
         }
 
         auto h264_gst_pipeline = fmt::format(
@@ -357,7 +376,7 @@ parse_apps(const std::vector<BaseApp> &apps,
 
         auto opus_gst_pipeline = fmt::format(
             "{} !\n{} !\n{} !\n{}", //
-            app_audio_settings.source.value_or(default_audio_settings.source.value()),
+            audio_consumer_source,
             app_audio_settings.audio_params.value_or(default_audio_settings.audio_params.value()),
             app_audio_settings.opus_encoder.value_or(default_audio_settings.opus_encoder.value()),
             app_audio_settings.sink.value_or(default_audio_settings.sink.value()));
@@ -375,9 +394,10 @@ parse_apps(const std::vector<BaseApp> &apps,
 
                         .opus_gst_pipeline = opus_gst_pipeline,
                         .start_virtual_compositor = start_compositor,
-                        .start_audio_server = app.start_audio_server.value_or(true),
+                        .start_audio_server = start_audio,
                         .runner = get_runner(app.runner, ev_bus),
-                        .video_producer_source = video_producer_source}};
+                        .video_producer_source = video_producer_source,
+                        .audio_producer_source = audio_producer_source}};
       }) |                                                  //
       ranges::to<immer::vector<immer::box<events::App>>>(); //
 

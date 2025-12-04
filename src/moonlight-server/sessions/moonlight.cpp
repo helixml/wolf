@@ -169,6 +169,18 @@ setup_moonlight_handlers(const immer::box<state::AppState> &app_state,
                                             sink_name,
                                             audio::get_server_name(audio_server));
           }).detach();
+        } else if (session->app->audio_producer_source.has_value()) {
+          // If app has custom audio source, start test audio producer pipeline
+          // This allows lobby switching to work for placeholder apps (e.g., Blank with audiotestsrc)
+          logs::log(logs::debug, "[STREAM_SESSION] Starting test audio producer for session {}",
+                    session->session_id);
+          std::thread([session]() {
+            streaming::start_test_audio_producer(
+                std::to_string(session->session_id),
+                session->app->audio_producer_source.value(),
+                session->audio_channel_count,
+                session->event_bus);
+          }).detach();
         }
 
         // TODO: timeout? What if the wayland display is never ready?

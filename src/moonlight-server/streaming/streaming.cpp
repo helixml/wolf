@@ -226,6 +226,50 @@ void start_test_pattern_producer(const std::string &session_id,
   });
 }
 
+void start_test_audio_producer(const std::string &session_id,
+                               const std::string &source_pipeline,
+                               int channel_count,
+                               std::shared_ptr<events::EventBusType> event_bus) {
+  // Calculate channel mask based on channel count (same logic as start_audio_producer)
+  uint64_t channel_mask;
+  switch (channel_count) {
+    case 2:   channel_mask = 0x3;       break;  // Front Left + Front Right
+    case 6:   channel_mask = 0x3F;      break;  // 5.1
+    case 8:   channel_mask = 0x63F;     break;  // 7.1
+    default:  channel_mask = 0x3;       break;  // Fallback to stereo
+  }
+
+  auto pipeline = fmt::format("{source} ! "
+                              "audio/x-raw, channels={channels}, channel-mask=(bitmask){channel_mask}, rate=48000 ! "
+                              "queue leaky=downstream max-size-buffers=3 ! "
+                              "interpipesink name=\"{session_id}_audio\" sync=true async=false max-buffers=3",
+                              fmt::arg("source", source_pipeline),
+                              fmt::arg("channels", channel_count),
+                              fmt::arg("channel_mask", channel_mask),
+                              fmt::arg("session_id", session_id));
+  logs::log(logs::debug, "[GSTREAMER] Starting test audio producer: {}", pipeline);
+
+  run_pipeline(pipeline, [=](auto pipeline, auto loop) {
+    auto stop_handler = event_bus->register_handler<immer::box<events::StopStreamEvent>>(
+        [session_id, loop](const immer::box<events::StopStreamEvent> &ev) {
+          if (std::to_string(ev->session_id) == session_id) {
+            logs::log(logs::debug, "[GSTREAMER] Stopping test audio producer: {} (quitting main loop)", session_id);
+            g_main_loop_quit(loop.get());
+          }
+        });
+
+    auto stop_lobby_handler = event_bus->register_handler<immer::box<events::StopLobbyEvent>>(
+        [session_id, loop](const immer::box<events::StopLobbyEvent> &ev) {
+          if (ev->lobby_id == session_id) {
+            logs::log(logs::debug, "[GSTREAMER] Stopping test audio producer: {} (quitting main loop)", session_id);
+            g_main_loop_quit(loop.get());
+          }
+        });
+
+    return immer::array<immer::box<events::EventBusHandlers>>{std::move(stop_handler), std::move(stop_lobby_handler)};
+  });
+}
+
 namespace custom_sink {
 
 struct UDPSink {

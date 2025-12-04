@@ -58,6 +58,16 @@ void start_test_pattern_producer(const std::string &session_id,
                                  const wolf::core::virtual_display::DisplayMode &display_mode,
                                  std::shared_ptr<events::EventBusType> event_bus);
 
+/**
+ * Start a test audio producer pipeline for apps that don't use PulseAudio.
+ * Creates: {source_pipeline} ! audio/x-raw,... ! interpipesink name={session_id}_audio
+ * This allows lobby switching to work for placeholder apps (e.g., Blank app with audiotestsrc).
+ */
+void start_test_audio_producer(const std::string &session_id,
+                               const std::string &source_pipeline,
+                               int channel_count,
+                               std::shared_ptr<events::EventBusType> event_bus);
+
 void start_streaming_video(immer::box<events::VideoSession> video_session,
                            const std::shared_ptr<events::EventBusType> &event_bus,
                            std::string client_ip,

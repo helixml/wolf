@@ -85,6 +85,14 @@ struct App {
    * This allows lobby switching to work for placeholder apps.
    */
   std::optional<std::string> video_producer_source;
+
+  /**
+   * Optional: custom audio source for test audio producer.
+   * When start_audio_server=false but this is set, Wolf will start a
+   * test audio producer pipeline (e.g., audiotestsrc ! interpipesink).
+   * This allows lobby switching to work for placeholder apps.
+   */
+  std::optional<std::string> audio_producer_source;
 };
 
 struct Profile {
