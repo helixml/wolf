@@ -192,7 +192,9 @@ void start_audio_producer(const std::string &session_id,
 void start_test_pattern_producer(const std::string &session_id,
                                  const std::string &source_pipeline,
                                  const std::string &buffer_caps,
+                                 const std::string &render_node,
                                  const wolf::core::virtual_display::DisplayMode &display_mode,
+                                 std::shared_ptr<immer::atom<gst_video_context::gst_context_ptr>> video_context,
                                  std::shared_ptr<events::EventBusType> event_bus) {
   // Format the source pipeline with display mode parameters
   auto formatted_source = fmt::format(fmt::runtime(source_pipeline),
@@ -242,7 +244,18 @@ void start_test_pattern_producer(const std::string &session_id,
                               fmt::arg("session_id", session_id));
   logs::log(logs::debug, "[GSTREAMER] Starting test pattern producer: {}", pipeline);
 
+  // CRITICAL: Set up CUDA context sharing so cudaupload uses the same CUDA context as waylanddisplaysrc.
+  // Without this, nvh264enc receives buffers from a different CUDA context when interpipesrc switches
+  // from test pattern to lobby, causing NV_ENC_ERR_RESOURCE_REGISTER_FAILED (0x17).
+  std::shared_ptr<NeedContextData> ctx_data_ptr =
+      std::make_shared<NeedContextData>(NeedContextData{.device_path = render_node, .gst_context = video_context});
+
   run_pipeline(pipeline, [=](auto pipeline, auto loop) {
+    // Set up CUDA context handler on bus - this ensures cudaupload shares the same CUDA context
+    auto bus = gst_pipeline_get_bus(GST_PIPELINE(pipeline.get()));
+    gst_bus_set_sync_handler(bus, bus_sync_handler, ctx_data_ptr.get(), nullptr);
+    gst_object_unref(bus);
+
     auto stop_handler = event_bus->register_handler<immer::box<events::StopStreamEvent>>(
         [session_id, loop](const immer::box<events::StopStreamEvent> &ev) {
           if (std::to_string(ev->session_id) == session_id) {

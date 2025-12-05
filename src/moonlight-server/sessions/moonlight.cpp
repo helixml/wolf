@@ -136,14 +136,19 @@ setup_moonlight_handlers(const immer::box<state::AppState> &app_state,
           if (session->app->video_producer_source.has_value()) {
             logs::log(logs::debug, "[STREAM_SESSION] Starting test pattern producer for session {}",
                       session->session_id);
-            std::thread([session]() {
+            // CRITICAL: Pass gst_context to share CUDA context with waylanddisplaysrc.
+            // Without this, cudaupload creates its own CUDA context, and when interpipesrc switches
+            // to lobby, nvh264enc fails with NV_ENC_ERR_RESOURCE_REGISTER_FAILED (0x17).
+            std::thread([session, gst_context = app_state->gst_context]() {
               streaming::start_test_pattern_producer(
                   std::to_string(session->session_id),
                   session->app->video_producer_source.value(),
                   session->app->video_producer_buffer_caps,
+                  session->app->render_node,
                   {.width = session->display_mode.width,
                    .height = session->display_mode.height,
                    .refreshRate = session->display_mode.refreshRate},
+                  gst_context,
                   session->event_bus);
             }).detach();
           }

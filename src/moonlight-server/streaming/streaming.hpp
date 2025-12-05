@@ -58,11 +58,17 @@ void start_audio_producer(const std::string &session_id,
  * - NVIDIA (CUDAMemory): cudaupload ! video/x-raw(memory:CUDAMemory), format=NV12
  * - AMD/Intel (DMABuf): vapostproc ! video/x-raw(memory:DMABuf), drm-format=NV12
  * - Fallback: no GPU upload (CPU memory) - lobby switching may cause black screen
+ *
+ * CRITICAL: video_context MUST be provided to share the same CUDA context as start_video_producer.
+ * Without this, cudaupload creates its own CUDA context, and when interpipesrc switches to lobby,
+ * nvh264enc receives buffers from a different CUDA context causing NV_ENC_ERR_RESOURCE_REGISTER_FAILED.
  */
 void start_test_pattern_producer(const std::string &session_id,
                                  const std::string &source_pipeline,
                                  const std::string &buffer_caps,
+                                 const std::string &render_node,
                                  const wolf::core::virtual_display::DisplayMode &display_mode,
+                                 std::shared_ptr<immer::atom<gst_video_context::gst_context_ptr>> video_context,
                                  std::shared_ptr<events::EventBusType> event_bus);
 
 /**
