@@ -50,11 +50,17 @@ void start_audio_producer(const std::string &session_id,
 
 /**
  * Start a test pattern producer pipeline for apps that don't use waylanddisplaysrc.
- * Creates: {source_pipeline} ! interpipesink name={session_id}_video
+ * Creates: {source_pipeline} ! [gpu_upload] ! interpipesink name={session_id}_video
  * This allows lobby switching to work for placeholder apps (e.g., Blank app with videotestsrc).
+ *
+ * GPU upload is added based on buffer_caps to ensure consistent memory format:
+ * - NVIDIA (CUDAMemory): cudaupload ! video/x-raw(memory:CUDAMemory)
+ * - AMD/Intel (DMABuf/VAMemory): vapostproc ! video/x-raw(memory:VAMemory)
+ * - Fallback: no GPU upload (CPU memory)
  */
 void start_test_pattern_producer(const std::string &session_id,
                                  const std::string &source_pipeline,
+                                 const std::string &buffer_caps,
                                  const wolf::core::virtual_display::DisplayMode &display_mode,
                                  std::shared_ptr<events::EventBusType> event_bus);
 

@@ -140,6 +140,7 @@ setup_moonlight_handlers(const immer::box<state::AppState> &app_state,
               streaming::start_test_pattern_producer(
                   std::to_string(session->session_id),
                   session->app->video_producer_source.value(),
+                  session->app->video_producer_buffer_caps,
                   {.width = session->display_mode.width,
                    .height = session->display_mode.height,
                    .refreshRate = session->display_mode.refreshRate},

@@ -191,6 +191,7 @@ void start_audio_producer(const std::string &session_id,
 
 void start_test_pattern_producer(const std::string &session_id,
                                  const std::string &source_pipeline,
+                                 const std::string &buffer_caps,
                                  const wolf::core::virtual_display::DisplayMode &display_mode,
                                  std::shared_ptr<events::EventBusType> event_bus) {
   // Format the source pipeline with display mode parameters
@@ -199,9 +200,34 @@ void start_test_pattern_producer(const std::string &session_id,
                                       fmt::arg("height", display_mode.height),
                                       fmt::arg("fps", display_mode.refreshRate));
 
-  auto pipeline = fmt::format("{source} ! "
+  // Build GPU upload element based on buffer_caps to ensure consistent memory format
+  // This prevents buffer pool corruption when interpipesrc switches between test pattern and lobby
+  std::string gpu_upload;
+  if (buffer_caps.find("CUDAMemory") != std::string::npos) {
+    // NVIDIA: upload to CUDA memory
+    gpu_upload = fmt::format("cudaupload ! "
+                             "video/x-raw(memory:CUDAMemory), format=NV12, width={}, height={}",
+                             display_mode.width, display_mode.height);
+    logs::log(logs::info, "[GSTREAMER] Test pattern using CUDA memory upload");
+  } else if (buffer_caps.find("DMABuf") != std::string::npos ||
+             buffer_caps.find("VAMemory") != std::string::npos) {
+    // AMD/Intel: use VA-API postprocessor (handles upload automatically)
+    gpu_upload = fmt::format("vapostproc ! "
+                             "video/x-raw(memory:VAMemory), format=NV12, width={}, height={}",
+                             display_mode.width, display_mode.height);
+    logs::log(logs::info, "[GSTREAMER] Test pattern using VA-API memory upload");
+  } else {
+    // Fallback: no GPU upload (CPU memory) - may cause issues with lobby switching
+    gpu_upload = fmt::format("video/x-raw, format=NV12, width={}, height={}",
+                             display_mode.width, display_mode.height);
+    logs::log(logs::warning, "[GSTREAMER] Test pattern using CPU memory (no GPU upload) - "
+                             "lobby switching may cause black screen");
+  }
+
+  auto pipeline = fmt::format("{source} ! {gpu_upload} ! "
                               "interpipesink sync=true async=false name={session_id}_video max-buffers=5",
                               fmt::arg("source", formatted_source),
+                              fmt::arg("gpu_upload", gpu_upload),
                               fmt::arg("session_id", session_id));
   logs::log(logs::debug, "[GSTREAMER] Starting test pattern producer: {}", pipeline);
 
