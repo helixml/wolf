@@ -221,10 +221,22 @@ static bool run_pipeline(
 
   /* Out of the main loop, clean up nicely */
   logs::log(logs::info, "[THREAD_LIFECYCLE] Pipeline thread (TID={}) exiting normally, cleaning up", tid);
-  gst_element_set_state(pipeline.get(), GST_STATE_PAUSED);
-  gst_element_set_state(pipeline.get(), GST_STATE_READY);
-  gst_element_set_state(pipeline.get(), GST_STATE_NULL);
 
+  // CRITICAL: Wait for each state transition to complete!
+  // gst_element_set_state() is ASYNC - without waiting, nvh264enc's destructor
+  // (which calls NvEncUnregisterResource) may not have run when this function returns.
+  // This causes NV_ENC_ERR_RESOURCE_REGISTER_FAILED when the next session tries to
+  // register the same CUDA buffers that are still registered by the dying encoder.
+  gst_element_set_state(pipeline.get(), GST_STATE_PAUSED);
+  gst_element_get_state(pipeline.get(), nullptr, nullptr, GST_CLOCK_TIME_NONE);
+
+  gst_element_set_state(pipeline.get(), GST_STATE_READY);
+  gst_element_get_state(pipeline.get(), nullptr, nullptr, GST_CLOCK_TIME_NONE);
+
+  gst_element_set_state(pipeline.get(), GST_STATE_NULL);
+  gst_element_get_state(pipeline.get(), nullptr, nullptr, GST_CLOCK_TIME_NONE);
+
+  logs::log(logs::info, "[THREAD_LIFECYCLE] Pipeline thread (TID={}) cleanup complete", tid);
   return true;
 }
 
