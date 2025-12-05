@@ -202,31 +202,35 @@ void start_test_pattern_producer(const std::string &session_id,
 
   // Build GPU upload element based on buffer_caps to ensure consistent memory format
   // This prevents buffer pool corruption when interpipesrc switches between test pattern and lobby
+  //
+  // CRITICAL: Output caps MUST EXACTLY MATCH waylanddisplaysrc's format:
+  //   waylanddisplaysrc ! {buffer_caps}, width={width}, height={height}, framerate={fps}/1 ! interpipesink
+  //
+  // Previous fix had explicit format=NV12 and missing framerate, causing caps negotiation
+  // differences that led to black screen on second session.
   std::string gpu_upload;
   if (buffer_caps.find("CUDAMemory") != std::string::npos) {
-    // NVIDIA: upload to CUDA memory
+    // NVIDIA: upload to CUDA memory, use EXACT same caps format as waylanddisplaysrc
     gpu_upload = fmt::format("cudaupload ! "
-                             "video/x-raw(memory:CUDAMemory), format=NV12, width={}, height={}",
-                             display_mode.width, display_mode.height);
-    logs::log(logs::info, "[GSTREAMER] Test pattern using CUDA memory upload");
+                             "{}, width={}, height={}, framerate={}/1",
+                             buffer_caps, display_mode.width, display_mode.height, display_mode.refreshRate);
+    logs::log(logs::info, "[GSTREAMER] Test pattern using CUDA memory upload (matching waylanddisplaysrc)");
   } else if (buffer_caps.find("DMABuf") != std::string::npos) {
-    // AMD/Intel: use VA-API postprocessor, output DMABuf to EXACTLY match waylanddisplaysrc
-    // waylanddisplaysrc outputs: video/x-raw(memory:DMABuf), drm-format={...}
-    // We output the same memory type with NV12 drm-format (commonly supported)
+    // AMD/Intel: use VA-API postprocessor, output DMABuf with EXACT same caps format as waylanddisplaysrc
     gpu_upload = fmt::format("vapostproc ! "
-                             "video/x-raw(memory:DMABuf), drm-format=NV12, width={}, height={}",
-                             display_mode.width, display_mode.height);
+                             "{}, width={}, height={}, framerate={}/1",
+                             buffer_caps, display_mode.width, display_mode.height, display_mode.refreshRate);
     logs::log(logs::info, "[GSTREAMER] Test pattern using DMABuf memory upload (matching waylanddisplaysrc)");
   } else if (buffer_caps.find("VAMemory") != std::string::npos) {
-    // Fallback for explicit VAMemory caps (rare)
+    // Fallback for explicit VAMemory caps (rare) - use same format as waylanddisplaysrc
     gpu_upload = fmt::format("vapostproc ! "
-                             "video/x-raw(memory:VAMemory), format=NV12, width={}, height={}",
-                             display_mode.width, display_mode.height);
-    logs::log(logs::info, "[GSTREAMER] Test pattern using VAMemory upload");
+                             "{}, width={}, height={}, framerate={}/1",
+                             buffer_caps, display_mode.width, display_mode.height, display_mode.refreshRate);
+    logs::log(logs::info, "[GSTREAMER] Test pattern using VAMemory upload (matching waylanddisplaysrc)");
   } else {
     // Fallback: no GPU upload (CPU memory) - may cause issues with lobby switching
-    gpu_upload = fmt::format("video/x-raw, format=NV12, width={}, height={}",
-                             display_mode.width, display_mode.height);
+    gpu_upload = fmt::format("video/x-raw, format=NV12, width={}, height={}, framerate={}/1",
+                             display_mode.width, display_mode.height, display_mode.refreshRate);
     logs::log(logs::warning, "[GSTREAMER] Test pattern using CPU memory (no GPU upload) - "
                              "lobby switching may cause black screen");
   }
