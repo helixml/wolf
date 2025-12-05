@@ -222,16 +222,12 @@ void start_test_pattern_producer(const std::string &session_id,
           }
         });
 
-    // FIX: Also stop on PauseStreamEvent - ENET disconnect fires Pause before cancel reaches Wolf
-    auto pause_handler = event_bus->register_handler<immer::box<events::PauseStreamEvent>>(
-        [session_id, loop](const immer::box<events::PauseStreamEvent> &ev) {
-          if (ev->session_id == std::stoull(session_id)) {
-            logs::log(logs::debug, "[GSTREAMER] Stopping test pattern producer on pause: {} (quitting main loop)", session_id);
-            g_main_loop_quit(loop.get());
-          }
-        });
+    // NOTE: Don't stop on PauseStreamEvent - the test pattern producer must remain alive
+    // so the session can still switch to a lobby. Pause != stop, and killing the producer
+    // on pause causes black screens when a second session connects before the first joins a lobby.
+    // The test pattern producer should only stop on StopStreamEvent (session fully terminated).
 
-    return immer::array<immer::box<events::EventBusHandlers>>{std::move(stop_handler), std::move(stop_lobby_handler), std::move(pause_handler)};
+    return immer::array<immer::box<events::EventBusHandlers>>{std::move(stop_handler), std::move(stop_lobby_handler)};
   });
 }
 
@@ -275,16 +271,9 @@ void start_test_audio_producer(const std::string &session_id,
           }
         });
 
-    // FIX: Also stop on PauseStreamEvent - ENET disconnect fires Pause before cancel reaches Wolf
-    auto pause_handler = event_bus->register_handler<immer::box<events::PauseStreamEvent>>(
-        [session_id, loop](const immer::box<events::PauseStreamEvent> &ev) {
-          if (ev->session_id == std::stoull(session_id)) {
-            logs::log(logs::debug, "[GSTREAMER] Stopping test audio producer on pause: {} (quitting main loop)", session_id);
-            g_main_loop_quit(loop.get());
-          }
-        });
+    // NOTE: Don't stop on PauseStreamEvent - see comment in start_test_pattern_producer
 
-    return immer::array<immer::box<events::EventBusHandlers>>{std::move(stop_handler), std::move(stop_lobby_handler), std::move(pause_handler)};
+    return immer::array<immer::box<events::EventBusHandlers>>{std::move(stop_handler), std::move(stop_lobby_handler)};
   });
 }
 
