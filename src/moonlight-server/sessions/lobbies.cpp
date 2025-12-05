@@ -358,9 +358,9 @@ setup_lobbies_handlers(const immer::box<state::AppState> &app_state,
     if (auto lobby = state::get_lobby_by_connected_session(lobbies, std::to_string(moonlight_session_id))) {
       logs::log(logs::info, "[LOBBY] Moonlight stream {} over, leaving lobby {}", moonlight_session_id, lobby->id);
       // Fire the LeaveLobbyEvent so that it can also be picked up by WolfUI via SSE
-      // CRITICAL: skip_producer_switch = true because the session's test pattern producer
-      // is being destroyed - switching to it would corrupt the interpipe state and cause
-      // blank screens for subsequent sessions joining the same lobby.
+      // skip_producer_switch = true because the streaming pipeline is stopping anyway.
+      // There's no point switching interpipesrc to a different source in a stopping pipeline.
+      // When the session resumes, a NEW streaming pipeline is created with fresh listen-to.
       app_state->event_bus->fire_event(immer::box<events::LeaveLobbyEvent>{
           events::LeaveLobbyEvent{.lobby_id = lobby->id,
                                   .moonlight_session_id = moonlight_session_id,
