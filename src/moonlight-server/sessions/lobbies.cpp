@@ -10,13 +10,19 @@ namespace wolf::core::sessions {
 /**
  * @brief Removes the StreamSession from the input Lobby and switches everything to the original session
  *
+ * @param skip_producer_switch If true, skip switching the interpipesrc back to the session's test pattern.
+ *        This should be true when the session is being canceled, because the test pattern producer
+ *        is already destroyed - switching to it would corrupt the interpipe state.
+ *
  * @note Leaving a lobby may have side effects,
  * like terminating the lobby if it becomes empty or triggering additional events.
  */
 void leave_lobby(const std::shared_ptr<events::EventBusType> &ev_bus,
                  const events::Lobby &lobby,
-                 const events::StreamSession &session) {
-  logs::log(logs::info, "[LOBBY] Session {} leaving lobby {}", session.session_id, lobby.id);
+                 const events::StreamSession &session,
+                 bool skip_producer_switch = false) {
+  logs::log(logs::info, "[LOBBY] Session {} leaving lobby {} (skip_producer_switch={})",
+            session.session_id, lobby.id, skip_producer_switch);
   // Remove the current session from the lobby list
   lobby.connected_sessions->update([session](const immer::vector<immer::box<std::string>> &connected_sessions) {
     return connected_sessions | //
@@ -52,10 +58,16 @@ void leave_lobby(const std::shared_ptr<events::EventBusType> &ev_bus,
   }
   // TODO: hotplug pen_tablet and touch_screen
 
-  // Switch audio/video gstreamer stream producers
-  ev_bus->fire_event(immer::box<events::SwitchStreamProducerEvents>{
-      events::SwitchStreamProducerEvents{.session_id = session.session_id,
-                                         .interpipe_src_id = std::to_string(session.session_id)}});
+  // Switch audio/video gstreamer stream producers back to the session's test pattern
+  // UNLESS skip_producer_switch is true (session is being canceled, test pattern already destroyed)
+  if (!skip_producer_switch) {
+    ev_bus->fire_event(immer::box<events::SwitchStreamProducerEvents>{
+        events::SwitchStreamProducerEvents{.session_id = session.session_id,
+                                           .interpipe_src_id = std::to_string(session.session_id)}});
+  } else {
+    logs::log(logs::info, "[LOBBY] Skipping producer switch for session {} (session being canceled)",
+              session.session_id);
+  }
 
   if (lobby.stop_when_everyone_leaves && lobby.connected_sessions->load()->size() == 0) {
     // Nobody left in the lobby, and it's set to stop when everyone leaves
@@ -279,7 +291,7 @@ setup_lobbies_handlers(const immer::box<state::AppState> &app_state,
                     leave_lobby_event->lobby_id,
                     leave_lobby_event->moonlight_session_id);
         } else {
-          leave_lobby(app_state->event_bus, lobby.value(), session.value());
+          leave_lobby(app_state->event_bus, lobby.value(), session.value(), leave_lobby_event->skip_producer_switch);
         }
       }));
 
@@ -346,8 +358,13 @@ setup_lobbies_handlers(const immer::box<state::AppState> &app_state,
     if (auto lobby = state::get_lobby_by_connected_session(lobbies, std::to_string(moonlight_session_id))) {
       logs::log(logs::info, "[LOBBY] Moonlight stream {} over, leaving lobby {}", moonlight_session_id, lobby->id);
       // Fire the LeaveLobbyEvent so that it can also be picked up by WolfUI via SSE
+      // CRITICAL: skip_producer_switch = true because the session's test pattern producer
+      // is being destroyed - switching to it would corrupt the interpipe state and cause
+      // blank screens for subsequent sessions joining the same lobby.
       app_state->event_bus->fire_event(immer::box<events::LeaveLobbyEvent>{
-          events::LeaveLobbyEvent{.lobby_id = lobby->id, .moonlight_session_id = moonlight_session_id}});
+          events::LeaveLobbyEvent{.lobby_id = lobby->id,
+                                  .moonlight_session_id = moonlight_session_id,
+                                  .skip_producer_switch = true}});
     }
   };
 

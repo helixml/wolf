@@ -213,6 +213,10 @@ struct JoinLobbyEvent {
 struct LeaveLobbyEvent {
   const std::string lobby_id;
   const std::size_t moonlight_session_id;
+  // When true, skip switching the interpipesrc back to the session's test pattern.
+  // This is needed when the session is being canceled - the test pattern producer
+  // is already destroyed, so switching to it corrupts the interpipe state.
+  bool skip_producer_switch = false;
 };
 
 struct StopLobbyEvent {
