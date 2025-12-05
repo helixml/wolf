@@ -52,11 +52,31 @@ struct NeedContextData {
 
 static void need_context_handler(GstBus *bus, GstMessage *msg, gpointer data) {
   auto ctx_data = static_cast<NeedContextData *>(data);
-  if (auto gst_context = ctx_data->gst_context->load().get()) {
-    logs::log(logs::debug, "Context already set, passing it to the pipeline.");
-    gst_video_context::set_context(gst_context, msg);
+
+  // Get context type being requested
+  const gchar *context_type = nullptr;
+  gst_message_parse_context_type(msg, &context_type);
+  logs::log(logs::warning, "[CUDA_CONTEXT_DEBUG] need_context_handler called for type={}, device={}",
+            context_type ? context_type : "unknown", ctx_data->device_path);
+
+  // Load the shared context from atom
+  // Note: atom<T>::load() returns T, where T is immer::box<shared_ptr<GstVideoContext>>
+  // So loaded_context.get() returns shared_ptr<GstVideoContext>
+  // And loaded_context.get().get() returns GstVideoContext*
+  auto loaded_context = ctx_data->gst_context->load();
+  if (auto shared_ctx = loaded_context.get()) {
+    // shared_ctx is shared_ptr<GstVideoContext>, .get() gives raw pointer for logging
+    auto* raw_ptr = shared_ctx.get();
+    logs::log(logs::warning, "[CUDA_CONTEXT_DEBUG] Context already in atom (addr={}), passing to pipeline",
+              static_cast<void*>(raw_ptr));
+    gst_video_context::set_context(shared_ctx, msg);
   } else if (auto video_context = gst_video_context::need_context_for_device(ctx_data->device_path, msg)) {
+    auto* new_ptr = video_context.get();
+    logs::log(logs::warning, "[CUDA_CONTEXT_DEBUG] Created NEW context (addr={}), storing in atom",
+              static_cast<void*>(new_ptr));
     ctx_data->gst_context->store(video_context);
+  } else {
+    logs::log(logs::warning, "[CUDA_CONTEXT_DEBUG] Could not create context for type={}", context_type ? context_type : "unknown");
   }
 }
 
@@ -545,6 +565,22 @@ void start_streaming_video(immer::box<events::VideoSession> video_session,
                       sess_id,
                       switch_ev->interpipe_src_id,
                       gst_element_state_get_name(state));
+
+            // CRITICAL: Wait for pipeline to reach PLAYING state before switching.
+            // When the pipeline is still in PAUSED state, nvh264enc may not have fully initialized
+            // with the correct CUDA context. Switching while PAUSED can cause NV_ENC_ERR_RESOURCE_REGISTER_FAILED
+            // because the encoder's buffer pools are reconfigured with a different context.
+            if (state != GST_STATE_PLAYING) {
+              logs::log(logs::warning, "[HANG_DEBUG] Pipeline not PLAYING, waiting up to 2s for state transition...");
+              GstState current, pending;
+              auto ret = gst_element_get_state(pipeline.get(), &current, &pending, 2 * GST_SECOND);
+              if (ret == GST_STATE_CHANGE_FAILURE || current != GST_STATE_PLAYING) {
+                logs::log(logs::error, "[HANG_DEBUG] Pipeline failed to reach PLAYING state (current={}, ret={}), proceeding with switch anyway",
+                          gst_element_state_get_name(current), static_cast<int>(ret));
+              } else {
+                logs::log(logs::warning, "[HANG_DEBUG] Pipeline now PLAYING, proceeding with switch");
+              }
+            }
 
             /* DEADLOCK FIX: Post message to pipeline bus instead of calling g_object_set directly
              * Problem: g_object_set acquires global GLib type lock - if this thread crashes while
