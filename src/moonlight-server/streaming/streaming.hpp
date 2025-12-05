@@ -53,10 +53,11 @@ void start_audio_producer(const std::string &session_id,
  * Creates: {source_pipeline} ! [gpu_upload] ! interpipesink name={session_id}_video
  * This allows lobby switching to work for placeholder apps (e.g., Blank app with videotestsrc).
  *
- * GPU upload is added based on buffer_caps to ensure consistent memory format:
- * - NVIDIA (CUDAMemory): cudaupload ! video/x-raw(memory:CUDAMemory)
- * - AMD/Intel (DMABuf/VAMemory): vapostproc ! video/x-raw(memory:VAMemory)
- * - Fallback: no GPU upload (CPU memory)
+ * GPU upload is added based on buffer_caps to EXACTLY match waylanddisplaysrc output format,
+ * avoiding any format conversion when interpipesrc switches between test pattern and lobby:
+ * - NVIDIA (CUDAMemory): cudaupload ! video/x-raw(memory:CUDAMemory), format=NV12
+ * - AMD/Intel (DMABuf): vapostproc ! video/x-raw(memory:DMABuf), drm-format=NV12
+ * - Fallback: no GPU upload (CPU memory) - lobby switching may cause black screen
  */
 void start_test_pattern_producer(const std::string &session_id,
                                  const std::string &source_pipeline,
