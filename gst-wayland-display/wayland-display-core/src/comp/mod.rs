@@ -680,7 +680,39 @@ pub(crate) fn init(
         })
         .unwrap();
 
-    let source = ListeningSocketSource::new_auto().unwrap();
+    // Try to create wayland socket, with cleanup on failure
+    let source = match ListeningSocketSource::new_auto() {
+        Ok(source) => source,
+        Err(e) => {
+            tracing::warn!(?e, "Failed to create wayland socket, attempting cleanup of stale sockets...");
+            // Clean up stale wayland sockets in XDG_RUNTIME_DIR
+            // These can accumulate when lobby creation fails (timeout/panic) without proper cleanup
+            if let Ok(runtime_dir) = std::env::var("XDG_RUNTIME_DIR") {
+                if let Ok(entries) = std::fs::read_dir(&runtime_dir) {
+                    let mut cleaned = 0;
+                    for entry in entries.flatten() {
+                        let name = entry.file_name();
+                        let name_str = name.to_string_lossy();
+                        if name_str.starts_with("wayland-") {
+                            let path = entry.path();
+                            // Try to remove both sockets and lock files
+                            if path.is_dir() || name_str.ends_with(".lock") || !name_str.contains('.') {
+                                if std::fs::remove_file(&path).is_ok() || std::fs::remove_dir_all(&path).is_ok() {
+                                    cleaned += 1;
+                                }
+                            }
+                        }
+                    }
+                    if cleaned > 0 {
+                        tracing::info!(cleaned, "Cleaned up stale wayland sockets, retrying...");
+                    }
+                }
+            }
+            // Retry after cleanup
+            ListeningSocketSource::new_auto()
+                .expect("Failed to create wayland socket even after cleanup")
+        }
+    };
     let socket_name = source.socket_name().to_string_lossy().into_owned();
     tracing::info!(?socket_name, "Listening on wayland socket.");
     event_loop
