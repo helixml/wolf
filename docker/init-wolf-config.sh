@@ -32,14 +32,18 @@ if [ ! -f "$CONFIG_FILE" ] || [ ! -s "$CONFIG_FILE" ]; then
     fi
 
     # Set GOP size (keyframe interval) from env var
-    # Default: 60 (keyframe every 1 second at 60fps, ~1fps in keyframes-only fallback mode)
+    # Default: 120 (keyframe every 2 seconds at 60fps)
     # Note: Different encoders use different parameter names:
-    # - Hardware encoders (nvenc, vaapi): gop-size=N
-    # - Software x264enc: key-int-max=N
-    # NOTE: Only replaces positive gop-size values. gop-size=-1 (NVIDIA special) is preserved.
-    GOP_SIZE=${GOP_SIZE:-60}
+    # - Hardware encoders (nvenc, vaapi, qsv): gop-size=N
+    # - VA-API encoders: key-int-max=N
+    # - Software x264enc/x265enc: keyint=N (in option-string)
+    # - Software av1enc (libaom): keyframe-max-dist=N
+    # NOTE: Only replaces positive values. Negative values are preserved.
+    GOP_SIZE=${GOP_SIZE:-120}
     sed -i "s/gop-size=[0-9][0-9]*/gop-size=$GOP_SIZE/g" "$CONFIG_FILE"
     sed -i "s/key-int-max=[0-9][0-9]*/key-int-max=$GOP_SIZE/g" "$CONFIG_FILE"
+    sed -i "s/keyint=[0-9][0-9]*/keyint=$GOP_SIZE/g" "$CONFIG_FILE"
+    sed -i "s/keyframe-max-dist=[0-9][0-9]*/keyframe-max-dist=$GOP_SIZE/g" "$CONFIG_FILE"
     echo "🎬 Set GOP size (keyframe interval): $GOP_SIZE frames"
 
     echo "✅ Wolf config initialized"
