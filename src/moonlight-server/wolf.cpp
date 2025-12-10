@@ -367,12 +367,15 @@ void start_watchdog() {
           }
 
           // Exit main process for Docker restart
+          // CRITICAL: Use _exit() not exit() - exit() runs destructors/atexit handlers
+          // which may deadlock if threads are stuck holding locks
+          // Don't fflush() - it can block if I/O subsystem is stuck
           logs::log(logs::fatal, "[WATCHDOG] Exiting for container restart");
-          exit(1);
+          _exit(1);
 
         } else {
           logs::log(logs::error, "[WATCHDOG] fork() failed: {}", strerror(errno));
-          exit(1);
+          _exit(1);
         }
       }
       // System healthy - no action needed
