@@ -421,6 +421,19 @@ void launch(const std::shared_ptr<typename SimpleWeb::Server<SimpleWeb::HTTPS>::
             const immer::box<state::AppState> &state) {
   log_req<SimpleWeb::HTTPS>(request);
 
+  // CRITICAL: Reject if client already has an active session
+  // This prevents duplicate sessions that cause deadlocks when the same client
+  // tries to launch while a previous session is still cleaning up.
+  // The Moonlight protocol requires clients to cancel() before launching a new app.
+  auto existing_session = state::get_session_by_client(state->running_sessions->load(), current_client);
+  if (existing_session) {
+    logs::log(logs::warning, "[HTTPS] Client already has an active session (id: {}), rejecting launch. Client must cancel() first.",
+              existing_session->session_id);
+    auto xml = moonlight::launch_error("AlreadyStreaming");
+    send_xml<SimpleWeb::HTTPS>(response, SimpleWeb::StatusCode::client_error_conflict, xml);
+    return;
+  }
+
   SimpleWeb::CaseInsensitiveMultimap headers = request->parse_query_string();
   auto app = state::get_moonlight_app_by_id(state->config, get_header(headers, "appid").value());
   if (!app) {

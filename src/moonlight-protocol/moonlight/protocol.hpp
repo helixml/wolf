@@ -155,7 +155,14 @@ XML applist(const immer::vector<App> &apps);
  * @return: XML response with session URL and client_id
  */
 XML launch_success(const std::string &local_ip, const std::string &rtsp_port, const std::string &client_id);
-// TODO: launch_error()
+
+/**
+ * Return an error response when launch fails (e.g., client already streaming)
+ *
+ * @param error_code: Error code string (e.g., "AlreadyStreaming")
+ * @return: XML response with error status
+ */
+XML launch_error(const std::string &error_code);
 
 XML launch_resume(const std::string &local_ip, const std::string &rtsp_port, const std::string &client_id);
 } // namespace moonlight
