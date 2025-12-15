@@ -102,10 +102,16 @@ bool add_input_device(WaylandState &w_state, const std::string &device_path) {
 }
 
 void WaylandMouse::move(int delta_x, int delta_y) {
+  if (!w_state || !w_state->display) {
+    return; // Session already torn down
+  }
   display_pointer_motion(w_state->display, delta_x, delta_y);
 }
 
 void WaylandMouse::move_abs(int x, int y, int screen_width, int screen_height) {
+  if (!w_state || !w_state->display) {
+    return; // Session already torn down
+  }
   display_pointer_motion_absolute(w_state->display, x, y);
 }
 
@@ -125,18 +131,30 @@ unsigned int moonlight_button_to_linux(unsigned int button) {
 }
 
 void WaylandMouse::press(unsigned int button) {
+  if (!w_state || !w_state->display) {
+    return; // Session already torn down
+  }
   display_pointer_button(w_state->display, moonlight_button_to_linux(button), true);
 }
 
 void WaylandMouse::release(unsigned int button) {
+  if (!w_state || !w_state->display) {
+    return; // Session already torn down
+  }
   display_pointer_button(w_state->display, moonlight_button_to_linux(button), false);
 }
 
 void WaylandMouse::vertical_scroll(int high_res_distance) {
+  if (!w_state || !w_state->display) {
+    return; // Session already torn down
+  }
   display_pointer_axis(w_state->display, 0, -high_res_distance);
 }
 
 void WaylandMouse::horizontal_scroll(int high_res_distance) {
+  if (!w_state || !w_state->display) {
+    return; // Session already torn down
+  }
   display_pointer_axis(w_state->display, high_res_distance, 0);
 }
 
@@ -205,30 +223,57 @@ static const std::map<unsigned int, unsigned int> key_mappings = {
 };
 
 void WaylandKeyboard::press(unsigned int key_code) {
+  if (!w_state || !w_state->display) {
+    return; // Session already torn down
+  }
+  if (!key_mappings.contains(key_code)) {
+    return;
+  }
   display_keyboard_input(w_state->display, key_mappings.at(key_code), true);
 }
 
 void WaylandKeyboard::release(unsigned int key_code) {
+  if (!w_state || !w_state->display) {
+    return; // Session already torn down
+  }
+  if (!key_mappings.contains(key_code)) {
+    return;
+  }
   display_keyboard_input(w_state->display, key_mappings.at(key_code), false);
 }
 
 void WaylandTouchScreen::down(unsigned int touch_id, double x, double y) {
+  if (!w_state || !w_state->display) {
+    return; // Session already torn down
+  }
   display_touch_down(w_state->display, touch_id, x, y);
 }
 
 void WaylandTouchScreen::up(unsigned int touch_id) {
+  if (!w_state || !w_state->display) {
+    return; // Session already torn down
+  }
   display_touch_up(w_state->display, touch_id);
 }
 
 void WaylandTouchScreen::motion(unsigned int touch_id, double x, double y) {
+  if (!w_state || !w_state->display) {
+    return; // Session already torn down
+  }
   display_touch_motion(w_state->display, touch_id, x, y);
 }
 
 void WaylandTouchScreen::cancel() {
+  if (!w_state || !w_state->display) {
+    return; // Session already torn down
+  }
   display_touch_cancel(w_state->display);
 }
 
 void WaylandTouchScreen::frame() {
+  if (!w_state || !w_state->display) {
+    return; // Session already torn down
+  }
   display_touch_frame(w_state->display);
 }
 

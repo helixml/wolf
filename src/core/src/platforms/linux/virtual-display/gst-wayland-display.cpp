@@ -32,6 +32,9 @@ bool add_input_device(WaylandState &w_state, const std::string &device_path) {
 }
 
 void WaylandMouse::move(int delta_x, int delta_y) {
+  if (!w_state || !w_state->wayland_plugin) {
+    return; // Session already torn down
+  }
   auto msg = /* clang-format off */
                           gst_structure_new("MouseMoveRelative",
                             "pointer_x", G_TYPE_DOUBLE, static_cast<double>(delta_x),
@@ -42,6 +45,9 @@ void WaylandMouse::move(int delta_x, int delta_y) {
 }
 
 void WaylandMouse::move_abs(int x, int y, int screen_width, int screen_height) {
+  if (!w_state || !w_state->wayland_plugin) {
+    return; // Session already torn down
+  }
   auto msg = /* clang-format off */
                           gst_structure_new("MouseMoveAbsolute",
                             "pointer_x", G_TYPE_DOUBLE, static_cast<double>(x),
@@ -67,6 +73,9 @@ unsigned int moonlight_button_to_linux(unsigned int button) {
 }
 
 void WaylandMouse::press(unsigned int button) {
+  if (!w_state || !w_state->wayland_plugin) {
+    return; // Session already torn down
+  }
   auto msg = /* clang-format off */
                           gst_structure_new("MouseButton",
                             "button", G_TYPE_UINT, moonlight_button_to_linux(button),
@@ -77,6 +86,9 @@ void WaylandMouse::press(unsigned int button) {
 }
 
 void WaylandMouse::release(unsigned int button) {
+  if (!w_state || !w_state->wayland_plugin) {
+    return; // Session already torn down
+  }
   auto msg = /* clang-format off */
                           gst_structure_new("MouseButton",
                             "button", G_TYPE_UINT, moonlight_button_to_linux(button),
@@ -86,6 +98,9 @@ void WaylandMouse::release(unsigned int button) {
   gstreamer::send_message(w_state->wayland_plugin.get(), msg);
 }
 void WaylandMouse::vertical_scroll(int high_res_distance) {
+  if (!w_state || !w_state->wayland_plugin) {
+    return; // Session already torn down
+  }
   auto msg = /* clang-format off */
                           gst_structure_new("MouseAxis",
                           "x", G_TYPE_DOUBLE, static_cast<double>(0),
@@ -96,6 +111,9 @@ void WaylandMouse::vertical_scroll(int high_res_distance) {
 }
 
 void WaylandMouse::horizontal_scroll(int high_res_distance) {
+  if (!w_state || !w_state->wayland_plugin) {
+    return; // Session already torn down
+  }
   auto msg = /* clang-format off */
                           gst_structure_new("MouseAxis",
                           "x", G_TYPE_DOUBLE, static_cast<double>(high_res_distance),
@@ -170,6 +188,9 @@ static const std::map<unsigned int, unsigned int> key_mappings = {
 };
 
 void WaylandKeyboard::press(unsigned int key_code) {
+  if (!w_state || !w_state->wayland_plugin) {
+    return; // Session already torn down
+  }
   if (key_mappings.contains(key_code)) {
     auto msg = /* clang-format off */
                            gst_structure_new("KeyboardKey",
@@ -184,6 +205,9 @@ void WaylandKeyboard::press(unsigned int key_code) {
 }
 
 void WaylandKeyboard::release(unsigned int key_code) {
+  if (!w_state || !w_state->wayland_plugin) {
+    return; // Session already torn down
+  }
   if (key_mappings.contains(key_code)) {
     auto msg = /* clang-format off */
                            gst_structure_new("KeyboardKey",
@@ -198,28 +222,43 @@ void WaylandKeyboard::release(unsigned int key_code) {
 }
 
 void WaylandTouchScreen::down(unsigned int touch_id, double x, double y) {
+  if (!w_state || !w_state->wayland_plugin) {
+    return; // Session already torn down
+  }
   auto msg =
       gst_structure_new("TouchDown", "x", G_TYPE_DOUBLE, x, "y", G_TYPE_DOUBLE, y, "id", G_TYPE_UINT, touch_id, NULL);
   gstreamer::send_message(w_state->wayland_plugin.get(), msg);
 }
 
 void WaylandTouchScreen::up(unsigned int touch_id) {
+  if (!w_state || !w_state->wayland_plugin) {
+    return; // Session already torn down
+  }
   auto msg = gst_structure_new("TouchUp", "id", G_TYPE_UINT, touch_id, NULL);
   gstreamer::send_message(w_state->wayland_plugin.get(), msg);
 }
 
 void WaylandTouchScreen::motion(unsigned int touch_id, double x, double y) {
+  if (!w_state || !w_state->wayland_plugin) {
+    return; // Session already torn down
+  }
   auto msg =
       gst_structure_new("TouchMotion", "x", G_TYPE_DOUBLE, x, "y", G_TYPE_DOUBLE, y, "id", G_TYPE_UINT, touch_id, NULL);
   gstreamer::send_message(w_state->wayland_plugin.get(), msg);
 }
 
 void WaylandTouchScreen::cancel() {
+  if (!w_state || !w_state->wayland_plugin) {
+    return; // Session already torn down
+  }
   auto msg = gst_structure_new("TouchCancel", "placeholder", G_TYPE_BOOLEAN, true, NULL);
   gstreamer::send_message(w_state->wayland_plugin.get(), msg);
 }
 
 void WaylandTouchScreen::frame() {
+  if (!w_state || !w_state->wayland_plugin) {
+    return; // Session already torn down
+  }
   auto msg = gst_structure_new("TouchFrame", "placeholder", G_TYPE_BOOLEAN, true, NULL);
   gstreamer::send_message(w_state->wayland_plugin.get(), msg);
 }
