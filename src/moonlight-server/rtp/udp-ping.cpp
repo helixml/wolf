@@ -3,6 +3,7 @@
 #include <helpers/logger.hpp>
 #include <rtp/udp-ping.hpp>
 #include <thread>
+#include <unistd.h>
 
 namespace rtp {
 
@@ -82,9 +83,11 @@ void start_rtp_ping(unsigned short video_port,
         io_context->run();
         logs::log(logs::info, "[RTP] server stopped");
       } catch (const std::exception &e) {
-        logs::log(logs::error, "[RTP] Server thread exception: {}", e.what());
+        logs::log(logs::fatal, "[RTP] Server FATAL exception: {} - exiting for restart", e.what());
+        _exit(1);
       } catch (...) {
-        logs::log(logs::error, "[RTP] Server thread unknown exception");
+        logs::log(logs::fatal, "[RTP] Server FATAL unknown exception - exiting for restart");
+        _exit(1);
       }
     }).detach();
 

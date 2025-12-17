@@ -519,9 +519,11 @@ void start_periodic_dumps() {
       std::this_thread::sleep_for(DUMP_INTERVAL);
     }
     } catch (const std::exception &e) {
-      logs::log(logs::error, "Periodic dump thread exception: {}", e.what());
+      logs::log(logs::fatal, "Periodic dump thread FATAL exception: {} - exiting for restart", e.what());
+      _exit(1);
     } catch (...) {
-      logs::log(logs::error, "Periodic dump thread unknown exception");
+      logs::log(logs::fatal, "Periodic dump thread FATAL unknown exception - exiting for restart");
+      _exit(1);
     }
   }).detach();
 }
@@ -587,9 +589,11 @@ void start_session_timeout_monitor(immer::box<state::AppState> app_state) {
       }
     }
     } catch (const std::exception &e) {
-      logs::log(logs::error, "Session timeout monitor thread exception: {}", e.what());
+      logs::log(logs::fatal, "Session timeout monitor FATAL exception: {} - exiting for restart", e.what());
+      _exit(1);
     } catch (...) {
-      logs::log(logs::error, "Session timeout monitor thread unknown exception");
+      logs::log(logs::fatal, "Session timeout monitor FATAL unknown exception - exiting for restart");
+      _exit(1);
     }
   }).detach();
 }
@@ -619,9 +623,11 @@ void run() {
       HttpServer server = HttpServer();
       HTTPServers::startServer(&server, local_state, state::get_port(state::HTTP_PORT));
     } catch (const std::exception &e) {
-      logs::log(logs::error, "HTTP server thread exception: {}", e.what());
+      logs::log(logs::fatal, "HTTP server FATAL exception: {} - exiting for restart", e.what());
+      _exit(1);
     } catch (...) {
-      logs::log(logs::error, "HTTP server thread unknown exception");
+      logs::log(logs::fatal, "HTTP server FATAL unknown exception - exiting for restart");
+      _exit(1);
     }
   });
 
@@ -633,9 +639,11 @@ void run() {
       HttpsServer server = HttpsServer(p_cert_file, p_key_file);
       HTTPServers::startServer(&server, local_state, state::get_port(state::HTTPS_PORT));
     } catch (const std::exception &e) {
-      logs::log(logs::error, "HTTPS server thread exception: {}", e.what());
+      logs::log(logs::fatal, "HTTPS server FATAL exception: {} - exiting for restart", e.what());
+      _exit(1);
     } catch (...) {
-      logs::log(logs::error, "HTTPS server thread unknown exception");
+      logs::log(logs::fatal, "HTTPS server FATAL unknown exception - exiting for restart");
+      _exit(1);
     }
   }).detach();
 
@@ -646,9 +654,11 @@ void run() {
       // TODO: Add Boost ASIO steady_timer for heartbeat in io_context event loop
       rtsp::run_server(state::get_port(state::RTSP_SETUP_PORT), sessions);
     } catch (const std::exception &e) {
-      logs::log(logs::error, "RTSP server thread exception: {}", e.what());
+      logs::log(logs::fatal, "RTSP server FATAL exception: {} - exiting for restart", e.what());
+      _exit(1);
     } catch (...) {
-      logs::log(logs::error, "RTSP server thread unknown exception");
+      logs::log(logs::fatal, "RTSP server FATAL unknown exception - exiting for restart");
+      _exit(1);
     }
   }).detach();
 
@@ -659,9 +669,11 @@ void run() {
       // TODO: Add Boost ASIO steady_timer for heartbeat in io_context event loop
       control::run_control(state::get_port(state::CONTROL_PORT), sessions, ev_bus);
     } catch (const std::exception &e) {
-      logs::log(logs::error, "Control server thread exception: {}", e.what());
+      logs::log(logs::fatal, "Control server FATAL exception: {} - exiting for restart", e.what());
+      _exit(1);
     } catch (...) {
-      logs::log(logs::error, "Control server thread unknown exception");
+      logs::log(logs::fatal, "Control server FATAL unknown exception - exiting for restart");
+      _exit(1);
     }
   }).detach();
 
@@ -676,9 +688,11 @@ void run() {
       // TODO: Add Boost ASIO steady_timer for heartbeat in io_context event loop
       wolf::api::start_server(runtime_dir, local_state);
     } catch (const std::exception &e) {
-      logs::log(logs::error, "Unix socket API server thread exception: {}", e.what());
+      logs::log(logs::fatal, "Unix socket API server FATAL exception: {} - exiting for restart", e.what());
+      _exit(1);
     } catch (...) {
-      logs::log(logs::error, "Unix socket API server thread unknown exception");
+      logs::log(logs::fatal, "Unix socket API server FATAL unknown exception - exiting for restart");
+      _exit(1);
     }
   }).detach();
 
