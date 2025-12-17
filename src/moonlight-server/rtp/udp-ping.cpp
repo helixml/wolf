@@ -49,21 +49,33 @@ void start_rtp_ping(unsigned short video_port,
 
     std::thread([io_context, video_socket, audio_socket, event_bus]() {
       UDP_Server video_server(video_socket, [event_bus, video_socket](const RTPPingEvent &ping) {
-        logs::log(logs::trace, "[RTP] video from {}:{}", ping.client_ip, ping.client_port);
-        auto ev = wolf::core::events::RTPVideoPingEvent{.client_ip = ping.client_ip,
-                                                        .client_port = ping.client_port,
-                                                        .video_socket = video_socket,
-                                                        .payload = ping.payload};
-        event_bus->fire_event(immer::box<wolf::core::events::RTPVideoPingEvent>(ev));
+        try {
+          logs::log(logs::trace, "[RTP] video from {}:{}", ping.client_ip, ping.client_port);
+          auto ev = wolf::core::events::RTPVideoPingEvent{.client_ip = ping.client_ip,
+                                                          .client_port = ping.client_port,
+                                                          .video_socket = video_socket,
+                                                          .payload = ping.payload};
+          event_bus->fire_event(immer::box<wolf::core::events::RTPVideoPingEvent>(ev));
+        } catch (const std::exception &e) {
+          logs::log(logs::warning, "[RTP] Error handling video ping event: {}", e.what());
+        } catch (...) {
+          logs::log(logs::warning, "[RTP] Unknown error handling video ping event");
+        }
       });
 
       UDP_Server audio_server(audio_socket, [event_bus, audio_socket](const RTPPingEvent &ping) {
-        logs::log(logs::trace, "[RTP] audio from {}:{}", ping.client_ip, ping.client_port);
-        auto ev = wolf::core::events::RTPAudioPingEvent{.client_ip = ping.client_ip,
-                                                        .client_port = ping.client_port,
-                                                        .audio_socket = audio_socket,
-                                                        .payload = ping.payload};
-        event_bus->fire_event(immer::box<wolf::core::events::RTPAudioPingEvent>(ev));
+        try {
+          logs::log(logs::trace, "[RTP] audio from {}:{}", ping.client_ip, ping.client_port);
+          auto ev = wolf::core::events::RTPAudioPingEvent{.client_ip = ping.client_ip,
+                                                          .client_port = ping.client_port,
+                                                          .audio_socket = audio_socket,
+                                                          .payload = ping.payload};
+          event_bus->fire_event(immer::box<wolf::core::events::RTPAudioPingEvent>(ev));
+        } catch (const std::exception &e) {
+          logs::log(logs::warning, "[RTP] Error handling audio ping event: {}", e.what());
+        } catch (...) {
+          logs::log(logs::warning, "[RTP] Unknown error handling audio ping event");
+        }
       });
 
       io_context->run();
