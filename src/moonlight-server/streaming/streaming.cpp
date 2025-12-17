@@ -17,6 +17,7 @@ using namespace wolf::core;
 struct GstBusData {
   std::shared_ptr<boost::promise<WaylandDisplayReady>> on_ready;
   gst_element_ptr wayland_plugin;
+  std::shared_ptr<std::atomic<bool>> already_fulfilled = std::make_shared<std::atomic<bool>>(false);
 };
 
 gboolean structure_each(GQuark field_id, const GValue *value, gpointer user_data) {
@@ -31,8 +32,14 @@ gboolean structure_each(GQuark field_id, const GValue *value, gpointer user_data
   if (field_str == "WAYLAND_DISPLAY") {
     logs::log(logs::info, "Wayland display ready, listening on: {}", value_str);
     auto bus_data = static_cast<GstBusData *>(user_data);
-    bus_data->on_ready->set_value(
-        WaylandDisplayReady{.wayland_socket_name = value_str, .wayland_plugin = bus_data->wayland_plugin});
+    // Only set the promise once - GStreamer may send multiple WAYLAND_DISPLAY messages
+    bool expected = false;
+    if (bus_data->already_fulfilled->compare_exchange_strong(expected, true)) {
+      bus_data->on_ready->set_value(
+          WaylandDisplayReady{.wayland_socket_name = value_str, .wayland_plugin = bus_data->wayland_plugin});
+    } else {
+      logs::log(logs::debug, "Ignoring duplicate WAYLAND_DISPLAY message");
+    }
   }
 
   return TRUE;
