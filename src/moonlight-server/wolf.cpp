@@ -544,9 +544,10 @@ void start_periodic_dumps() {
  */
 void start_session_timeout_monitor(immer::box<state::AppState> app_state) {
   std::thread([app_state]() {
-    using namespace std::chrono;
+    try {
+      using namespace std::chrono;
 
-    const seconds CHECK_INTERVAL{10};      // Check every 10 seconds
+      const seconds CHECK_INTERVAL{10};      // Check every 10 seconds
     const seconds SESSION_TIMEOUT{60};     // Sessions idle >60s are considered orphaned
 
     logs::log(logs::info, "[SESSION_TIMEOUT] Started session timeout monitor (timeout={}s, check_interval={}s)",
@@ -584,6 +585,11 @@ void start_session_timeout_monitor(immer::box<state::AppState> app_state) {
           }
         }
       }
+    }
+    } catch (const std::exception &e) {
+      logs::log(logs::error, "Session timeout monitor thread exception: {}", e.what());
+    } catch (...) {
+      logs::log(logs::error, "Session timeout monitor thread unknown exception");
     }
   }).detach();
 }
