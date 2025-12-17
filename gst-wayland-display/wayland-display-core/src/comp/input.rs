@@ -245,9 +245,12 @@ impl State {
     }
 
     pub fn pointer_motion_absolute(&mut self, event_time_msec: u32, position: Point<f64, Logical>) {
+        // Calculate delta from ACTUAL pointer position, not the intended/unclamped position.
+        // This ensures that even if previous moves were clamped, the pointer moves correctly
+        // to the new absolute position without accumulated drift.
         let relative_movement = (
-            position.x - self.pointer_absolute_location.x,
-            position.y - self.pointer_absolute_location.y,
+            position.x - self.pointer_location.x,
+            position.y - self.pointer_location.y,
         )
             .into();
 
