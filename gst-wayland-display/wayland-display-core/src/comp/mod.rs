@@ -570,11 +570,14 @@ pub(crate) fn init(
                 }
                 Event::Msg(Command::PointerAxis(horizontal_amount, vertical_amount)) => {
                     let time: Duration = state.clock.now().into();
+                    // Convert v120 units to axis units for Wayland
+                    // XWayland and legacy apps expect axis=10.0 for one wheel notch (120 v120)
+                    // This matches wlroots/weston convention where 10.0 = one discrete step
                     state.pointer_axis(
                         time.as_millis() as u32,
                         AxisSource::Wheel,
-                        horizontal_amount * 3.0 / 120.0,
-                        vertical_amount * 3.0 / 120.0,
+                        horizontal_amount * 10.0 / 120.0,
+                        vertical_amount * 10.0 / 120.0,
                         Some(horizontal_amount),
                         Some(vertical_amount),
                     );
