@@ -99,7 +99,7 @@ std::shared_ptr<drmDevice> drm_open_device(std::string_view device) {
     throw std::runtime_error(fmt::format("Error during drmGetDevice for {}, {}", device, strerror(-ret)));
   }
 
-  return {dev, [&render_node_fd](auto dev) {
+  return {dev, [render_node_fd](auto dev) {
             drmFreeDevice(&dev);
             close(render_node_fd);
           }};

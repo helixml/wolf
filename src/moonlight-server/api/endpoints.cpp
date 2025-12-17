@@ -9,6 +9,7 @@
 #include <state/utils.hpp>
 #include <chrono>
 #include <fstream>
+#include <mutex>
 #include <sstream>
 
 namespace wolf::api {
@@ -680,6 +681,7 @@ void UnixSocketServer::endpoint_DockerPullImage(const HTTPRequest &req, std::sha
 
 // Cache for GPU stats to prevent spamming nvidia-smi/rocm-smi
 // GPU tools can be slow (50-200ms), so we cache for 2 seconds
+static std::mutex gpu_stats_mutex;
 static std::optional<GPUStats> cached_gpu_stats;
 static std::chrono::steady_clock::time_point last_gpu_query_time;
 static const std::chrono::seconds GPU_CACHE_DURATION{2};
@@ -877,6 +879,7 @@ GPUStats queryAMDStats() {
 }
 
 GPUStats queryGPUStats() {
+  std::lock_guard<std::mutex> lock(gpu_stats_mutex);
   auto now = std::chrono::steady_clock::now();
 
   // Return cached stats if less than 2 seconds old

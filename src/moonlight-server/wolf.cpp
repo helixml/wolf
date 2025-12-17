@@ -248,11 +248,12 @@ bool test_socket_health(const std::string& socket_path) {
  */
 void start_watchdog() {
   std::thread([]() {
-    using namespace std::chrono;
+    try {
+      using namespace std::chrono;
 
-    const seconds CHECK_INTERVAL{30};
+      const seconds CHECK_INTERVAL{30};
 
-    // Get socket path from environment
+      // Get socket path from environment
     auto default_socket = std::filesystem::path(utils::get_env("XDG_RUNTIME_DIR", "/var/run/wolf")) / "wolf.sock";
     auto socket_path = utils::get_env("WOLF_SOCKET_PATH", default_socket.c_str());
 
@@ -380,6 +381,11 @@ void start_watchdog() {
       }
       // System healthy - no action needed
     }
+    } catch (const std::exception &e) {
+      logs::log(logs::error, "Watchdog thread exception: {}", e.what());
+    } catch (...) {
+      logs::log(logs::error, "Watchdog thread unknown exception");
+    }
   }).detach();
 }
 
@@ -400,7 +406,8 @@ void start_watchdog() {
  */
 void start_periodic_dumps() {
   std::thread([]() {
-    using namespace std::chrono;
+    try {
+      using namespace std::chrono;
 
     const hours DUMP_INTERVAL{1};  // Dump every hour
 
@@ -511,6 +518,11 @@ void start_periodic_dumps() {
       // Sleep until next dump (1 hour)
       std::this_thread::sleep_for(DUMP_INTERVAL);
     }
+    } catch (const std::exception &e) {
+      logs::log(logs::error, "Periodic dump thread exception: {}", e.what());
+    } catch (...) {
+      logs::log(logs::error, "Periodic dump thread unknown exception");
+    }
   }).detach();
 }
 
@@ -595,32 +607,56 @@ void run() {
 
   // HTTP APIs
   auto http_thread = std::thread([local_state]() {
-    wolf::monitoring::ScopedThreadMonitor thread_monitor("HTTP-Server");
-    // TODO: Add Boost ASIO steady_timer for heartbeat in io_context event loop
-    HttpServer server = HttpServer();
-    HTTPServers::startServer(&server, local_state, state::get_port(state::HTTP_PORT));
+    try {
+      wolf::monitoring::ScopedThreadMonitor thread_monitor("HTTP-Server");
+      // TODO: Add Boost ASIO steady_timer for heartbeat in io_context event loop
+      HttpServer server = HttpServer();
+      HTTPServers::startServer(&server, local_state, state::get_port(state::HTTP_PORT));
+    } catch (const std::exception &e) {
+      logs::log(logs::error, "HTTP server thread exception: {}", e.what());
+    } catch (...) {
+      logs::log(logs::error, "HTTP server thread unknown exception");
+    }
   });
 
   // HTTPS APIs
   std::thread([local_state, p_key_file, p_cert_file]() {
-    wolf::monitoring::ScopedThreadMonitor thread_monitor("HTTPS-Server");
-    // TODO: Add Boost ASIO steady_timer for heartbeat in io_context event loop
-    HttpsServer server = HttpsServer(p_cert_file, p_key_file);
-    HTTPServers::startServer(&server, local_state, state::get_port(state::HTTPS_PORT));
+    try {
+      wolf::monitoring::ScopedThreadMonitor thread_monitor("HTTPS-Server");
+      // TODO: Add Boost ASIO steady_timer for heartbeat in io_context event loop
+      HttpsServer server = HttpsServer(p_cert_file, p_key_file);
+      HTTPServers::startServer(&server, local_state, state::get_port(state::HTTPS_PORT));
+    } catch (const std::exception &e) {
+      logs::log(logs::error, "HTTPS server thread exception: {}", e.what());
+    } catch (...) {
+      logs::log(logs::error, "HTTPS server thread unknown exception");
+    }
   }).detach();
 
   // RTSP
   std::thread([sessions = local_state->running_sessions]() {
-    wolf::monitoring::ScopedThreadMonitor thread_monitor("RTSP-Server");
-    // TODO: Add Boost ASIO steady_timer for heartbeat in io_context event loop
-    rtsp::run_server(state::get_port(state::RTSP_SETUP_PORT), sessions);
+    try {
+      wolf::monitoring::ScopedThreadMonitor thread_monitor("RTSP-Server");
+      // TODO: Add Boost ASIO steady_timer for heartbeat in io_context event loop
+      rtsp::run_server(state::get_port(state::RTSP_SETUP_PORT), sessions);
+    } catch (const std::exception &e) {
+      logs::log(logs::error, "RTSP server thread exception: {}", e.what());
+    } catch (...) {
+      logs::log(logs::error, "RTSP server thread unknown exception");
+    }
   }).detach();
 
   // Control
   std::thread([sessions = local_state->running_sessions, ev_bus = local_state->event_bus]() {
-    wolf::monitoring::ScopedThreadMonitor thread_monitor("Control-Server");
-    // TODO: Add Boost ASIO steady_timer for heartbeat in io_context event loop
-    control::run_control(state::get_port(state::CONTROL_PORT), sessions, ev_bus);
+    try {
+      wolf::monitoring::ScopedThreadMonitor thread_monitor("Control-Server");
+      // TODO: Add Boost ASIO steady_timer for heartbeat in io_context event loop
+      control::run_control(state::get_port(state::CONTROL_PORT), sessions, ev_bus);
+    } catch (const std::exception &e) {
+      logs::log(logs::error, "Control server thread exception: {}", e.what());
+    } catch (...) {
+      logs::log(logs::error, "Control server thread unknown exception");
+    }
   }).detach();
 
   // RTP
@@ -629,9 +665,15 @@ void run() {
                       local_state->event_bus);
   // Wolf API server (Unix socket)
   std::thread([local_state, runtime_dir]() {
-    wolf::monitoring::ScopedThreadMonitor thread_monitor("UnixSocket-API");
-    // TODO: Add Boost ASIO steady_timer for heartbeat in io_context event loop
-    wolf::api::start_server(runtime_dir, local_state);
+    try {
+      wolf::monitoring::ScopedThreadMonitor thread_monitor("UnixSocket-API");
+      // TODO: Add Boost ASIO steady_timer for heartbeat in io_context event loop
+      wolf::api::start_server(runtime_dir, local_state);
+    } catch (const std::exception &e) {
+      logs::log(logs::error, "Unix socket API server thread exception: {}", e.what());
+    } catch (...) {
+      logs::log(logs::error, "Unix socket API server thread unknown exception");
+    }
   }).detach();
 
   // mDNS
@@ -649,6 +691,8 @@ void run() {
       mdns.startService(false);
     } catch (const std::exception &e) {
       logs::log(logs::error, "mDNS error: {}", e.what());
+    } catch (...) {
+      logs::log(logs::error, "mDNS unknown exception");
     }
   }).detach();
 

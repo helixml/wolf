@@ -48,7 +48,8 @@ void start_rtp_ping(unsigned short video_port,
     auto audio_socket = std::make_shared<udp::socket>(*io_context, udp::endpoint(udp::v4(), audio_port));
 
     std::thread([io_context, video_socket, audio_socket, event_bus]() {
-      UDP_Server video_server(video_socket, [event_bus, video_socket](const RTPPingEvent &ping) {
+      try {
+        UDP_Server video_server(video_socket, [event_bus, video_socket](const RTPPingEvent &ping) {
         try {
           logs::log(logs::trace, "[RTP] video from {}:{}", ping.client_ip, ping.client_port);
           auto ev = wolf::core::events::RTPVideoPingEvent{.client_ip = ping.client_ip,
@@ -78,8 +79,13 @@ void start_rtp_ping(unsigned short video_port,
         }
       });
 
-      io_context->run();
-      logs::log(logs::info, "[RTP] server stopped");
+        io_context->run();
+        logs::log(logs::info, "[RTP] server stopped");
+      } catch (const std::exception &e) {
+        logs::log(logs::error, "[RTP] Server thread exception: {}", e.what());
+      } catch (...) {
+        logs::log(logs::error, "[RTP] Server thread unknown exception");
+      }
     }).detach();
 
   } catch (std::exception &e) {
