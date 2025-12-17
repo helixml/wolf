@@ -18,15 +18,21 @@ template <typename RTPPingType>
 immer::box<RTPPingType> wait_for_ping(std::shared_ptr<events::EventBusType> ev_bus, const auto &sess) {
   auto ping_promise = std::make_shared<std::promise<RTPPingType>>();
   auto ping_future = ping_promise->get_future();
+  // Atomic flag to ensure we only set the promise once (multiple pings can arrive before unregister)
+  auto already_fulfilled = std::make_shared<std::atomic<bool>>(false);
 
   auto handler =
-      ev_bus->register_handler<immer::box<RTPPingType>>([sess, ping_promise](const immer::box<RTPPingType> &ping_ev) {
+      ev_bus->register_handler<immer::box<RTPPingType>>([sess, ping_promise, already_fulfilled](const immer::box<RTPPingType> &ping_ev) {
         // Check if this ping is for our session
         if (sess->rtp_secret_payload == ping_ev->payload || // Secret payload matching
             (!ping_ev->payload.has_value() && ping_ev->client_ip == sess->client_ip &&
              ping_ev->client_port == sess->port)) { // Legacy IP+port matching when no payload has been passed
-          // Resolve the promise with the ping event data
-          ping_promise->set_value(*ping_ev);
+          // Only set the promise once - subsequent matching pings are ignored
+          bool expected = false;
+          if (already_fulfilled->compare_exchange_strong(expected, true)) {
+            // Resolve the promise with the ping event data
+            ping_promise->set_value(*ping_ev);
+          }
         }
       });
 
