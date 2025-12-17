@@ -101,15 +101,21 @@ setup_moonlight_handlers(const immer::box<state::AppState> &app_state,
 
           // Start Gstreamer producer pipeline
           std::thread([session, on_ready, gst_context = app_state->gst_context]() {
-            streaming::start_video_producer(std::to_string(session->session_id),
-                                            session->app->video_producer_buffer_caps,
-                                            session->app->render_node,
-                                            {.width = session->display_mode.width,
-                                             .height = session->display_mode.height,
-                                             .refreshRate = session->display_mode.refreshRate},
-                                            gst_context,
-                                            on_ready,
-                                            session->event_bus);
+            try {
+              streaming::start_video_producer(std::to_string(session->session_id),
+                                              session->app->video_producer_buffer_caps,
+                                              session->app->render_node,
+                                              {.width = session->display_mode.width,
+                                               .height = session->display_mode.height,
+                                               .refreshRate = session->display_mode.refreshRate},
+                                              gst_context,
+                                              on_ready,
+                                              session->event_bus);
+            } catch (const std::exception &e) {
+              logs::log(logs::error, "[STREAM_SESSION] Video producer thread exception: {}", e.what());
+            } catch (...) {
+              logs::log(logs::error, "[STREAM_SESSION] Video producer thread unknown exception");
+            }
           }).detach();
         } else {
           // Create virtual devices
@@ -146,16 +152,22 @@ setup_moonlight_handlers(const immer::box<state::AppState> &app_state,
             // Without this, cudaupload creates its own CUDA context, and when interpipesrc switches
             // to lobby, nvh264enc fails with NV_ENC_ERR_RESOURCE_REGISTER_FAILED (0x17).
             std::thread([session, gst_context = app_state->gst_context]() {
-              streaming::start_test_pattern_producer(
-                  std::to_string(session->session_id),
-                  session->app->video_producer_source.value(),
-                  session->app->video_producer_buffer_caps,
-                  session->app->render_node,
-                  {.width = session->display_mode.width,
-                   .height = session->display_mode.height,
-                   .refreshRate = session->display_mode.refreshRate},
-                  gst_context,
-                  session->event_bus);
+              try {
+                streaming::start_test_pattern_producer(
+                    std::to_string(session->session_id),
+                    session->app->video_producer_source.value(),
+                    session->app->video_producer_buffer_caps,
+                    session->app->render_node,
+                    {.width = session->display_mode.width,
+                     .height = session->display_mode.height,
+                     .refreshRate = session->display_mode.refreshRate},
+                    gst_context,
+                    session->event_bus);
+              } catch (const std::exception &e) {
+                logs::log(logs::error, "[STREAM_SESSION] Test pattern producer thread exception: {}", e.what());
+              } catch (...) {
+                logs::log(logs::error, "[STREAM_SESSION] Test pattern producer thread unknown exception");
+              }
             }).detach();
           }
 
@@ -174,12 +186,18 @@ setup_moonlight_handlers(const immer::box<state::AppState> &app_state,
           session->audio_sink->store(v_device);
 
           std::thread([session, audio_server = audio_server->server]() {
-            auto sink_name = fmt::format("virtual_sink_{}.monitor", session->session_id);
-            streaming::start_audio_producer(std::to_string(session->session_id),
-                                            session->event_bus,
-                                            session->audio_channel_count,
-                                            sink_name,
-                                            audio::get_server_name(audio_server));
+            try {
+              auto sink_name = fmt::format("virtual_sink_{}.monitor", session->session_id);
+              streaming::start_audio_producer(std::to_string(session->session_id),
+                                              session->event_bus,
+                                              session->audio_channel_count,
+                                              sink_name,
+                                              audio::get_server_name(audio_server));
+            } catch (const std::exception &e) {
+              logs::log(logs::error, "[STREAM_SESSION] Audio producer thread exception: {}", e.what());
+            } catch (...) {
+              logs::log(logs::error, "[STREAM_SESSION] Audio producer thread unknown exception");
+            }
           }).detach();
         } else if (session->app->audio_producer_source.has_value()) {
           // If app has custom audio source, start test audio producer pipeline
@@ -187,11 +205,17 @@ setup_moonlight_handlers(const immer::box<state::AppState> &app_state,
           logs::log(logs::debug, "[STREAM_SESSION] Starting test audio producer for session {}",
                     session->session_id);
           std::thread([session]() {
-            streaming::start_test_audio_producer(
-                std::to_string(session->session_id),
-                session->app->audio_producer_source.value(),
-                session->audio_channel_count,
-                session->event_bus);
+            try {
+              streaming::start_test_audio_producer(
+                  std::to_string(session->session_id),
+                  session->app->audio_producer_source.value(),
+                  session->audio_channel_count,
+                  session->event_bus);
+            } catch (const std::exception &e) {
+              logs::log(logs::error, "[STREAM_SESSION] Test audio producer thread exception: {}", e.what());
+            } catch (...) {
+              logs::log(logs::error, "[STREAM_SESSION] Test audio producer thread unknown exception");
+            }
           }).detach();
         }
 
@@ -227,35 +251,41 @@ setup_moonlight_handlers(const immer::box<state::AppState> &app_state,
         }
 
         std::thread([=]() {
-          start_runner(
-              run_session->runner,
-              *devices_q,
-              immer::box<RunnerArgs>{RunnerArgs{
-                  .session_id = session_id,
-                  .video_settings =
-                      {
-                          .width = run_session->stream_session->display_mode.width,
-                          .height = run_session->stream_session->display_mode.height,
-                          .refresh_rate = run_session->stream_session->display_mode.refreshRate,
-                          .wayland_render_node = run_session->stream_session->app->render_node,
-                          .runner_render_node = run_session->stream_session->app->render_node,
-                          .video_producer_buffer_caps = run_session->stream_session->app->video_producer_buffer_caps,
-                      },
-                  .wayland_display = run_session->stream_session->wayland_display->load(),
-                  .audio_server = audio_server,
-                  .audio_sink = run_session->stream_session->audio_sink->load(),
-                  .host = app_state->host,
-                  .app_local_state_folder = run_session->stream_session->app_local_state_folder,
-                  .app_host_state_folder = run_session->stream_session->app_host_state_folder,
-                  .xdg_runtime_dir = runtime_dir,
-                  .client_settings = run_session->stream_session->client_settings}});
+          try {
+            start_runner(
+                run_session->runner,
+                *devices_q,
+                immer::box<RunnerArgs>{RunnerArgs{
+                    .session_id = session_id,
+                    .video_settings =
+                        {
+                            .width = run_session->stream_session->display_mode.width,
+                            .height = run_session->stream_session->display_mode.height,
+                            .refresh_rate = run_session->stream_session->display_mode.refreshRate,
+                            .wayland_render_node = run_session->stream_session->app->render_node,
+                            .runner_render_node = run_session->stream_session->app->render_node,
+                            .video_producer_buffer_caps = run_session->stream_session->app->video_producer_buffer_caps,
+                        },
+                    .wayland_display = run_session->stream_session->wayland_display->load(),
+                    .audio_server = audio_server,
+                    .audio_sink = run_session->stream_session->audio_sink->load(),
+                    .host = app_state->host,
+                    .app_local_state_folder = run_session->stream_session->app_local_state_folder,
+                    .app_host_state_folder = run_session->stream_session->app_host_state_folder,
+                    .xdg_runtime_dir = runtime_dir,
+                    .client_settings = run_session->stream_session->client_settings}});
 
-          // Runner process ended
-          if (run_session->stop_stream_when_over) {
-            run_session->stream_session->wayland_display->store(nullptr);
+            // Runner process ended
+            if (run_session->stop_stream_when_over) {
+              run_session->stream_session->wayland_display->store(nullptr);
 
-            app_state->event_bus->fire_event(immer::box<events::StopStreamEvent>(
-                events::StopStreamEvent{.session_id = run_session->stream_session->session_id}));
+              app_state->event_bus->fire_event(immer::box<events::StopStreamEvent>(
+                  events::StopStreamEvent{.session_id = run_session->stream_session->session_id}));
+            }
+          } catch (const std::exception &e) {
+            logs::log(logs::error, "[STREAM_SESSION] Runner thread exception: {}", e.what());
+          } catch (...) {
+            logs::log(logs::error, "[STREAM_SESSION] Runner thread unknown exception");
           }
         }).detach();
       }));
@@ -265,15 +295,21 @@ setup_moonlight_handlers(const immer::box<state::AppState> &app_state,
        gst_context = app_state->gst_context](const immer::box<events::VideoSession> &sess) {
         // Start a thread that will wait for the RTP ping event
         std::thread([sess, ev_bus, gst_context]() {
-          auto ping_ev = wait_for_ping<events::RTPVideoPingEvent>(ev_bus, sess);
+          try {
+            auto ping_ev = wait_for_ping<events::RTPVideoPingEvent>(ev_bus, sess);
 
-          // Start streaming
-          streaming::start_streaming_video(sess,
-                                           ev_bus,
-                                           ping_ev->client_ip,
-                                           ping_ev->client_port,
-                                           gst_context,
-                                           ping_ev->video_socket.get());
+            // Start streaming
+            streaming::start_streaming_video(sess,
+                                             ev_bus,
+                                             ping_ev->client_ip,
+                                             ping_ev->client_port,
+                                             gst_context,
+                                             ping_ev->video_socket.get());
+          } catch (const std::exception &e) {
+            logs::log(logs::error, "[VIDEO_SESSION] Video streaming thread exception: {}", e.what());
+          } catch (...) {
+            logs::log(logs::error, "[VIDEO_SESSION] Video streaming thread unknown exception");
+          }
         }).detach();
       }));
 
@@ -281,21 +317,27 @@ setup_moonlight_handlers(const immer::box<state::AppState> &app_state,
       [ev_bus = app_state->event_bus, audio_server](const immer::box<events::AudioSession> &sess) {
         // Start a thread that will wait for the RTP ping event
         std::thread([sess, ev_bus, audio_server]() {
-          auto ping_ev = wait_for_ping<events::RTPAudioPingEvent>(ev_bus, sess);
+          try {
+            auto ping_ev = wait_for_ping<events::RTPAudioPingEvent>(ev_bus, sess);
 
-          // Start streaming
-          auto audio_server_name = audio_server ? audio::get_server_name(audio_server->server)
-                                                : std::optional<std::string>();
-          auto sink_name = fmt::format("virtual_sink_{}.monitor", sess->session_id);
-          auto server_name = audio_server_name ? audio_server_name.value() : "";
+            // Start streaming
+            auto audio_server_name = audio_server ? audio::get_server_name(audio_server->server)
+                                                  : std::optional<std::string>();
+            auto sink_name = fmt::format("virtual_sink_{}.monitor", sess->session_id);
+            auto server_name = audio_server_name ? audio_server_name.value() : "";
 
-          streaming::start_streaming_audio(sess,
-                                           ev_bus,
-                                           ping_ev->client_ip,
-                                           ping_ev->client_port,
-                                           ping_ev->audio_socket.get(),
-                                           sink_name,
-                                           server_name);
+            streaming::start_streaming_audio(sess,
+                                             ev_bus,
+                                             ping_ev->client_ip,
+                                             ping_ev->client_port,
+                                             ping_ev->audio_socket.get(),
+                                             sink_name,
+                                             server_name);
+          } catch (const std::exception &e) {
+            logs::log(logs::error, "[AUDIO_SESSION] Audio streaming thread exception: {}", e.what());
+          } catch (...) {
+            logs::log(logs::error, "[AUDIO_SESSION] Audio streaming thread unknown exception");
+          }
         }).detach();
       }));
 

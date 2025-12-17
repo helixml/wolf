@@ -562,8 +562,14 @@ void start_session_timeout_monitor(immer::box<state::AppState> app_state) {
           // Fire StopStreamEvent to fully stop and remove the session
           // (PauseStreamEvent only pauses the pipeline but leaves session in running_sessions,
           //  causing orphaned interpipesrc consumers to accumulate)
-          app_state->event_bus->fire_event(
-              immer::box<events::StopStreamEvent>(events::StopStreamEvent{.session_id = session.session_id}));
+          try {
+            app_state->event_bus->fire_event(
+                immer::box<events::StopStreamEvent>(events::StopStreamEvent{.session_id = session.session_id}));
+          } catch (const std::exception &e) {
+            logs::log(logs::error, "[SESSION_TIMEOUT] Exception firing StopStreamEvent: {}", e.what());
+          } catch (...) {
+            logs::log(logs::error, "[SESSION_TIMEOUT] Unknown exception firing StopStreamEvent");
+          }
         }
       }
     }

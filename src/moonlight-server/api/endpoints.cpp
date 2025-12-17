@@ -602,14 +602,20 @@ void UnixSocketServer::endpoint_GetIcon(const HTTPRequest &req, std::shared_ptr<
   }
   // TODO: implement coroutines for CURL
   std::thread([this, socket, icon_path = utils::to_string(icon_path[1])]() {
-    if (auto icon = utils::get_icon(this->state_->app_state->host->local_base_state_folder, icon_path)) {
-      send_http(socket,
-                200,
-                {"Content-Length: " + std::to_string(icon->size()), "Content-Type: image/png"},
-                icon.value());
-    } else {
-      auto res = GenericErrorResponse{.error = "Icon not found"};
-      send_http(socket, 404, rfl::json::write(res));
+    try {
+      if (auto icon = utils::get_icon(this->state_->app_state->host->local_base_state_folder, icon_path)) {
+        send_http(socket,
+                  200,
+                  {"Content-Length: " + std::to_string(icon->size()), "Content-Type: image/png"},
+                  icon.value());
+      } else {
+        auto res = GenericErrorResponse{.error = "Icon not found"};
+        send_http(socket, 404, rfl::json::write(res));
+      }
+    } catch (const std::exception &e) {
+      logs::log(logs::error, "[API] Icon fetch thread exception: {}", e.what());
+    } catch (...) {
+      logs::log(logs::error, "[API] Icon fetch thread unknown exception");
     }
   }).detach();
 }
@@ -636,31 +642,37 @@ void UnixSocketServer::endpoint_DockerPullImage(const HTTPRequest &req, std::sha
   if (input_payload) {
     // TODO: implement coroutines for CURL
     std::thread([this, socket, image = input_payload.value().image_name]() {
-      docker::DockerAPI docker_api(utils::get_env("WOLF_DOCKER_SOCKET", "/var/run/docker.sock"));
-      bool first_send = true;
-      broadcast_event("DockerPullImageStartEvent",
-                      rfl::json::write(events::DockerPullImageStartEvent{.image_name = image}));
-      if (docker_api.pull_image(image,
-                                {},
-                                [this, &first_send, socket](const docker::DockerAPI::DockerProgressEvent &progress_ev) {
-                                  if (first_send) {
-                                    send_data(socket, "HTTP/1.0 200 OK\r\n\r\n");
-                                    first_send = false;
-                                  }
-                                  auto serialized_ev = rfl::json::write(progress_ev) + "\r\n";
-                                  send_data(socket, serialized_ev);
-                                })) {
-        if (first_send) {
-          send_data(socket, "HTTP/1.0 200 OK\r\n\r\n");
+      try {
+        docker::DockerAPI docker_api(utils::get_env("WOLF_DOCKER_SOCKET", "/var/run/docker.sock"));
+        bool first_send = true;
+        broadcast_event("DockerPullImageStartEvent",
+                        rfl::json::write(events::DockerPullImageStartEvent{.image_name = image}));
+        if (docker_api.pull_image(image,
+                                  {},
+                                  [this, &first_send, socket](const docker::DockerAPI::DockerProgressEvent &progress_ev) {
+                                    if (first_send) {
+                                      send_data(socket, "HTTP/1.0 200 OK\r\n\r\n");
+                                      first_send = false;
+                                    }
+                                    auto serialized_ev = rfl::json::write(progress_ev) + "\r\n";
+                                    send_data(socket, serialized_ev);
+                                  })) {
+          if (first_send) {
+            send_data(socket, "HTTP/1.0 200 OK\r\n\r\n");
+          }
+          auto final_result = rfl::json::write(GenericSuccessResponse{.success = true});
+          send_data(socket, final_result + "\r\n");
+          broadcast_event("DockerPullImageEndEvent",
+                          rfl::json::write(events::DockerPullImageEndEvent{.image_name = image, .success = true}));
+        } else {
+          send_http(socket, 500, rfl::json::write(GenericErrorResponse{.error = "Failed to pull image"}));
+          broadcast_event("DockerPullImageEndEvent",
+                          rfl::json::write(events::DockerPullImageEndEvent{.image_name = image, .success = false}));
         }
-        auto final_result = rfl::json::write(GenericSuccessResponse{.success = true});
-        send_data(socket, final_result + "\r\n");
-        broadcast_event("DockerPullImageEndEvent",
-                        rfl::json::write(events::DockerPullImageEndEvent{.image_name = image, .success = true}));
-      } else {
-        send_http(socket, 500, rfl::json::write(GenericErrorResponse{.error = "Failed to pull image"}));
-        broadcast_event("DockerPullImageEndEvent",
-                        rfl::json::write(events::DockerPullImageEndEvent{.image_name = image, .success = false}));
+      } catch (const std::exception &e) {
+        logs::log(logs::error, "[API] Docker pull thread exception: {}", e.what());
+      } catch (...) {
+        logs::log(logs::error, "[API] Docker pull thread unknown exception");
       }
     }).detach();
   }

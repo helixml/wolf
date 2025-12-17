@@ -107,15 +107,21 @@ setup_lobbies_handlers(const immer::box<state::AppState> &app_state,
               std::make_shared<boost::promise<streaming::WaylandDisplayReady>>();
 
           std::thread([lobby, lobby_settings, ev_bus, on_ready, gst_context = app_state->gst_context]() {
-            streaming::start_video_producer(lobby->id,
-                                            lobby_settings->video_settings.video_producer_buffer_caps,
-                                            lobby_settings->video_settings.wayland_render_node,
-                                            {.width = lobby_settings->video_settings.width,
-                                             .height = lobby_settings->video_settings.height,
-                                             .refreshRate = lobby_settings->video_settings.refresh_rate},
-                                            gst_context,
-                                            on_ready,
-                                            ev_bus);
+            try {
+              streaming::start_video_producer(lobby->id,
+                                              lobby_settings->video_settings.video_producer_buffer_caps,
+                                              lobby_settings->video_settings.wayland_render_node,
+                                              {.width = lobby_settings->video_settings.width,
+                                               .height = lobby_settings->video_settings.height,
+                                               .refreshRate = lobby_settings->video_settings.refresh_rate},
+                                              gst_context,
+                                              on_ready,
+                                              ev_bus);
+            } catch (const std::exception &e) {
+              logs::log(logs::error, "[LOBBY] Video producer thread exception: {}", e.what());
+            } catch (...) {
+              logs::log(logs::error, "[LOBBY] Video producer thread unknown exception");
+            }
           }).detach();
 
           auto w_display_ready = on_ready->get_future().then(
@@ -135,25 +141,31 @@ setup_lobbies_handlers(const immer::box<state::AppState> &app_state,
                   std::filesystem::create_directories(full_path);
 
                   std::thread([=]() {
-                    start_runner(lobby->runner,
-                                 lobby->plugged_devices_queue,
-                                 immer::box<RunnerArgs>{RunnerArgs{
-                                     .session_id = lobby->id,
-                                     .video_settings = lobby_settings->video_settings,
-                                     .wayland_display = lobby->wayland_display->load(),
-                                     .audio_server = audio_server,
-                                     .audio_sink = lobby->audio_sink->load(),
-                                     .host = host,
-                                     .app_local_state_folder = full_path.string(),
-                                     .app_host_state_folder = std::filesystem::path(host->host_base_state_folder) /
-                                                              lobby_settings->runner_state_folder,
-                                     .xdg_runtime_dir = runtime_dir,
-                                     .client_settings = lobby_settings->client_settings}});
-                    // Runner process ended, stop the lobby
-                    lobby->wayland_display->store(nullptr);
+                    try {
+                      start_runner(lobby->runner,
+                                   lobby->plugged_devices_queue,
+                                   immer::box<RunnerArgs>{RunnerArgs{
+                                       .session_id = lobby->id,
+                                       .video_settings = lobby_settings->video_settings,
+                                       .wayland_display = lobby->wayland_display->load(),
+                                       .audio_server = audio_server,
+                                       .audio_sink = lobby->audio_sink->load(),
+                                       .host = host,
+                                       .app_local_state_folder = full_path.string(),
+                                       .app_host_state_folder = std::filesystem::path(host->host_base_state_folder) /
+                                                                lobby_settings->runner_state_folder,
+                                       .xdg_runtime_dir = runtime_dir,
+                                       .client_settings = lobby_settings->client_settings}});
+                      // Runner process ended, stop the lobby
+                      lobby->wayland_display->store(nullptr);
 
-                    ev_bus->fire_event<immer::box<events::StopLobbyEvent>>(
-                        immer::box<events::StopLobbyEvent>{events::StopLobbyEvent{.lobby_id = lobby->id}});
+                      ev_bus->fire_event<immer::box<events::StopLobbyEvent>>(
+                          immer::box<events::StopLobbyEvent>{events::StopLobbyEvent{.lobby_id = lobby->id}});
+                    } catch (const std::exception &e) {
+                      logs::log(logs::error, "[LOBBY] Runner thread exception: {}", e.what());
+                    } catch (...) {
+                      logs::log(logs::error, "[LOBBY] Runner thread unknown exception");
+                    }
                   }).detach();
                 }
 
@@ -174,12 +186,18 @@ setup_lobbies_handlers(const immer::box<state::AppState> &app_state,
 
             // Start Gstreamer producer pipeline
             std::thread([lobby, audio_server = audio_server->server, ev_bus, channel_count]() {
-              auto sink_name = fmt::format("virtual_sink_{}.monitor", lobby->id);
-              streaming::start_audio_producer(lobby->id,
-                                              ev_bus,
-                                              channel_count,
-                                              sink_name,
-                                              audio::get_server_name(audio_server));
+              try {
+                auto sink_name = fmt::format("virtual_sink_{}.monitor", lobby->id);
+                streaming::start_audio_producer(lobby->id,
+                                                ev_bus,
+                                                channel_count,
+                                                sink_name,
+                                                audio::get_server_name(audio_server));
+              } catch (const std::exception &e) {
+                logs::log(logs::error, "[LOBBY] Audio producer thread exception: {}", e.what());
+              } catch (...) {
+                logs::log(logs::error, "[LOBBY] Audio producer thread unknown exception");
+              }
             }).detach();
           }
         }
