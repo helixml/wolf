@@ -18,8 +18,7 @@ default = []
 static = []
 capi = []
 doc = []
-# cuda feature must forward to wayland-display-core to enable CUDA buffer support
-cuda = ["wayland-display-core/cuda"]
+cuda = []
 
 [dependencies]
 gst.workspace = true

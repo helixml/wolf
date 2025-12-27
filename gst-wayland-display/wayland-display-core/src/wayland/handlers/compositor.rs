@@ -1,6 +1,6 @@
 use smithay::{
     backend::renderer::utils::on_commit_buffer_handler,
-    delegate_compositor,
+    delegate_compositor, delegate_single_pixel_buffer,
     desktop::PopupKind,
     reexports::{
         wayland_protocols::xdg::shell::server::xdg_toplevel::State as XdgState,
@@ -139,3 +139,4 @@ impl CompositorHandler for State {
 }
 
 delegate_compositor!(State);
+delegate_single_pixel_buffer!(State);

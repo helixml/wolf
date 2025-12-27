@@ -8,6 +8,7 @@ use smithay::backend::renderer::gles::GlesRenderer;
 use smithay::reexports::gbm::BufferObjectFlags;
 use smithay::wayland::dmabuf::DmabufFeedbackBuilder;
 use smithay::wayland::presentation::Refresh;
+use smithay::wayland::single_pixel_buffer::SinglePixelBufferState;
 use smithay::{
     backend::{
         allocator::{Fourcc, dmabuf::Dmabuf},
@@ -137,6 +138,7 @@ pub struct State {
     pub shm_state: ShmState,
     viewporter_state: ViewporterState,
     cursor_event_count: i32,
+    pub single_pixel_buffer_state: SinglePixelBufferState,
 }
 
 impl State {
@@ -159,6 +161,7 @@ impl State {
         let mut seat_state = SeatState::new();
         let shell_state = XdgShellState::new::<State>(&dh);
         let viewporter_state = ViewporterState::new::<State>(&dh);
+        let single_pixel_buffer_state = SinglePixelBufferState::new::<Self>(&dh);
 
         let render_node: Option<DrmNode> = render_target.clone().into();
 
@@ -253,6 +256,7 @@ impl State {
             shell_state,
             shm_state,
             viewporter_state,
+            single_pixel_buffer_state,
         }
     }
 }
@@ -481,13 +485,14 @@ pub(crate) fn init(
                                     if rendered_damage {
                                         output_presentation_feedback.presented(
                                             state.clock.now(),
-                                            Refresh::Fixed(Duration::from_millis(
-                                                output
-                                                    .current_mode()
-                                                    .map(|mode| mode.refresh)
-                                                    .unwrap_or_default()
-                                                    as u64,
-                                            )),
+                                            output
+                                                .current_mode()
+                                                .map(|mode| {
+                                                    Refresh::fixed(Duration::from_secs_f64(
+                                                        1_000f64 / mode.refresh as f64,
+                                                    ))
+                                                })
+                                                .unwrap_or(Refresh::Unknown),
                                             0,
                                             wp_presentation_feedback::Kind::Vsync,
                                         );
@@ -680,39 +685,7 @@ pub(crate) fn init(
         })
         .unwrap();
 
-    // Try to create wayland socket, with cleanup on failure
-    let source = match ListeningSocketSource::new_auto() {
-        Ok(source) => source,
-        Err(e) => {
-            tracing::warn!(?e, "Failed to create wayland socket, attempting cleanup of stale sockets...");
-            // Clean up stale wayland sockets in XDG_RUNTIME_DIR
-            // These can accumulate when lobby creation fails (timeout/panic) without proper cleanup
-            if let Ok(runtime_dir) = std::env::var("XDG_RUNTIME_DIR") {
-                if let Ok(entries) = std::fs::read_dir(&runtime_dir) {
-                    let mut cleaned = 0;
-                    for entry in entries.flatten() {
-                        let name = entry.file_name();
-                        let name_str = name.to_string_lossy();
-                        if name_str.starts_with("wayland-") {
-                            let path = entry.path();
-                            // Try to remove both sockets and lock files
-                            if path.is_dir() || name_str.ends_with(".lock") || !name_str.contains('.') {
-                                if std::fs::remove_file(&path).is_ok() || std::fs::remove_dir_all(&path).is_ok() {
-                                    cleaned += 1;
-                                }
-                            }
-                        }
-                    }
-                    if cleaned > 0 {
-                        tracing::info!(cleaned, "Cleaned up stale wayland sockets, retrying...");
-                    }
-                }
-            }
-            // Retry after cleanup
-            ListeningSocketSource::new_auto()
-                .expect("Failed to create wayland socket even after cleanup")
-        }
-    };
+    let source = ListeningSocketSource::new_auto().unwrap();
     let socket_name = source.socket_name().to_string_lossy().into_owned();
     tracing::info!(?socket_name, "Listening on wayland socket.");
     event_loop
