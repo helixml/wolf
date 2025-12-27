@@ -37,12 +37,16 @@ ARG RUST_VERSION=1.91.1
 ENV RUST_VERSION=$RUST_VERSION
 RUN rustup install $RUST_VERSION && rustup default $RUST_VERSION
 
-# Copy and build gst-wayland-display from local source
-# (Fixed to support case-insensitive SOFTWARE render node for llvmpipe)
+# Clone and build gst-wayland-display from upstream
+# Includes PR #24: wp_single_pixel_buffer_manager_v1 support (enables KDE Plasma)
 # IMPORTANT: Enable 'cuda' feature for zero-copy NVIDIA GPU pipeline
 #   - Without cuda: waylanddisplaysrc outputs DMABuf only, needs cudaupload in pipeline
 #   - With cuda: waylanddisplaysrc can output video/x-raw(memory:CUDAMemory) directly
-COPY gst-wayland-display /tmp/gst-wayland-display
+# Pin to fd620860f260f051fd731bb9feaac8632cbe3c9e (Merge PR #24: wp_single_pixel_buffer_manager_v1 for KDE)
+WORKDIR /tmp
+RUN git clone https://github.com/games-on-whales/gst-wayland-display.git && \
+    cd gst-wayland-display && \
+    git checkout fd620860f260f051fd731bb9feaac8632cbe3c9e
 WORKDIR /tmp/gst-wayland-display
 RUN cargo install cargo-c && \
     cargo cinstall -p gst-plugin-wayland-display --features cuda --prefix=/usr/local/lib/x86_64-linux-gnu/ --libdir=/usr/local/lib/x86_64-linux-gnu/gstreamer-1.0
