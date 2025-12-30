@@ -281,15 +281,128 @@ Before full implementation, validate with:
 
 ---
 
-## Input Handling (Separate Concern)
+## Input Handling (Detailed Analysis)
 
-Mouse/keyboard via [RemoteDesktop Portal](https://flatpak.github.io/xdg-desktop-portal/docs/#gdbus-org.freedesktop.portal.RemoteDesktop):
-- Separate from ScreenCast but can share session
-- Uses D-Bus for input injection
-- Adds ~1-5ms latency vs direct uinput
-- Required for GNOME 49+
+### Wolf's Current Approach: uinput Virtual Devices
 
-This is a separate implementation task from the video path.
+Wolf currently handles input via Linux uinput:
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│  Host (Wolf)                                                     │
+│  ├── uinput/mouse.cpp      → /dev/uinput → virtual mouse        │
+│  ├── uinput/keyboard.cpp   → /dev/uinput → virtual keyboard     │
+│  ├── uinput/joypad.cpp     → /dev/uinput → virtual gamepad      │
+│  ├── uinput/touchscreen.cpp → /dev/uinput → virtual touchscreen │
+│  └── uinput/pentablet.cpp  → /dev/uinput → virtual pen tablet   │
+└─────────────────────────────────────────────────────────────────┘
+                            │
+                     (devices passed to container)
+                            ↓
+┌─────────────────────────────────────────────────────────────────┐
+│  Container (Sway/GNOME)                                          │
+│  └── Desktop reads from /dev/input/event* devices               │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+**Advantages:**
+- Low latency (direct kernel interface)
+- Works with any desktop (Sway, XFCE, GNOME, KDE)
+- Full device emulation (pressure sensitivity, multi-touch, etc.)
+- Wolf controls the entire stack
+
+**Requirements:**
+- Container must have access to `/dev/uinput` and created `/dev/input/event*` devices
+- Works via device passthrough or fake-udev
+
+### Option A: Keep Using uinput (Recommended)
+
+With PipeWire ScreenCast, we capture video via the portal but **continue using uinput for input**.
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│  Host (Wolf)                                                     │
+│  ├── Video: PipeWire ScreenCast ← GNOME Shell                   │
+│  └── Input: uinput → /dev/input/* → GNOME Shell                 │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+**Why this works:**
+- GNOME Shell reads from `/dev/input/*` just like Sway does
+- No code changes needed for input handling
+- uinput is independent of display server protocol
+
+**Requirements:**
+- Container has CAP_SYS_ADMIN or appropriate uinput permissions
+- fake-udev or proper device visibility in container
+
+### Option B: RemoteDesktop Portal
+
+The XDG RemoteDesktop Portal provides an alternative:
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│  Host (Wolf)                                                     │
+│  ├── ashpd::desktop::remote_desktop::RemoteDesktop              │
+│  │   ├── notify_pointer_motion(dx, dy)                          │
+│  │   ├── notify_pointer_button(button, state)                   │
+│  │   ├── notify_keyboard_keysym(keysym, state)                  │
+│  │   └── notify_touch_down/motion/up(...)                       │
+│  └── D-Bus → org.freedesktop.portal.RemoteDesktop               │
+└─────────────────────────────────────────────────────────────────┘
+                            │
+                     (D-Bus IPC)
+                            ↓
+┌─────────────────────────────────────────────────────────────────┐
+│  Container (GNOME/Mutter)                                        │
+│  └── xdg-desktop-portal-gnome → Mutter input injection          │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+**Advantages:**
+- No elevated permissions needed
+- Integrates with ScreenCast session (can share portal session)
+- "Official" Wayland way for remote input
+
+**Disadvantages:**
+- Higher latency (+1-5ms due to D-Bus IPC)
+- Limited device emulation (no pressure sensitivity, no gamepad)
+- Only works with portals-aware desktops (GNOME, KDE Plasma)
+- Would require rewriting Wolf's input handling
+
+### Comparison
+
+| Aspect | uinput (Current) | RemoteDesktop Portal |
+|--------|------------------|---------------------|
+| Latency | ~0.5-1ms | ~2-5ms |
+| Permissions | CAP_SYS_ADMIN | None (D-Bus) |
+| Gamepad support | ✅ Full | ❌ Not supported |
+| Pressure sensitivity | ✅ Full | ❌ Not supported |
+| Multi-touch | ✅ Full | ✅ Basic |
+| Code changes | None | Major rewrite |
+| Desktop agnostic | ✅ Any X11/Wayland | ❌ Portal-aware only |
+
+### Recommendation: Keep uinput
+
+**For Wolf's use case, uinput remains the better choice:**
+
+1. **Wolf controls the container environment** - We can grant necessary permissions
+2. **Gaming requires low latency** - D-Bus IPC adds measurable delay
+3. **Full device support matters** - Gamepads are essential for game streaming
+4. **No code changes needed** - Input handling already works
+
+**Implementation:** No changes needed for input. The PipeWire ScreenCast integration only affects video capture. Input continues through existing uinput path.
+
+### If RemoteDesktop Portal is Required Later
+
+If a future use case requires RemoteDesktop Portal (e.g., unprivileged containers):
+
+1. Use [ashpd](https://docs.rs/ashpd/latest/ashpd/desktop/remote_desktop/index.html) crate for Rust bindings
+2. Create `RemoteDesktop` session alongside `ScreenCast` session
+3. Translate Moonlight input events → Portal notify methods
+4. Accept higher latency and reduced device support
+
+This would be a separate implementation task and is **not recommended** for the initial GNOME 49 integration.
 
 ---
 
