@@ -28,6 +28,36 @@ use waylanddisplaycore::utils::allocator::cuda::{
     init_cuda, CUDAContext, CUDAImage, EGLImage, CUDABufferPool, GstCudaContext,
     CAPS_FEATURE_MEMORY_CUDA_MEMORY, gst_cuda_handle_context_query_wrapped,
 };
+// DRM types from waylanddisplaycore (which re-exports from smithay)
+use waylanddisplaycore::Fourcc as DrmFourcc;
+
+/// Convert DRM fourcc to GStreamer VideoFormat.
+/// This is the inverse of waylanddisplaycore's gst_video_format_name_to_drm_fourcc().
+/// Falls back to Bgra if the format is unknown (matches waylanddisplaycore's Bgrx fallback).
+fn drm_fourcc_to_video_format(fourcc: DrmFourcc) -> VideoFormat {
+    // Try GStreamer's built-in conversion first
+    match VideoFormat::from_fourcc(fourcc as u32) {
+        VideoFormat::Unknown => {
+            // Fallback mapping for common formats that GStreamer might not recognize directly
+            // These match the inverse of waylanddisplaycore's gst_video_format_name_to_drm_fourcc()
+            match fourcc {
+                DrmFourcc::Argb8888 => VideoFormat::Bgra,
+                DrmFourcc::Abgr8888 => VideoFormat::Rgba,
+                DrmFourcc::Xrgb8888 => VideoFormat::Bgrx,
+                DrmFourcc::Xbgr8888 => VideoFormat::Rgbx,
+                DrmFourcc::Rgba8888 => VideoFormat::Abgr,
+                DrmFourcc::Bgra8888 => VideoFormat::Argb,
+                DrmFourcc::Rgbx8888 => VideoFormat::Xbgr,
+                DrmFourcc::Bgrx8888 => VideoFormat::Xrgb,
+                _ => {
+                    tracing::warn!("Unknown DRM fourcc {:?}, falling back to Bgra", fourcc);
+                    VideoFormat::Bgra
+                }
+            }
+        }
+        format => format,
+    }
+}
 
 static CAT: Lazy<gst::DebugCategory> = Lazy::new(|| {
     gst::DebugCategory::new("pipewirezerocopysrc", gst::DebugColorFlags::empty(), Some("PipeWire zero-copy source"))
@@ -371,12 +401,16 @@ impl PushSrcImpl for PipeWireZeroCopySrc {
                 let cuda_image = CUDAImage::from(egl_image, &cuda_ctx)
                     .map_err(|e| { gst::error!(CAT, imp = self, "CUDAImage: {}", e); gst::FlowError::Error })?;
 
-                // Create VideoInfoDmaDrm using the new() constructor
-                let base_info = VideoInfo::builder(VideoFormat::Bgra, dmabuf.width() as u32, dmabuf.height() as u32)
+                // Derive VideoFormat from DMA-BUF's fourcc (matches waylanddisplaycore pattern)
+                let drm_format = dmabuf.format();
+                let video_format = drm_fourcc_to_video_format(drm_format.code);
+                gst::debug!(CAT, imp = self, "DMA-BUF format: {:?} -> {:?}", drm_format.code, video_format);
+
+                let base_info = VideoInfo::builder(video_format, dmabuf.width() as u32, dmabuf.height() as u32)
                     .build()
                     .map_err(|_| gst::FlowError::Error)?;
-                let fourcc: u32 = dmabuf.format().code as u32;
-                let modifier: u64 = dmabuf.format().modifier.into();
+                let fourcc: u32 = drm_format.code as u32;
+                let modifier: u64 = drm_format.modifier.into();
                 let video_info = VideoInfoDmaDrm::new(base_info, fourcc, modifier);
 
                 cuda_image.to_gst_buffer(video_info, &cuda_ctx, state.buffer_pool.as_ref())
@@ -386,8 +420,17 @@ impl PushSrcImpl for PipeWireZeroCopySrc {
                 // SHM fallback - mmap and copy
                 self.dmabuf_to_system(&dmabuf)?
             }
-            FrameData::Shm { data, width, height, stride, .. } => {
-                self.create_system_buffer(&data, width, height, stride)?
+            FrameData::Shm { data, width, height, stride, format } => {
+                // Try to convert format (fourcc) to VideoFormat, fall back to Bgra
+                let video_format = if format != 0 {
+                    match DrmFourcc::try_from(format) {
+                        Ok(fourcc) => drm_fourcc_to_video_format(fourcc),
+                        Err(_) => VideoFormat::Bgra,
+                    }
+                } else {
+                    VideoFormat::Bgra
+                };
+                self.create_system_buffer(&data, width, height, stride, video_format)?
             }
         };
 
@@ -410,10 +453,12 @@ impl PipeWireZeroCopySrc {
             libc::munmap(ptr, size);
         }
 
-        self.create_system_buffer(&data, dmabuf.width() as u32, dmabuf.height() as u32, dmabuf.strides().next().unwrap_or(0))
+        // Derive format from DMA-BUF's fourcc
+        let video_format = drm_fourcc_to_video_format(dmabuf.format().code);
+        self.create_system_buffer(&data, dmabuf.width() as u32, dmabuf.height() as u32, dmabuf.strides().next().unwrap_or(0), video_format)
     }
 
-    fn create_system_buffer(&self, data: &[u8], width: u32, height: u32, stride: u32) -> Result<gst::Buffer, gst::FlowError> {
+    fn create_system_buffer(&self, data: &[u8], width: u32, height: u32, stride: u32, format: VideoFormat) -> Result<gst::Buffer, gst::FlowError> {
         let mut buffer = gst::Buffer::with_size(data.len()).map_err(|_| gst::FlowError::Error)?;
         {
             let buf = buffer.get_mut().unwrap();
@@ -421,7 +466,7 @@ impl PipeWireZeroCopySrc {
         }
         {
             let buf = buffer.get_mut().unwrap();
-            gst_video::VideoMeta::add_full(buf, gst_video::VideoFrameFlags::empty(), VideoFormat::Bgra, width, height, &[0], &[stride as i32]).map_err(|_| gst::FlowError::Error)?;
+            gst_video::VideoMeta::add_full(buf, gst_video::VideoFrameFlags::empty(), format, width, height, &[0], &[stride as i32]).map_err(|_| gst::FlowError::Error)?;
         }
         Ok(buffer)
     }
