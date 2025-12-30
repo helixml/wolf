@@ -184,10 +184,11 @@ void start_pipewire_video_producer(const std::string &session_id,
   // CUDA buffer sharing issues with multiple viewers in lobby mode.
 
   // Set PIPEWIRE_REMOTE to the shared socket path
-  // pipewire_socket_path is already the directory containing the PipeWire socket
-  // e.g., /wolf-state/agent-xxx/pipewire, and the socket is pipewire-0 inside it
+  // pipewire_socket_path is the runner_state_folder_path (e.g., /wolf-state/agent-xxx)
+  // The container's XDG_RUNTIME_DIR is bind-mounted to <runner_state_folder_path>/pipewire/
+  // So the PipeWire socket is at <runner_state_folder_path>/pipewire/pipewire-0
   // PIPEWIRE_REMOTE is the standard env var for connecting to a specific socket
-  auto pipewire_socket = std::filesystem::path(pipewire_socket_path) / "pipewire-0";
+  auto pipewire_socket = std::filesystem::path(pipewire_socket_path) / "pipewire" / "pipewire-0";
   setenv("PIPEWIRE_REMOTE", pipewire_socket.c_str(), 1);
   logs::log(logs::info, "[GSTREAMER] PIPEWIRE_REMOTE set to: {}", pipewire_socket.string());
 
