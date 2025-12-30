@@ -397,7 +397,9 @@ parse_apps(const std::vector<BaseApp> &apps,
                         .start_audio_server = start_audio,
                         .runner = get_runner(app.runner, ev_bus),
                         .video_producer_source = video_producer_source,
-                        .audio_producer_source = audio_producer_source}};
+                        .audio_producer_source = audio_producer_source,
+                        .video_source_mode = app.video_source_mode.value_or("wayland"),
+                        .pipewire_node_id = app.pipewire_node_id}};
       }) |                                                  //
       ranges::to<immer::vector<immer::box<events::App>>>(); //
 

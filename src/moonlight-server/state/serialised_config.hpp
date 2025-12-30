@@ -107,6 +107,18 @@ struct BaseApp {
   std::optional<BaseAppAudioOverride> audio;
   std::optional<bool> start_virtual_compositor;
   std::optional<bool> start_audio_server;
+  /**
+   * Video source mode: "wayland" (default) or "pipewire"
+   * - wayland: Use waylanddisplaysrc (nested compositor, for Sway/KDE)
+   * - pipewire: Use pipewiresrc (for GNOME 49+ which doesn't support nested mode)
+   */
+  std::optional<std::string> video_source_mode;
+  /**
+   * PipeWire node ID for pipewiresrc mode.
+   * Only used when video_source_mode = "pipewire".
+   * Can be set dynamically by the container via API.
+   */
+  std::optional<unsigned int> pipewire_node_id;
   rfl::TaggedUnion<"type", AppCMD, AppDocker> runner =
       AppCMD{}; // We have to provide a default or rfl::DefaultIfMissing will fail
 };

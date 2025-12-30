@@ -93,6 +93,20 @@ struct App {
    * This allows lobby switching to work for placeholder apps.
    */
   std::optional<std::string> audio_producer_source;
+
+  /**
+   * Video source mode: "wayland" (default) or "pipewire"
+   * - wayland: Use waylanddisplaysrc (nested compositor, for Sway/KDE)
+   * - pipewire: Use pipewiresrc (for GNOME 49+ which doesn't support nested mode)
+   */
+  std::string video_source_mode = "wayland";
+
+  /**
+   * PipeWire node ID for pipewiresrc mode.
+   * Only used when video_source_mode = "pipewire".
+   * Container sets this dynamically via API after creating ScreenCast session.
+   */
+  std::optional<unsigned int> pipewire_node_id;
 };
 
 struct Profile {

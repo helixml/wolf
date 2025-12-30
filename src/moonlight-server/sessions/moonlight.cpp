@@ -96,7 +96,61 @@ setup_moonlight_handlers(const immer::box<state::AppState> &app_state,
         std::shared_ptr<boost::promise<streaming::WaylandDisplayReady>> on_ready =
             std::make_shared<boost::promise<streaming::WaylandDisplayReady>>();
 
-        if (session->app->start_virtual_compositor) {
+        // Check video source mode: "wayland" (default) or "pipewire" (GNOME 49+)
+        bool use_pipewire_source = session->app->video_source_mode == "pipewire" &&
+                                   session->app->pipewire_node_id.has_value();
+
+        if (use_pipewire_source) {
+          // PipeWire mode: GNOME 49+ uses ScreenCast via PipeWire instead of nested Wayland
+          logs::log(logs::info, "[STREAM_SESSION] Using PipeWire video source (GNOME 49+ mode), node_id={}",
+                    session->app->pipewire_node_id.value());
+
+          std::thread([session, on_ready, gst_context = app_state->gst_context]() {
+            try {
+              streaming::start_pipewire_video_producer(
+                  std::to_string(session->session_id),
+                  session->app->pipewire_node_id.value(),
+                  session->app->video_producer_buffer_caps,
+                  session->app->render_node,
+                  {.width = session->display_mode.width,
+                   .height = session->display_mode.height,
+                   .refreshRate = session->display_mode.refreshRate},
+                  gst_context,
+                  on_ready,
+                  session->event_bus);
+            } catch (const std::exception &e) {
+              logs::log(logs::error, "[STREAM_SESSION] PipeWire video producer thread exception: {}", e.what());
+            } catch (...) {
+              logs::log(logs::error, "[STREAM_SESSION] PipeWire video producer thread unknown exception");
+            }
+          }).detach();
+
+          // Still need virtual devices for input
+          auto mouse = input::Mouse::create();
+          if (!mouse) {
+            logs::log(logs::error, "Failed to create mouse: {}", mouse.getErrorMessage());
+          } else {
+            auto mouse_ptr = input::Mouse(std::move(*mouse));
+            devices_q->push(immer::box<events::PlugDeviceEvent>(
+                events::PlugDeviceEvent{.session_id = std::to_string(session->session_id),
+                                        .udev_events = mouse_ptr.get_udev_events(),
+                                        .udev_hw_db_entries = mouse_ptr.get_udev_hw_db_entries()}));
+            session->mouse->emplace(std::move(mouse_ptr));
+          }
+
+          auto keyboard = input::Keyboard::create();
+          if (!keyboard) {
+            logs::log(logs::error, "Failed to create keyboard: {}", keyboard.getErrorMessage());
+          } else {
+            auto keyboard_ptr = input::Keyboard(std::move(*keyboard));
+            devices_q->push(immer::box<events::PlugDeviceEvent>(
+                events::PlugDeviceEvent{.session_id = std::to_string(session->session_id),
+                                        .udev_events = keyboard_ptr.get_udev_events(),
+                                        .udev_hw_db_entries = keyboard_ptr.get_udev_hw_db_entries()}));
+            session->keyboard->emplace(std::move(keyboard_ptr));
+          }
+        } else if (session->app->start_virtual_compositor) {
+          // Wayland mode: Use nested Wayland compositor (for Sway/KDE)
           logs::log(logs::debug, "[STREAM_SESSION] Create wayland compositor");
 
           // Start Gstreamer producer pipeline

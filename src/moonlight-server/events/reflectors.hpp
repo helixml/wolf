@@ -58,6 +58,11 @@ template <> struct Reflector<events::App> {
     std::optional<bool> start_virtual_compositor;
     std::optional<bool> start_audio_server;
     Reflector<events::Runner>::ReflType runner;
+
+    // Video source mode: "wayland" (default) or "pipewire"
+    std::optional<std::string> video_source_mode;
+    // PipeWire node ID for pipewiresrc mode
+    std::optional<unsigned int> pipewire_node_id;
   };
 
   static ReflType from(const events::App &v) {
@@ -73,7 +78,9 @@ template <> struct Reflector<events::App> {
             .opus_gst_pipeline = v.opus_gst_pipeline,
             .start_virtual_compositor = v.start_virtual_compositor,
             .start_audio_server = v.start_audio_server,
-            .runner = v.runner->serialize()};
+            .runner = v.runner->serialize(),
+            .video_source_mode = v.video_source_mode,
+            .pipewire_node_id = v.pipewire_node_id};
   }
 
   static events::App to(const ReflType &app, const std::shared_ptr<events::EventBusType> &ev_bus) {
@@ -89,6 +96,8 @@ template <> struct Reflector<events::App> {
         .start_virtual_compositor = app.start_virtual_compositor.value_or(true),
         .start_audio_server = app.start_audio_server.value_or(true),
         .runner = runner,
+        .video_source_mode = app.video_source_mode.value_or("wayland"),
+        .pipewire_node_id = app.pipewire_node_id,
     };
   }
 };

@@ -81,6 +81,30 @@ void start_test_audio_producer(const std::string &session_id,
                                int channel_count,
                                std::shared_ptr<events::EventBusType> event_bus);
 
+/**
+ * Start a PipeWire video producer pipeline for GNOME 49+ desktops.
+ * Creates: pipewiresrc path={node_id} ! [gpu_upload] ! interpipesink name={session_id}_video
+ *
+ * GNOME 49 removed --nested mode for Mutter. Instead, GNOME runs with --devkit (Mutter SDK)
+ * which produces frames via PipeWire ScreenCast API. Wolf reads these frames directly using
+ * pipewiresrc, bypassing the need for a nested Wayland compositor.
+ *
+ * The container must:
+ * 1. Start gnome-shell with ScreenCast session (creates PipeWire node)
+ * 2. Report the PipeWire node ID back to Wolf
+ * 3. Wolf starts this pipeline to read frames from the container's PipeWire
+ *
+ * This approach supports DMA-BUF zero-copy if the GPU driver supports it.
+ */
+void start_pipewire_video_producer(const std::string &session_id,
+                                   unsigned int pipewire_node_id,
+                                   const std::string &buffer_caps,
+                                   const std::string &render_node,
+                                   const wolf::core::virtual_display::DisplayMode &display_mode,
+                                   std::shared_ptr<immer::atom<gst_video_context::gst_context_ptr>> video_context,
+                                   std::shared_ptr<boost::promise<WaylandDisplayReady>> on_ready,
+                                   std::shared_ptr<events::EventBusType> event_bus);
+
 void start_streaming_video(immer::box<events::VideoSession> video_session,
                            const std::shared_ptr<events::EventBusType> &event_bus,
                            std::string client_ip,

@@ -164,6 +164,90 @@ void start_video_producer(const std::string &session_id,
   });
 }
 
+void start_pipewire_video_producer(const std::string &session_id,
+                                   unsigned int pipewire_node_id,
+                                   const std::string &buffer_caps,
+                                   const std::string &render_node,
+                                   const wolf::core::virtual_display::DisplayMode &display_mode,
+                                   std::shared_ptr<immer::atom<gst_video_context::gst_context_ptr>> video_context,
+                                   std::shared_ptr<boost::promise<WaylandDisplayReady>> on_ready,
+                                   std::shared_ptr<events::EventBusType> event_bus) {
+  // Build pipewiresrc pipeline that reads from container's PipeWire ScreenCast
+  // Similar to start_video_producer but uses pipewiresrc instead of waylanddisplaysrc
+  //
+  // The container runs GNOME with ScreenCast session which produces frames via PipeWire.
+  // Wolf reads these frames directly using pipewiresrc, bypassing the nested compositor.
+  //
+  // GPU upload pipeline mirrors waylanddisplaysrc format for encoder compatibility:
+  // - NVIDIA: cudaupload ! video/x-raw(memory:CUDAMemory), format=NV12
+  // - AMD/Intel: vapostproc ! video/x-raw(memory:DMABuf), drm-format=NV12
+
+  std::string gpu_upload;
+  if (buffer_caps.find("CUDAMemory") != std::string::npos) {
+    // NVIDIA: upload to CUDA memory
+    gpu_upload = "cudaupload ! video/x-raw(memory:CUDAMemory), format=NV12";
+    logs::log(logs::info, "[GSTREAMER] PipeWire producer using CUDA memory upload");
+  } else if (buffer_caps.find("DMABuf") != std::string::npos) {
+    // AMD/Intel: use VA-API postprocessor, output DMABuf
+    gpu_upload = fmt::format("vapostproc ! video/x-raw(memory:DMABuf), drm-format=NV12");
+    logs::log(logs::info, "[GSTREAMER] PipeWire producer using DMABuf memory upload");
+  } else {
+    // CPU fallback - no GPU upload
+    gpu_upload = "videoconvert";
+    logs::log(logs::info, "[GSTREAMER] PipeWire producer using CPU memory (no GPU upload)");
+  }
+
+  auto pipeline = fmt::format(
+      "pipewiresrc path={node_id} do-timestamp=true ! "
+      "video/x-raw, width={width}, height={height}, framerate={fps}/1 ! "
+      "{gpu_upload} ! "
+      "interpipesink sync=true async=false name={session_id}_video max-buffers=5",
+      fmt::arg("node_id", pipewire_node_id),
+      fmt::arg("width", display_mode.width),
+      fmt::arg("height", display_mode.height),
+      fmt::arg("fps", display_mode.refreshRate),
+      fmt::arg("gpu_upload", gpu_upload),
+      fmt::arg("session_id", session_id));
+
+  logs::log(logs::debug, "[GSTREAMER] Starting PipeWire video producer: {}", pipeline);
+
+  auto bus_data_ptr =
+      std::make_shared<GstBusData>(GstBusData{.on_ready = std::move(on_ready), .wayland_plugin = nullptr});
+  std::shared_ptr<NeedContextData> ctx_data_ptr =
+      std::make_shared<NeedContextData>(NeedContextData{.device_path = render_node, .gst_context = video_context});
+
+  run_pipeline(pipeline, [=](auto pipeline, auto loop) {
+    logs::log(logs::debug, "Setting up pipewiresrc");
+
+    auto bus = gst_pipeline_get_bus(GST_PIPELINE(pipeline.get()));
+    gst_bus_set_sync_handler(bus, bus_sync_handler, ctx_data_ptr.get(), nullptr);
+    gst_object_unref(bus);
+
+    // Signal ready immediately since pipewiresrc doesn't need Wayland socket setup
+    if (bus_data_ptr->on_ready) {
+      bus_data_ptr->on_ready->set_value({});
+    }
+
+    auto stop_handler = event_bus->register_handler<immer::box<events::StopStreamEvent>>(
+        [session_id, loop](const immer::box<events::StopStreamEvent> &ev) {
+          if (std::to_string(ev->session_id) == session_id) {
+            logs::log(logs::debug, "[GSTREAMER] Stopping PipeWire video producer: {} (quitting main loop)", session_id);
+            g_main_loop_quit(loop.get());
+          }
+        });
+
+    auto stop_lobby_handler = event_bus->register_handler<immer::box<events::StopLobbyEvent>>(
+        [session_id, loop](const immer::box<events::StopLobbyEvent> &ev) {
+          if (ev->lobby_id == session_id) {
+            logs::log(logs::debug, "[GSTREAMER] Stopping PipeWire video producer: {} (quitting main loop)", session_id);
+            g_main_loop_quit(loop.get());
+          }
+        });
+
+    return immer::array<immer::box<events::EventBusHandlers>>{std::move(stop_handler), std::move(stop_lobby_handler)};
+  });
+}
+
 void start_audio_producer(const std::string &session_id,
                           const std::shared_ptr<events::EventBusType> &event_bus,
                           int channel_count,
