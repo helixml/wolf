@@ -533,6 +533,36 @@ void UnixSocketServer::endpoint_LobbyStop(const wolf::api::HTTPRequest &req, std
   }
 }
 
+void UnixSocketServer::endpoint_LobbySetPipeWireNodeId(const wolf::api::HTTPRequest &req, std::shared_ptr<UnixSocket> socket) {
+  auto request = rfl::json::read<SetPipeWireNodeIdRequest>(req.body);
+  if (request) {
+    // Check if lobby exists
+    auto lobbies = this->state_->app_state->lobbies->load();
+    auto lobby = state::get_lobby_by_id(lobbies.get(), request->lobby_id);
+    if (!lobby) {
+      send_http(socket, 500, rfl::json::write(GenericErrorResponse{.error = "Lobby not found"}));
+      return;
+    }
+
+    // Check if lobby is in pipewire mode
+    if (lobby->video_settings.video_source_mode != "pipewire") {
+      send_http(socket, 500, rfl::json::write(GenericErrorResponse{.error = "Lobby is not in pipewire mode"}));
+      return;
+    }
+
+    logs::log(logs::info, "[API] Setting PipeWire node ID {} for lobby {}", request->node_id, request->lobby_id);
+
+    // Fire event to trigger pipewiresrc video producer startup
+    state_->app_state->event_bus->fire_event(immer::box<events::SetPipeWireNodeIdEvent>(
+        events::SetPipeWireNodeIdEvent{.lobby_id = request->lobby_id, .node_id = request->node_id}));
+
+    send_http(socket, 200, rfl::json::write(GenericSuccessResponse{}));
+  } else {
+    logs::log(logs::warning, "[API] Invalid SetPipeWireNodeIdRequest: {} - {}", req.body, request.error().what());
+    send_http(socket, 500, rfl::json::write(GenericErrorResponse{.error = request.error().what()}));
+  }
+}
+
 void UnixSocketServer::endpoint_RunnerStart(const wolf::api::HTTPRequest &req, std::shared_ptr<UnixSocket> socket) {
   auto event = rfl::json::read<RunnerStartRequest>(req.body);
   if (event) {

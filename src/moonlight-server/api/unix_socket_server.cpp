@@ -291,6 +291,19 @@ UnixSocketServer::UnixSocketServer(boost::asio::io_context &io_context,
           .handler = [this](auto req, auto socket) { endpoint_LobbyStop(req, socket); },
       });
 
+  state_->http.add(
+      HTTPMethod::POST,
+      "/api/v1/lobbies/set-pipewire-node-id",
+      {
+          .summary = "Set PipeWire ScreenCast node ID for a lobby (GNOME 49+)",
+          .description = "Container calls this after creating a ScreenCast session to report the PipeWire node ID. "
+                         "Wolf will then start the pipewiresrc video producer for the lobby.",
+          .request_description = APIDescription{.json_schema = rfl::json::to_schema<SetPipeWireNodeIdRequest>()},
+          .response_description = {{200, {.json_schema = rfl::json::to_schema<GenericSuccessResponse>()}},
+                                   {500, {.json_schema = rfl::json::to_schema<GenericErrorResponse>()}}},
+          .handler = [this](auto req, auto socket) { endpoint_LobbySetPipeWireNodeId(req, socket); },
+      });
+
   /**
    * Utils
    */

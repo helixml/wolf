@@ -119,6 +119,15 @@ struct StreamSessionHandleInputRequest {
       input_packet_hex;
 };
 
+/**
+ * Request to set PipeWire ScreenCast node ID for a lobby.
+ * Container calls this after creating a ScreenCast session.
+ */
+struct SetPipeWireNodeIdRequest {
+  std::string lobby_id;
+  unsigned int node_id;
+};
+
 struct CreateLobbyRequest {
   rfl::Description<"The profile that originally created the lobby", std::string> profile_id;
   std::string name;
@@ -362,6 +371,7 @@ private:
   void endpoint_LobbyJoin(const HTTPRequest &req, std::shared_ptr<UnixSocket> socket);
   void endpoint_LobbyLeave(const HTTPRequest &req, std::shared_ptr<UnixSocket> socket);
   void endpoint_LobbyStop(const HTTPRequest &req, std::shared_ptr<UnixSocket> socket);
+  void endpoint_LobbySetPipeWireNodeId(const HTTPRequest &req, std::shared_ptr<UnixSocket> socket);
 
   void endpoint_RunnerStart(const HTTPRequest &req, std::shared_ptr<UnixSocket> socket);
 

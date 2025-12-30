@@ -135,6 +135,13 @@ struct VideoSettings {
   std::string wayland_render_node;
   std::string runner_render_node;
   std::string video_producer_buffer_caps;
+
+  /**
+   * Video source mode: "wayland" (default) or "pipewire"
+   * - "wayland": Use waylanddisplaysrc nested compositor (Sway/KDE)
+   * - "pipewire": Use pipewiresrc to read from PipeWire ScreenCast (GNOME 49+)
+   */
+  std::string video_source_mode = "wayland";
 };
 
 struct AudioSettings {
@@ -186,6 +193,23 @@ struct Lobby {
    * A queue of devices that will be plugged into the runner when ready
    */
   std::shared_ptr<events::devices_atom_queue> plugged_devices_queue = std::make_shared<events::devices_atom_queue>();
+
+  /**
+   * PipeWire node ID for pipewiresrc mode (GNOME 49+).
+   * Set dynamically by the container after creating a ScreenCast session.
+   * Only used when video_settings.video_source_mode == "pipewire".
+   */
+  std::shared_ptr<immer::atom<std::optional<unsigned int>>> pipewire_node_id =
+      std::make_shared<immer::atom<std::optional<unsigned int>>>(std::nullopt);
+};
+
+/**
+ * Event fired when a container reports its PipeWire ScreenCast node ID.
+ * This triggers Wolf to start the pipewiresrc video producer for the lobby.
+ */
+struct SetPipeWireNodeIdEvent {
+  std::string lobby_id;
+  unsigned int node_id;
 };
 
 struct CreateLobbyEvent {
@@ -376,6 +400,7 @@ using EventBusHandlers = dp::handler_registration<immer::box<PlugDeviceEvent>,
                                                   immer::box<LeaveLobbyEvent>,
                                                   immer::box<CreateLobbyEvent>,
                                                   immer::box<StopLobbyEvent>,
+                                                  immer::box<SetPipeWireNodeIdEvent>,
                                                   immer::box<SwitchStreamProducerEvents>>;
 using EventBusType = dp::event_bus<immer::box<PlugDeviceEvent>,
                                    immer::box<PairSignal>,
@@ -394,6 +419,7 @@ using EventBusType = dp::event_bus<immer::box<PlugDeviceEvent>,
                                    immer::box<LeaveLobbyEvent>,
                                    immer::box<CreateLobbyEvent>,
                                    immer::box<StopLobbyEvent>,
+                                   immer::box<SetPipeWireNodeIdEvent>,
                                    immer::box<SwitchStreamProducerEvents>>;
 using EventsVariant = std::variant<immer::box<PlugDeviceEvent>,
                                    immer::box<PairSignal>,
@@ -412,6 +438,7 @@ using EventsVariant = std::variant<immer::box<PlugDeviceEvent>,
                                    immer::box<LeaveLobbyEvent>,
                                    immer::box<CreateLobbyEvent>,
                                    immer::box<StopLobbyEvent>,
+                                   immer::box<SetPipeWireNodeIdEvent>,
                                    immer::box<SwitchStreamProducerEvents>>;
 
 /**

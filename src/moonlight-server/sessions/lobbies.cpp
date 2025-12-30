@@ -100,7 +100,49 @@ setup_lobbies_handlers(const immer::box<state::AppState> &app_state,
         app_state->lobbies->update(
             [lobby](const immer::vector<events::Lobby> &lobbies) { return lobbies.push_back(*lobby); });
 
-        { // Start Wayland compositor and Gstreamer producer pipeline
+        bool use_pipewire_mode = lobby_settings->video_settings.video_source_mode == "pipewire";
+
+        if (use_pipewire_mode) {
+          // PipeWire mode: Start runner FIRST, wait for container to report node ID
+          // Video producer will be started when SetPipeWireNodeIdEvent is received
+          logs::log(logs::info, "[LOBBY] Using PipeWire video source mode (GNOME 49+)");
+          logs::log(logs::debug, "[LOBBY] Starting runner first, video producer will start when node ID is reported");
+
+          auto full_path = std::filesystem::path(app_state->host->local_base_state_folder) /
+                           lobby_settings->runner_state_folder;
+          std::filesystem::create_directories(full_path);
+
+          std::thread([=]() {
+            try {
+              start_runner(lobby->runner,
+                           lobby->plugged_devices_queue,
+                           immer::box<RunnerArgs>{RunnerArgs{
+                               .session_id = lobby->id,
+                               .video_settings = lobby_settings->video_settings,
+                               .wayland_display = nullptr, // No Wayland display for PipeWire mode
+                               .audio_server = audio_server,
+                               .audio_sink = lobby->audio_sink->load(),
+                               .host = app_state->host,
+                               .app_local_state_folder = full_path.string(),
+                               .app_host_state_folder = std::filesystem::path(app_state->host->host_base_state_folder) /
+                                                        lobby_settings->runner_state_folder,
+                               .xdg_runtime_dir = runtime_dir,
+                               .client_settings = lobby_settings->client_settings}});
+              // Runner process ended, stop the lobby
+              ev_bus->fire_event<immer::box<events::StopLobbyEvent>>(
+                  immer::box<events::StopLobbyEvent>{events::StopLobbyEvent{.lobby_id = lobby->id}});
+            } catch (const std::exception &e) {
+              logs::log(logs::error, "[LOBBY] Runner thread exception: {}", e.what());
+            } catch (...) {
+              logs::log(logs::error, "[LOBBY] Runner thread unknown exception");
+            }
+          }).detach();
+
+          // Signal setup complete - video producer will be started when node ID is reported
+          lobby_settings->on_setup_over.get()->set_value(true);
+
+        } else {
+          // Wayland mode: Start video producer first (nested compositor for Sway/KDE)
           logs::log(logs::debug, "[LOBBY] Create wayland compositor");
 
           std::shared_ptr<boost::promise<streaming::WaylandDisplayReady>> on_ready =
@@ -396,6 +438,57 @@ setup_lobbies_handlers(const immer::box<state::AppState> &app_state,
   handlers.push_back(app_state->event_bus->register_handler<immer::box<events::StopStreamEvent>>(
       [=](const immer::box<events::StopStreamEvent> &stop_stream_event) {
         on_moonlight_session_over(stop_stream_event->session_id);
+      }));
+
+  // When a container reports its PipeWire ScreenCast node ID, start the pipewiresrc video producer
+  handlers.push_back(app_state->event_bus->register_handler<immer::box<events::SetPipeWireNodeIdEvent>>(
+      [=](const immer::box<events::SetPipeWireNodeIdEvent> &node_id_event) {
+        auto lobbies = app_state->lobbies->load();
+        auto lobby = state::get_lobby_by_id(lobbies.get(), node_id_event->lobby_id);
+
+        if (!lobby) {
+          logs::log(logs::error, "[LOBBY] SetPipeWireNodeIdEvent: lobby {} not found", node_id_event->lobby_id);
+          return;
+        }
+
+        if (lobby->video_settings.video_source_mode != "pipewire") {
+          logs::log(logs::warning, "[LOBBY] SetPipeWireNodeIdEvent: lobby {} not in pipewire mode, ignoring",
+                    node_id_event->lobby_id);
+          return;
+        }
+
+        // Store the node ID
+        lobby->pipewire_node_id->store(node_id_event->node_id);
+        logs::log(logs::info, "[LOBBY] PipeWire node ID {} received for lobby {}, starting pipewiresrc video producer",
+                  node_id_event->node_id, lobby->id);
+
+        // Start the pipewiresrc video producer
+        auto ev_bus = app_state->event_bus;
+        auto gst_context = app_state->gst_context;
+        auto video_settings = lobby->video_settings;
+
+        std::thread([lobby_id = lobby->id, node_id = node_id_event->node_id, video_settings, ev_bus, gst_context]() {
+          try {
+            // Create a promise that we won't use (pipewiresrc doesn't need wayland display setup)
+            std::shared_ptr<boost::promise<streaming::WaylandDisplayReady>> on_ready =
+                std::make_shared<boost::promise<streaming::WaylandDisplayReady>>();
+
+            streaming::start_pipewire_video_producer(lobby_id,
+                                                     node_id,
+                                                     video_settings.video_producer_buffer_caps,
+                                                     video_settings.wayland_render_node,
+                                                     {.width = video_settings.width,
+                                                      .height = video_settings.height,
+                                                      .refreshRate = video_settings.refresh_rate},
+                                                     gst_context,
+                                                     on_ready,
+                                                     ev_bus);
+          } catch (const std::exception &e) {
+            logs::log(logs::error, "[LOBBY] PipeWire video producer thread exception: {}", e.what());
+          } catch (...) {
+            logs::log(logs::error, "[LOBBY] PipeWire video producer thread unknown exception");
+          }
+        }).detach();
       }));
 
   return handlers.persistent();
