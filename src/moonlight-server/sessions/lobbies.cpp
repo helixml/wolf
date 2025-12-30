@@ -32,11 +32,34 @@ void leave_lobby(const std::shared_ptr<events::EventBusType> &ev_bus,
            ranges::to<immer::vector<immer::box<std::string>>>();
   });
 
-  // Switch over mouse and keyboard to use the original session wayland server
-  auto wl_state = session.wayland_display->load();
-  session.mouse->emplace(virtual_display::WaylandMouse(wl_state));
-  session.keyboard->emplace(virtual_display::WaylandKeyboard(wl_state));
-  session.touch_screen->emplace(virtual_display::WaylandTouchScreen(wl_state));
+  // Switch over mouse and keyboard to use the original session's input method
+  bool use_pipewire_mode = lobby.video_settings.video_source_mode == "pipewire";
+
+  if (use_pipewire_mode) {
+    // PipeWire mode: Create new inputtino devices for the session's test pattern
+    logs::log(logs::debug, "[LOBBY] Creating inputtino devices for session {} leaving PipeWire lobby", session.session_id);
+
+    auto mouse = input::Mouse::create();
+    if (mouse) {
+      session.mouse->emplace(input::Mouse(std::move(*mouse)));
+    }
+
+    auto keyboard = input::Keyboard::create();
+    if (keyboard) {
+      session.keyboard->emplace(input::Keyboard(std::move(*keyboard)));
+    }
+
+    auto touch = input::TouchScreen::create();
+    if (touch) {
+      session.touch_screen->emplace(input::TouchScreen(std::move(*touch)));
+    }
+  } else {
+    // Wayland mode: Switch back to session's Wayland compositor
+    auto wl_state = session.wayland_display->load();
+    session.mouse->emplace(virtual_display::WaylandMouse(wl_state));
+    session.keyboard->emplace(virtual_display::WaylandKeyboard(wl_state));
+    session.touch_screen->emplace(virtual_display::WaylandTouchScreen(wl_state));
+  }
 
   // Switch over all joypads present in the lobby back into the original session
   events::JoypadList joypads = session.joypads->load();
@@ -303,11 +326,57 @@ setup_lobbies_handlers(const immer::box<state::AppState> &app_state,
           return connected_sessions.push_back({std::to_string(session->session_id)});
         });
 
-        // switch mouse and keyboard in session to use the lobby wayland server
-        auto wl_state = lobby->wayland_display->load();
-        session->mouse->emplace(virtual_display::WaylandMouse(wl_state));
-        session->keyboard->emplace(virtual_display::WaylandKeyboard(wl_state));
-        session->touch_screen->emplace(virtual_display::WaylandTouchScreen(wl_state));
+        // switch mouse and keyboard in session to use the lobby's input method
+        bool use_pipewire_mode = lobby->video_settings.video_source_mode == "pipewire";
+
+        if (use_pipewire_mode) {
+          // PipeWire mode: Use inputtino (kernel evdev) devices instead of Wayland
+          // These are passed to the container via fake-udev
+          logs::log(logs::debug, "[LOBBY] Creating inputtino devices for PipeWire mode lobby {}", lobby->id);
+
+          auto mouse = input::Mouse::create();
+          if (!mouse) {
+            logs::log(logs::error, "[LOBBY] Failed to create mouse: {}", mouse.getErrorMessage());
+          } else {
+            auto mouse_ptr = input::Mouse(std::move(*mouse));
+            // Plug device into the lobby's container
+            lobby->plugged_devices_queue->push(immer::box<events::PlugDeviceEvent>(
+                events::PlugDeviceEvent{.session_id = lobby->id,
+                                        .udev_events = mouse_ptr.get_udev_events(),
+                                        .udev_hw_db_entries = mouse_ptr.get_udev_hw_db_entries()}));
+            session->mouse->emplace(std::move(mouse_ptr));
+          }
+
+          auto keyboard = input::Keyboard::create();
+          if (!keyboard) {
+            logs::log(logs::error, "[LOBBY] Failed to create keyboard: {}", keyboard.getErrorMessage());
+          } else {
+            auto keyboard_ptr = input::Keyboard(std::move(*keyboard));
+            lobby->plugged_devices_queue->push(immer::box<events::PlugDeviceEvent>(
+                events::PlugDeviceEvent{.session_id = lobby->id,
+                                        .udev_events = keyboard_ptr.get_udev_events(),
+                                        .udev_hw_db_entries = keyboard_ptr.get_udev_hw_db_entries()}));
+            session->keyboard->emplace(std::move(keyboard_ptr));
+          }
+
+          auto touch = input::TouchScreen::create();
+          if (!touch) {
+            logs::log(logs::error, "[LOBBY] Failed to create touch screen: {}", touch.getErrorMessage());
+          } else {
+            auto touch_ptr = input::TouchScreen(std::move(*touch));
+            lobby->plugged_devices_queue->push(immer::box<events::PlugDeviceEvent>(
+                events::PlugDeviceEvent{.session_id = lobby->id,
+                                        .udev_events = touch_ptr.get_udev_events(),
+                                        .udev_hw_db_entries = touch_ptr.get_udev_hw_db_entries()}));
+            session->touch_screen->emplace(std::move(touch_ptr));
+          }
+        } else {
+          // Wayland mode: Use the lobby's Wayland compositor for input
+          auto wl_state = lobby->wayland_display->load();
+          session->mouse->emplace(virtual_display::WaylandMouse(wl_state));
+          session->keyboard->emplace(virtual_display::WaylandKeyboard(wl_state));
+          session->touch_screen->emplace(virtual_display::WaylandTouchScreen(wl_state));
+        }
 
         // Switch over all joypads present in the session into the lobby
         events::JoypadList joypads = session->joypads->load();
