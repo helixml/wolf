@@ -424,31 +424,39 @@ This would be a separate implementation task and is **not recommended** for the 
 
 ```
 wolf/gst-pipewire-zerocopy/
-├── Cargo.toml          # Dependencies: gstreamer, pipewire, waylanddisplaycore
-├── build.rs            # GStreamer plugin version helper
+├── Cargo.toml              # Dependencies: gstreamer, pipewire, waylanddisplaycore
+├── build.rs                # GStreamer plugin version helper
 └── src/
-    ├── lib.rs          # Plugin registration
+    ├── lib.rs              # Plugin registration
+    ├── dmabuf.rs           # DMA-BUF handling (independent of smithay)
+    ├── cuda.rs             # CUDA/EGL FFI for zero-copy conversion
+    ├── pipewire_stream.rs  # PipeWire stream handling
     └── pipewiresrc/
-        ├── mod.rs      # Element wrapper
-        └── imp.rs      # PushSrc implementation (skeleton)
+        ├── mod.rs          # Element wrapper
+        └── imp.rs          # Full PushSrc implementation
 ```
 
 ### What's Implemented
 
-- ✅ GStreamer PushSrc element skeleton (`pipewirezerocopysrc`)
-- ✅ Properties: `pipewire-node-id`, `render-node`, `cuda-device-id`
+- ✅ GStreamer PushSrc element (`pipewirezerocopysrc`)
+- ✅ Properties: `pipewire-node-id`, `render-node`, `output-mode`, `cuda-device-id`
 - ✅ Pad templates for CUDA, DMABuf, and system memory output
 - ✅ Live source configuration (timestamps, no preroll)
-- ✅ Dependency on wayland-display-core for CUDA conversion
+- ✅ PipeWire MainLoop initialization (separate thread)
+- ✅ Stream connection to ScreenCast node by ID
+- ✅ DMA-BUF extraction from SPA buffers
+- ✅ SHM fallback for non-DMA-BUF buffers
+- ✅ CUDA FFI (EGL→CUDA conversion path)
+- ✅ Frame capture in `PushSrc::create()`
+- ✅ Integration into Wolf Dockerfile build
+- ✅ Integration into `streaming.cpp` (replaces fragile `pipewiresrc ! cudaupload`)
 
-### What's TODO
+### What's Still TODO
 
-- ❌ PipeWire MainLoop initialization
-- ❌ Stream connection to ScreenCast node
-- ❌ DMA-BUF extraction from SPA buffers
-- ❌ Integration with wayland-display-core's EGLImage/CUDAImage
-- ❌ Frame capture in `PushSrc::create()`
-- ❌ Format negotiation with PipeWire
+- ❌ Full CUDA buffer pool integration (currently returns error, falls back to copy)
+- ❌ DMA-BUF passthrough mode (currently falls back to copy)
+- ❌ Format negotiation with PipeWire (currently accepts any format)
+- ❌ End-to-end testing with GNOME 49 container
 
 ### Build Requirements
 
@@ -458,11 +466,26 @@ The crate requires PipeWire development libraries:
 # Ubuntu/Debian
 apt install libpipewire-0.3-dev
 
-# Inside Wolf Docker container (already has these)
-# The crate will build as part of the Wolf build process
+# Inside Wolf Docker container (installed by Dockerfile)
+# The crate builds as part of the Wolf build process via cargo cinstall
 ```
 
-**Note:** The skeleton won't build on the host without PipeWire libs installed. This is intentional - it's designed to be built inside the Wolf container.
+### Pipeline Usage
+
+The new element is used in `streaming.cpp`:
+
+```cpp
+// Old fragile pipeline:
+// pipewiresrc path={node_id} ! cudaupload ! video/x-raw(memory:CUDAMemory)
+
+// New unified pipeline:
+pipewirezerocopysrc pipewire-node-id={node_id} render-node={render_node} output-mode={mode} ! ...
+```
+
+The element auto-detects GPU type and outputs the appropriate format:
+- NVIDIA: `video/x-raw(memory:CUDAMemory)` via EGL→CUDA zero-copy
+- AMD/Intel: `video/x-raw(memory:DMABuf)` passthrough
+- Fallback: `video/x-raw` in system memory
 
 ---
 

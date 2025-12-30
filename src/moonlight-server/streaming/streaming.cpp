@@ -172,41 +172,38 @@ void start_pipewire_video_producer(const std::string &session_id,
                                    std::shared_ptr<immer::atom<gst_video_context::gst_context_ptr>> video_context,
                                    std::shared_ptr<boost::promise<WaylandDisplayReady>> on_ready,
                                    std::shared_ptr<events::EventBusType> event_bus) {
-  // Build pipewiresrc pipeline that reads from container's PipeWire ScreenCast
-  // Similar to start_video_producer but uses pipewiresrc instead of waylanddisplaysrc
+  // Use pipewirezerocopysrc - our unified PipeWire source with zero-copy GPU output
+  // The element handles GPU detection internally and outputs the best format:
+  // - NVIDIA: video/x-raw(memory:CUDAMemory) via EGL→CUDA zero-copy
+  // - AMD/Intel: video/x-raw(memory:DMABuf) passthrough
+  // - Fallback: video/x-raw in system memory
   //
-  // The container runs GNOME with ScreenCast session which produces frames via PipeWire.
-  // Wolf reads these frames directly using pipewiresrc, bypassing the nested compositor.
-  //
-  // GPU upload pipeline mirrors waylanddisplaysrc format for encoder compatibility:
-  // - NVIDIA: cudaupload ! video/x-raw(memory:CUDAMemory), format=NV12
-  // - AMD/Intel: vapostproc ! video/x-raw(memory:DMABuf), drm-format=NV12
+  // This replaces the fragile "pipewiresrc ! cudaupload" pipeline which had
+  // CUDA buffer sharing issues with multiple viewers in lobby mode.
 
-  std::string gpu_upload;
+  std::string output_mode;
   if (buffer_caps.find("CUDAMemory") != std::string::npos) {
-    // NVIDIA: upload to CUDA memory
-    gpu_upload = "cudaupload ! video/x-raw(memory:CUDAMemory), format=NV12";
-    logs::log(logs::info, "[GSTREAMER] PipeWire producer using CUDA memory upload");
+    output_mode = "cuda";
+    logs::log(logs::info, "[GSTREAMER] PipeWire producer configured for CUDA output");
   } else if (buffer_caps.find("DMABuf") != std::string::npos) {
-    // AMD/Intel: use VA-API postprocessor, output DMABuf
-    gpu_upload = fmt::format("vapostproc ! video/x-raw(memory:DMABuf), drm-format=NV12");
-    logs::log(logs::info, "[GSTREAMER] PipeWire producer using DMABuf memory upload");
+    output_mode = "dmabuf";
+    logs::log(logs::info, "[GSTREAMER] PipeWire producer configured for DMABuf output");
   } else {
-    // CPU fallback - no GPU upload
-    gpu_upload = "videoconvert";
-    logs::log(logs::info, "[GSTREAMER] PipeWire producer using CPU memory (no GPU upload)");
+    output_mode = "system";
+    logs::log(logs::info, "[GSTREAMER] PipeWire producer configured for system memory output");
   }
 
   auto pipeline = fmt::format(
-      "pipewiresrc path={node_id} do-timestamp=true ! "
-      "video/x-raw, width={width}, height={height}, framerate={fps}/1 ! "
-      "{gpu_upload} ! "
+      "pipewirezerocopysrc pipewire-node-id={node_id} render-node={render_node} output-mode={output_mode} ! "
+      "{buffer_caps}, width={width}, height={height}, framerate={fps}/1 ! "
       "interpipesink sync=true async=false name={session_id}_video max-buffers=5",
       fmt::arg("node_id", pipewire_node_id),
+      fmt::arg("render_node", render_node),
+      fmt::arg("output_mode", output_mode),
+      fmt::arg("buffer_caps", buffer_caps),
       fmt::arg("width", display_mode.width),
       fmt::arg("height", display_mode.height),
       fmt::arg("fps", display_mode.refreshRate),
-      fmt::arg("gpu_upload", gpu_upload),
       fmt::arg("session_id", session_id));
 
   logs::log(logs::debug, "[GSTREAMER] Starting PipeWire video producer: {}", pipeline);

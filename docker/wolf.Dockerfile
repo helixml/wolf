@@ -54,7 +54,22 @@ WORKDIR /tmp/gst-wayland-display
 RUN cargo install cargo-c && \
     cargo cinstall -p gst-plugin-wayland-display --features cuda --prefix=/usr/local/lib/x86_64-linux-gnu/ --libdir=/usr/local/lib/x86_64-linux-gnu/gstreamer-1.0
 
+# Build gst-pipewire-zerocopy - unified PipeWire source with zero-copy GPU output
+# Supports: CUDA (NVIDIA), DMA-BUF (AMD/Intel), System memory (fallback)
+# Used for GNOME 49+ which removed wl-roots style capture
+RUN apt-get update -y && \
+    apt-get install -y --no-install-recommends \
+    libpipewire-0.3-dev \
+    && rm -rf /var/lib/apt/lists/*
+
 COPY . /wolf/
+WORKDIR /wolf
+
+# Build gst-pipewire-zerocopy GStreamer plugin
+# This provides pipewirezerocopysrc element for unified PipeWire capture
+WORKDIR /wolf/gst-pipewire-zerocopy
+RUN cargo cinstall --features cuda --prefix=/usr/local/lib/x86_64-linux-gnu/ --libdir=/usr/local/lib/x86_64-linux-gnu/gstreamer-1.0
+
 WORKDIR /wolf
 
 ENV CCACHE_DIR=/cache/ccache
@@ -155,6 +170,13 @@ RUN apt-get update -y && \
     apt-get install -y --no-install-recommends \
     libwayland-server0 libinput10 libxkbcommon0 libgbm1 \
     libglvnd0 libgl1 libglx0 libegl1 libgles2 xwayland hwdata \
+    && rm -rf /var/lib/apt/lists/*
+
+# PipeWire runtime dependencies for gst-pipewire-zerocopy
+# Used for GNOME 49+ ScreenCast capture
+RUN apt-get update -y && \
+    apt-get install -y --no-install-recommends \
+    libpipewire-0.3-0 \
     && rm -rf /var/lib/apt/lists/*
 
 # Install Docker inside Wolf container for nested sandboxes
