@@ -11,7 +11,10 @@ using namespace wolf::core;
 using boost::asio::local::stream_protocol;
 
 // Simple request/response structures for the lobby API
-struct SetPipeWireNodeIdRequest {
+// NOTE: Unique name to avoid ODR conflicts with api.hpp's SetPipeWireNodeIdRequest
+// which requires lobby_id. This local struct only needs node_id since the lobby
+// context is implicit (per-lobby socket).
+struct LobbySetNodeIdRequest {
   unsigned int node_id;
 };
 
@@ -172,7 +175,7 @@ void LobbySocketServer::handle_request(const std::string &request,
 
   } else if (method == "POST" && path == "/set-pipewire-node-id") {
     // Set PipeWire node ID
-    auto parsed = rfl::json::read<SetPipeWireNodeIdRequest>(body);
+    auto parsed = rfl::json::read<LobbySetNodeIdRequest>(body);
     if (!parsed) {
       send_response(socket, 400, rfl::json::write(ErrorResponse{.error = "Invalid JSON: " + parsed.error().what()}));
       return;

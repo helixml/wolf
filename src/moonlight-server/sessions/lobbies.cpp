@@ -615,12 +615,29 @@ setup_lobbies_handlers(const immer::box<state::AppState> &app_state,
           return;
         }
 
-        logs::log(logs::info, "[LOBBY] Connecting InputBridge to socket {} for lobby {}",
-                  input_socket_event->input_socket_path, lobby->id);
+        // Translate container path to host-accessible path
+        // Container reports: /run/user/1000/wolf-input.sock (or similar XDG_RUNTIME_DIR path)
+        // Host path is: <runner_state_folder_path>/pipewire/wolf-input.sock
+        // The container's XDG_RUNTIME_DIR is bind-mounted to <runner_state_folder_path>/pipewire/
+        std::string container_path = input_socket_event->input_socket_path;
+        std::string host_socket_path;
 
-        if (!lobby->input_bridge->connect(input_socket_event->input_socket_path)) {
-          logs::log(logs::error, "[LOBBY] Failed to connect InputBridge to socket {}",
-                    input_socket_event->input_socket_path);
+        // Extract just the filename from the container path
+        std::string socket_filename = "wolf-input.sock";  // Default
+        auto last_slash = container_path.rfind('/');
+        if (last_slash != std::string::npos) {
+          socket_filename = container_path.substr(last_slash + 1);
+        }
+
+        // Build host-accessible path: runner_state_folder_path/pipewire/filename
+        host_socket_path = lobby->runner_state_folder_path + "/pipewire/" + socket_filename;
+
+        logs::log(logs::info, "[LOBBY] Translating input socket path for lobby {}: container={} -> host={}",
+                  lobby->id, container_path, host_socket_path);
+
+        if (!lobby->input_bridge->connect(host_socket_path)) {
+          logs::log(logs::error, "[LOBBY] Failed to connect InputBridge to socket {} (translated from container path {})",
+                    host_socket_path, container_path);
           return;
         }
 
