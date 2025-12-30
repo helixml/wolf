@@ -418,9 +418,59 @@ This would be a separate implementation task and is **not recommended** for the 
 
 ---
 
+## Current Implementation Status
+
+### Files Created
+
+```
+wolf/gst-pipewire-zerocopy/
+├── Cargo.toml          # Dependencies: gstreamer, pipewire, waylanddisplaycore
+├── build.rs            # GStreamer plugin version helper
+└── src/
+    ├── lib.rs          # Plugin registration
+    └── pipewiresrc/
+        ├── mod.rs      # Element wrapper
+        └── imp.rs      # PushSrc implementation (skeleton)
+```
+
+### What's Implemented
+
+- ✅ GStreamer PushSrc element skeleton (`pipewirezerocopysrc`)
+- ✅ Properties: `pipewire-node-id`, `render-node`, `cuda-device-id`
+- ✅ Pad templates for CUDA, DMABuf, and system memory output
+- ✅ Live source configuration (timestamps, no preroll)
+- ✅ Dependency on wayland-display-core for CUDA conversion
+
+### What's TODO
+
+- ❌ PipeWire MainLoop initialization
+- ❌ Stream connection to ScreenCast node
+- ❌ DMA-BUF extraction from SPA buffers
+- ❌ Integration with wayland-display-core's EGLImage/CUDAImage
+- ❌ Frame capture in `PushSrc::create()`
+- ❌ Format negotiation with PipeWire
+
+### Build Requirements
+
+The crate requires PipeWire development libraries:
+
+```bash
+# Ubuntu/Debian
+apt install libpipewire-0.3-dev
+
+# Inside Wolf Docker container (already has these)
+# The crate will build as part of the Wolf build process
+```
+
+**Note:** The skeleton won't build on the host without PipeWire libs installed. This is intentional - it's designed to be built inside the Wolf container.
+
+---
+
 ## References
 
 - [PipeWire DMA-BUF Sharing](https://docs.pipewire.org/page_dma_buf.html)
 - [Mutter DMA-BUF ScreenCast MR](https://gitlab.gnome.org/GNOME/mutter/-/merge_requests/1939)
 - [gst-wayland-display source](https://github.com/games-on-whales/gst-wayland-display)
 - [CUDA-EGL Interop](https://docs.nvidia.com/cuda/cuda-driver-api/group__CUDA__EGL.html)
+- [ashpd ScreenCast](https://docs.rs/ashpd/latest/ashpd/desktop/screencast/) - Rust portal bindings
+- [pipewire-rs](https://pipewire.pages.freedesktop.org/pipewire-rs/) - Rust PipeWire bindings
