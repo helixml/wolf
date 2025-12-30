@@ -183,12 +183,13 @@ void start_pipewire_video_producer(const std::string &session_id,
   // This replaces the fragile "pipewiresrc ! cudaupload" pipeline which had
   // CUDA buffer sharing issues with multiple viewers in lobby mode.
 
-  // Set PIPEWIRE_RUNTIME_DIR to the shared socket path
+  // Set PIPEWIRE_REMOTE to the shared socket path
   // The container mounts its /run/user/1000 at pipewire_socket_path/pipewire
   // so the socket is at pipewire_socket_path/pipewire/pipewire-0
-  auto pipewire_runtime_dir = std::filesystem::path(pipewire_socket_path) / "pipewire";
-  setenv("PIPEWIRE_RUNTIME_DIR", pipewire_runtime_dir.c_str(), 1);
-  logs::log(logs::debug, "[GSTREAMER] PIPEWIRE_RUNTIME_DIR set to: {}", pipewire_runtime_dir.string());
+  // PIPEWIRE_REMOTE is the standard env var for connecting to a specific socket
+  auto pipewire_socket = std::filesystem::path(pipewire_socket_path) / "pipewire" / "pipewire-0";
+  setenv("PIPEWIRE_REMOTE", pipewire_socket.c_str(), 1);
+  logs::log(logs::info, "[GSTREAMER] PIPEWIRE_REMOTE set to: {}", pipewire_socket.string());
 
   std::string output_mode;
   if (buffer_caps.find("CUDAMemory") != std::string::npos) {
