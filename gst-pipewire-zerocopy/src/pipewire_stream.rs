@@ -1,10 +1,10 @@
 //! PipeWire stream handling - outputs smithay Dmabuf directly
 
 use parking_lot::Mutex;
-use pipewire::{context::Context, main_loop::MainLoop, stream::{Stream, StreamFlags}};
+use pipewire::{context::Context, main_loop::MainLoop, properties::properties, stream::{Stream, StreamFlags}};
 use smithay::backend::allocator::{Fourcc, Modifier};
 use smithay::backend::allocator::dmabuf::{Dmabuf, DmabufFlags};
-use std::os::fd::{BorrowedFd, OwnedFd};
+use std::os::fd::BorrowedFd;
 use std::sync::{atomic::{AtomicBool, Ordering}, mpsc, Arc};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
@@ -73,6 +73,7 @@ impl PipeWireStream {
             .map_err(|e| format!("Failed to receive frame: {}", e))
     }
 
+    #[allow(dead_code)]
     pub fn video_params(&self) -> VideoParams {
         self.video_info.lock().clone()
     }
@@ -99,17 +100,17 @@ fn run_pipewire_loop(
     let context = Context::new(&mainloop).map_err(|e| format!("Context: {}", e))?;
     let core = context.connect(None).map_err(|e| format!("Connect: {}", e))?;
 
-    let stream = Stream::new(
-        &core, "helix-screencast",
-        pipewire::properties! {
-            *pipewire::keys::MEDIA_TYPE => "Video",
-            *pipewire::keys::MEDIA_CATEGORY => "Capture",
-            *pipewire::keys::MEDIA_ROLE => "Screen",
-        },
-    ).map_err(|e| format!("Stream: {}", e))?;
+    let props = properties! {
+        *pipewire::keys::MEDIA_TYPE => "Video",
+        *pipewire::keys::MEDIA_CATEGORY => "Capture",
+        *pipewire::keys::MEDIA_ROLE => "Screen",
+    };
+
+    let stream = Stream::new(&core, "helix-screencast", props)
+        .map_err(|e| format!("Stream: {}", e))?;
 
     let frame_tx = Arc::new(Mutex::new(frame_tx));
-    let video_info_cb = video_info.clone();
+    let _video_info_cb = video_info.clone();
     let frame_tx_process = frame_tx.clone();
 
     let _listener = stream
@@ -126,11 +127,11 @@ fn run_pipewire_loop(
         })
         .process(move |stream, _| {
             if let Some(mut buffer) = stream.dequeue_buffer() {
-                let datas = buffer.buffer().datas();
+                let datas = buffer.datas_mut();
                 if datas.is_empty() { return; }
 
                 let params = video_info.lock().clone();
-                if let Some(frame) = extract_frame(&datas, &params) {
+                if let Some(frame) = extract_frame(datas, &params) {
                     let _ = frame_tx_process.lock().try_send(frame);
                 }
             }
@@ -138,34 +139,42 @@ fn run_pipewire_loop(
         .register()
         .map_err(|e| format!("Listener: {}", e))?;
 
+    // Create empty params slice
+    let params: &mut [&libspa::pod::Pod] = &mut [];
+
     stream.connect(
         pipewire::spa::utils::Direction::Input,
         Some(node_id),
         StreamFlags::AUTOCONNECT | StreamFlags::MAP_BUFFERS,
-        &mut [],
+        params,
     ).map_err(|e| format!("Connect to node {}: {}", node_id, e))?;
 
     tracing::info!("Connected to PipeWire node {}", node_id);
 
     while !shutdown.load(Ordering::SeqCst) {
-        mainloop.iterate(Duration::from_millis(50));
+        mainloop.loop_().iterate(Duration::from_millis(50));
     }
 
     Ok(())
 }
 
-fn extract_frame(datas: &[pipewire::spa::buffer::Data], params: &VideoParams) -> Option<FrameData> {
-    let first = datas.first()?;
-    let chunk = first.chunk();
-    let size = chunk.size() as usize;
-    let stride = chunk.stride();
+fn extract_frame(datas: &mut [pipewire::spa::buffer::Data], params: &VideoParams) -> Option<FrameData> {
+    // Get chunk info from first element before we need mutable access
+    let (size, stride, data_type, fd, offset) = {
+        let first = datas.first()?;
+        let chunk = first.chunk();
+        (
+            chunk.size() as usize,
+            chunk.stride(),
+            first.type_(),
+            first.as_raw().fd as i32,
+            chunk.offset(),
+        )
+    };
     if size == 0 { return None; }
-
-    let data_type = first.type_();
 
     // DMA-BUF path - build smithay Dmabuf directly
     if data_type == pipewire::spa::buffer::DataType::DmaBuf {
-        let fd = first.as_raw().fd as i32;
         if fd < 0 { return None; }
 
         let width = if params.width > 0 { params.width } else { (stride / 4) as u32 };
@@ -178,20 +187,23 @@ fn extract_frame(datas: &[pipewire::spa::buffer::Data], params: &VideoParams) ->
 
         // Clone the fd to create OwnedFd
         let owned_fd = unsafe {
-            OwnedFd::from(BorrowedFd::borrow_raw(fd).try_clone_to_owned().ok()?)
+            BorrowedFd::borrow_raw(fd).try_clone_to_owned().ok()?
         };
 
         let mut builder = Dmabuf::builder((width as i32, height as i32), fourcc, modifier, DmabufFlags::empty());
-        builder.add_plane(owned_fd, 0, chunk.offset(), stride as u32);
+        builder.add_plane(owned_fd, 0, offset, stride as u32);
 
         // Add additional planes if present
         for (idx, data) in datas.iter().enumerate().skip(1) {
             if data.type_() == pipewire::spa::buffer::DataType::DmaBuf {
                 let raw = data.as_raw();
-                let plane_fd = unsafe {
-                    BorrowedFd::borrow_raw(raw.fd as i32).try_clone_to_owned().ok()?
-                };
-                builder.add_plane(plane_fd, idx as u32, data.chunk().offset(), data.chunk().stride() as u32);
+                let plane_fd_raw = raw.fd as i32;
+                if plane_fd_raw >= 0 {
+                    let plane_fd = unsafe {
+                        BorrowedFd::borrow_raw(plane_fd_raw).try_clone_to_owned().ok()?
+                    };
+                    builder.add_plane(plane_fd, idx as u32, data.chunk().offset(), data.chunk().stride() as u32);
+                }
             }
         }
 
@@ -201,14 +213,16 @@ fn extract_frame(datas: &[pipewire::spa::buffer::Data], params: &VideoParams) ->
         }
     }
 
-    // SHM fallback
-    if let Some(data_ptr) = first.data() {
-        let width = if params.width > 0 { params.width } else if stride > 0 { (stride / 4) as u32 } else { 0 };
-        let height = if params.height > 0 { params.height } else if stride > 0 { (size / stride as usize) as u32 } else { 0 };
-        if width == 0 || height == 0 { return None; }
+    // SHM fallback - need mutable access for data()
+    if let Some(first_mut) = datas.first_mut() {
+        if let Some(data_ptr) = first_mut.data() {
+            let width = if params.width > 0 { params.width } else if stride > 0 { (stride / 4) as u32 } else { 0 };
+            let height = if params.height > 0 { params.height } else if stride > 0 { (size / stride as usize) as u32 } else { 0 };
+            if width == 0 || height == 0 { return None; }
 
-        let data = unsafe { std::slice::from_raw_parts(data_ptr.as_ptr(), size) }.to_vec();
-        return Some(FrameData::Shm { data, width, height, stride: stride as u32, format: params.format });
+            let data = unsafe { std::slice::from_raw_parts(data_ptr.as_ptr(), size) }.to_vec();
+            return Some(FrameData::Shm { data, width, height, stride: stride as u32, format: params.format });
+        }
     }
 
     None

@@ -2,7 +2,7 @@
 
 **Date:** 2025-12-30
 **Author:** Luke / Claude
-**Status:** DRAFT - Pending Wolf maintainer review
+**Status:** Implementation compiles, pending context integration and testing
 
 ## Executive Summary
 
@@ -77,6 +77,17 @@ The conversion is **generic for any DMA-BUF on the same GPU**. It doesn't care w
 - A Wayland client rendering to Wolf's compositor (current use case)
 - GNOME Shell's ScreenCast via PipeWire (proposed use case)
 - Any other source that produces DMA-BUFs
+
+### Important: Context Sharing (Wolf Maintainer Feedback)
+
+> **Note:** "There are more nuances to that, for example we reuse the EGL context from Smithay and externally make and share the CUDA context in Wolf in order to properly pass that CUDA buffer from one plugin to the next."
+
+The implementation must:
+1. **Reuse Wolf's existing EGL context** (from Smithay) rather than creating a new one
+2. **Share the CUDA context** with other Wolf components for buffer passing between plugins
+3. **Not create isolated contexts** that would break inter-plugin buffer sharing
+
+This means the gst-pipewire-zerocopy element needs to receive the EGL/CUDA context from Wolf rather than creating its own. The `waylanddisplaycore` approach already supports this via context injection.
 
 ---
 
@@ -281,128 +292,37 @@ Before full implementation, validate with:
 
 ---
 
-## Input Handling (Detailed Analysis)
+## Input Handling
 
-### Wolf's Current Approach: uinput Virtual Devices
+### Wolf's Current Approach: Direct Wayland Input Injection
 
-Wolf currently handles input via Linux uinput:
+> **Note (Wolf maintainer feedback):** Wolf does **NOT** use uinput virtual devices. It directly injects mouse, keyboard, and touch events into Wayland without any virtual device involvement.
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
-│  Host (Wolf)                                                     │
-│  ├── uinput/mouse.cpp      → /dev/uinput → virtual mouse        │
-│  ├── uinput/keyboard.cpp   → /dev/uinput → virtual keyboard     │
-│  ├── uinput/joypad.cpp     → /dev/uinput → virtual gamepad      │
-│  ├── uinput/touchscreen.cpp → /dev/uinput → virtual touchscreen │
-│  └── uinput/pentablet.cpp  → /dev/uinput → virtual pen tablet   │
-└─────────────────────────────────────────────────────────────────┘
-                            │
-                     (devices passed to container)
-                            ↓
-┌─────────────────────────────────────────────────────────────────┐
-│  Container (Sway/GNOME)                                          │
-│  └── Desktop reads from /dev/input/event* devices               │
+│  Wolf (Host)                                                     │
+│  └── Direct Wayland protocol input injection                    │
+│      ├── wl_pointer events → Wayland compositor                 │
+│      ├── wl_keyboard events → Wayland compositor                │
+│      ├── wl_touch events → Wayland compositor                   │
+│      └── Gamepad → Direct to compositor or libinput             │
 └─────────────────────────────────────────────────────────────────┘
 ```
 
 **Advantages:**
-- Low latency (direct kernel interface)
-- Works with any desktop (Sway, XFCE, GNOME, KDE)
-- Full device emulation (pressure sensitivity, multi-touch, etc.)
-- Wolf controls the entire stack
+- No kernel access or CAP_SYS_ADMIN required
+- No issues with uinput device creation/permissions
+- Low latency (direct Wayland protocol)
+- Works with Wolf's embedded Sway compositor
 
-**Requirements:**
-- Container must have access to `/dev/uinput` and created `/dev/input/event*` devices
-- Works via device passthrough or fake-udev
+### For PipeWire ScreenCast Mode
 
-### Option A: Keep Using uinput (Recommended)
+When using GNOME Shell as the desktop (not Wolf's embedded Sway), input injection approach depends on what the desktop supports:
 
-With PipeWire ScreenCast, we capture video via the portal but **continue using uinput for input**.
+1. **If Wolf controls the Wayland compositor**: Continue using direct Wayland input injection
+2. **If connecting to an external GNOME session**: May need RemoteDesktop Portal for input
 
-```
-┌─────────────────────────────────────────────────────────────────┐
-│  Host (Wolf)                                                     │
-│  ├── Video: PipeWire ScreenCast ← GNOME Shell                   │
-│  └── Input: uinput → /dev/input/* → GNOME Shell                 │
-└─────────────────────────────────────────────────────────────────┘
-```
-
-**Why this works:**
-- GNOME Shell reads from `/dev/input/*` just like Sway does
-- No code changes needed for input handling
-- uinput is independent of display server protocol
-
-**Requirements:**
-- Container has CAP_SYS_ADMIN or appropriate uinput permissions
-- fake-udev or proper device visibility in container
-
-### Option B: RemoteDesktop Portal
-
-The XDG RemoteDesktop Portal provides an alternative:
-
-```
-┌─────────────────────────────────────────────────────────────────┐
-│  Host (Wolf)                                                     │
-│  ├── ashpd::desktop::remote_desktop::RemoteDesktop              │
-│  │   ├── notify_pointer_motion(dx, dy)                          │
-│  │   ├── notify_pointer_button(button, state)                   │
-│  │   ├── notify_keyboard_keysym(keysym, state)                  │
-│  │   └── notify_touch_down/motion/up(...)                       │
-│  └── D-Bus → org.freedesktop.portal.RemoteDesktop               │
-└─────────────────────────────────────────────────────────────────┘
-                            │
-                     (D-Bus IPC)
-                            ↓
-┌─────────────────────────────────────────────────────────────────┐
-│  Container (GNOME/Mutter)                                        │
-│  └── xdg-desktop-portal-gnome → Mutter input injection          │
-└─────────────────────────────────────────────────────────────────┘
-```
-
-**Advantages:**
-- No elevated permissions needed
-- Integrates with ScreenCast session (can share portal session)
-- "Official" Wayland way for remote input
-
-**Disadvantages:**
-- Higher latency (+1-5ms due to D-Bus IPC)
-- Limited device emulation (no pressure sensitivity, no gamepad)
-- Only works with portals-aware desktops (GNOME, KDE Plasma)
-- Would require rewriting Wolf's input handling
-
-### Comparison
-
-| Aspect | uinput (Current) | RemoteDesktop Portal |
-|--------|------------------|---------------------|
-| Latency | ~0.5-1ms | ~2-5ms |
-| Permissions | CAP_SYS_ADMIN | None (D-Bus) |
-| Gamepad support | ✅ Full | ❌ Not supported |
-| Pressure sensitivity | ✅ Full | ❌ Not supported |
-| Multi-touch | ✅ Full | ✅ Basic |
-| Code changes | None | Major rewrite |
-| Desktop agnostic | ✅ Any X11/Wayland | ❌ Portal-aware only |
-
-### Recommendation: Keep uinput
-
-**For Wolf's use case, uinput remains the better choice:**
-
-1. **Wolf controls the container environment** - We can grant necessary permissions
-2. **Gaming requires low latency** - D-Bus IPC adds measurable delay
-3. **Full device support matters** - Gamepads are essential for game streaming
-4. **No code changes needed** - Input handling already works
-
-**Implementation:** No changes needed for input. The PipeWire ScreenCast integration only affects video capture. Input continues through existing uinput path.
-
-### If RemoteDesktop Portal is Required Later
-
-If a future use case requires RemoteDesktop Portal (e.g., unprivileged containers):
-
-1. Use [ashpd](https://docs.rs/ashpd/latest/ashpd/desktop/remote_desktop/index.html) crate for Rust bindings
-2. Create `RemoteDesktop` session alongside `ScreenCast` session
-3. Translate Moonlight input events → Portal notify methods
-4. Accept higher latency and reduced device support
-
-This would be a separate implementation task and is **not recommended** for the initial GNOME 49 integration.
+**No changes needed for initial implementation** - the PipeWire ScreenCast integration only affects video capture. Input handling is separate and can be addressed based on the specific deployment scenario.
 
 ---
 
@@ -445,6 +365,38 @@ The implementation directly reuses waylanddisplaycore's battle-tested types:
 
 No custom CUDA FFI code - everything flows through proven gst-wayland-display code.
 
+### Context Sharing Pattern (Wolf Maintainer Feedback)
+
+The element now follows the same context sharing pattern as waylandsrc:
+
+```
+┌─────────────────────────────────────────────────────────────────────────┐
+│                    CUDA Context Sharing Flow                            │
+├─────────────────────────────────────────────────────────────────────────┤
+│                                                                         │
+│  1. Wolf creates CUDA context                                           │
+│     └── gst_cuda_context_new(device_id)                                │
+│                                                                         │
+│  2. Wolf pushes context to pipeline elements                            │
+│     └── gst_element_set_context(element, context)                      │
+│                                                                         │
+│  3. pipewirezerocopysrc receives in set_context()                      │
+│     └── CUDAContext::new_from_set_context() extracts and stores it     │
+│                                                                         │
+│  4. Downstream elements query for context                               │
+│     └── pipewirezerocopysrc responds via query() override              │
+│                                                                         │
+│  FALLBACK: If Wolf doesn't push context, element acquires via          │
+│            CUDAContext::new_from_gstreamer() in start()                │
+│                                                                         │
+└─────────────────────────────────────────────────────────────────────────┘
+```
+
+Key implementation details:
+- `cuda_raw_ptr: AtomicPtr<GstCudaContext>` - raw pointer for GStreamer CUDA interop
+- `cuda_context: Arc<Mutex<CUDAContext>>` - shared context accessible across threads
+- Both stored in Settings struct for access from set_context(), start(), and create()
+
 ### What's Implemented
 
 - ✅ GStreamer PushSrc element (`pipewirezerocopysrc`)
@@ -455,11 +407,23 @@ No custom CUDA FFI code - everything flows through proven gst-wayland-display co
 - ✅ SHM fallback for non-DMA-BUF buffers
 - ✅ Integration into Wolf Dockerfile build
 - ✅ Integration into `streaming.cpp`
+- ✅ **Context sharing** (implemented 2025-12-30):
+  - `set_context()` override receives CUDA context pushed by Wolf via `gst_element_set_context()`
+  - Uses `CUDAContext::new_from_set_context()` to receive context from Wolf
+  - Uses `CUDAContext::new_from_gstreamer()` as fallback if no context pushed
+  - `query()` override responds to context queries from downstream elements
+  - `cuda_raw_ptr: AtomicPtr<GstCudaContext>` for GStreamer CUDA interop
+  - Follows exact pattern from waylandsrc in gst-wayland-display
 
 ### What's Still TODO
 
 - ❌ Format negotiation with PipeWire (currently accepts any format)
 - ❌ End-to-end testing with GNOME 49 container
+- ❌ Verify context sharing works correctly when Wolf pushes context
+
+### Build Status
+
+✅ **Compiles successfully** (as of 2025-12-30) - integrated into Wolf Docker build
 
 ### Build Requirements
 

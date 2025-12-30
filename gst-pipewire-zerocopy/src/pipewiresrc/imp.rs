@@ -1,4 +1,10 @@
 //! PipeWire ScreenCast source - reuses waylanddisplaycore's CUDA conversion
+//!
+//! This element follows Wolf/gst-wayland-display's context sharing pattern:
+//! - Wolf creates the CUDA context and pushes it via set_context()
+//! - We receive it in set_context() and store it
+//! - We respond to context queries from downstream elements
+//! - Fallback: if no context pushed, acquire via new_from_gstreamer()
 
 use crate::pipewire_stream::{FrameData, PipeWireStream};
 use gst::glib;
@@ -13,11 +19,14 @@ use parking_lot::Mutex;
 use smithay::backend::allocator::Buffer;
 use smithay::backend::drm::{DrmNode, NodeType};
 use smithay::backend::egl::{EGLDevice, EGLDisplay};
+use smithay::backend::egl::ffi::egl::types::EGLDisplay as RawEGLDisplay;
+use std::sync::atomic::AtomicPtr;
 use std::sync::Arc;
 
 // Reuse battle-tested CUDA code from waylanddisplaycore
 use waylanddisplaycore::utils::allocator::cuda::{
-    init_cuda, CUDAContext, CUDAImage, EGLImage, CUDABufferPool, CAPS_FEATURE_MEMORY_CUDA_MEMORY,
+    init_cuda, CUDAContext, CUDAImage, EGLImage, CUDABufferPool, GstCudaContext,
+    CAPS_FEATURE_MEMORY_CUDA_MEMORY, gst_cuda_handle_context_query_wrapped,
 };
 
 static CAT: Lazy<gst::DebugCategory> = Lazy::new(|| {
@@ -54,18 +63,28 @@ pub struct Settings {
     render_node: Option<String>,
     output_mode: OutputMode,
     cuda_device_id: i32,
+    /// CUDA context received from Wolf via set_context() or acquired via GStreamer
+    cuda_context: Option<Arc<std::sync::Mutex<CUDAContext>>>,
+    /// Raw pointer for GStreamer CUDA context interop - used by Wolf's context sharing
+    cuda_raw_ptr: AtomicPtr<GstCudaContext>,
 }
 
 impl Default for Settings {
     fn default() -> Self {
-        Self { pipewire_node_id: None, render_node: Some("/dev/dri/renderD128".into()), output_mode: OutputMode::Auto, cuda_device_id: -1 }
+        Self {
+            pipewire_node_id: None,
+            render_node: Some("/dev/dri/renderD128".into()),
+            output_mode: OutputMode::Auto,
+            cuda_device_id: -1,
+            cuda_context: None,
+            cuda_raw_ptr: AtomicPtr::new(std::ptr::null_mut()),
+        }
     }
 }
 
 pub struct State {
     stream: Option<PipeWireStream>,
     video_info: Option<VideoInfo>,
-    cuda_context: Option<CUDAContext>,
     egl_display: Option<Arc<EGLDisplay>>,
     buffer_pool: Option<CUDABufferPool>,
     actual_output_mode: OutputMode,
@@ -74,7 +93,7 @@ pub struct State {
 
 impl Default for State {
     fn default() -> Self {
-        Self { stream: None, video_info: None, cuda_context: None, egl_display: None, buffer_pool: None, actual_output_mode: OutputMode::System, frame_count: 0 }
+        Self { stream: None, video_info: None, egl_display: None, buffer_pool: None, actual_output_mode: OutputMode::System, frame_count: 0 }
     }
 }
 
@@ -167,6 +186,35 @@ impl ElementImpl for PipeWireZeroCopySrc {
             x => x,
         }
     }
+
+    /// Receive CUDA context from Wolf via GStreamer's context mechanism.
+    /// Wolf creates the context and pushes it to elements via gst_element_set_context().
+    fn set_context(&self, context: &gst::Context) {
+        let elem = self.obj().upcast_ref::<gst::Element>().to_owned();
+
+        // Get raw pointer for GStreamer CUDA interop
+        let cuda_raw_ptr = {
+            let settings = self.settings.lock();
+            settings.cuda_raw_ptr.as_ptr()
+        };
+
+        // Try to create CUDA context from the pushed context
+        // This matches Wolf's pattern: it creates context and pushes it to elements
+        match CUDAContext::new_from_set_context(&elem, context, -1, cuda_raw_ptr) {
+            Ok(ctx) => {
+                let mut settings = self.settings.lock();
+                if settings.cuda_context.is_none() {
+                    gst::info!(CAT, imp = self, "Received CUDA context from pipeline (via set_context)");
+                    settings.cuda_context = Some(Arc::new(std::sync::Mutex::new(ctx)));
+                }
+            }
+            Err(e) => {
+                gst::debug!(CAT, imp = self, "set_context: not a CUDA context or failed: {}", e);
+            }
+        }
+
+        self.parent_set_context(context)
+    }
 }
 
 impl BaseSrcImpl for PipeWireZeroCopySrc {
@@ -174,39 +222,60 @@ impl BaseSrcImpl for PipeWireZeroCopySrc {
         let mut state_guard = self.state.lock();
         if state_guard.is_some() { return Ok(()); }
 
-        let settings = self.settings.lock();
-        let node_id = settings.pipewire_node_id.ok_or_else(|| gst::error_msg!(gst::LibraryError::Settings, ("pipewire-node-id must be set")))?;
-        let render_node = settings.render_node.clone();
-        let output_mode = settings.output_mode;
-        let device_id = if settings.cuda_device_id >= 0 { settings.cuda_device_id } else { 0 };
-        drop(settings);
+        // Extract settings - but don't hold the lock while doing CUDA setup
+        let (node_id, render_node, output_mode, device_id) = {
+            let settings = self.settings.lock();
+            let node_id = settings.pipewire_node_id.ok_or_else(|| gst::error_msg!(gst::LibraryError::Settings, ("pipewire-node-id must be set")))?;
+            (node_id, settings.render_node.clone(), settings.output_mode, settings.cuda_device_id)
+        };
 
         gst::info!(CAT, imp = self, "Starting for node {}", node_id);
 
         let mut state = State::default();
+        let elem = self.obj().upcast_ref::<gst::Element>().to_owned();
 
-        // Try CUDA mode using waylanddisplaycore's battle-tested code
+        // Try CUDA mode using Wolf's context sharing pattern
         if output_mode == OutputMode::Auto || output_mode == OutputMode::Cuda {
             if let Ok(()) = init_cuda() {
-                match CUDAContext::new(device_id) {
-                    Ok(ctx) => {
-                        // Create EGL display from render node using smithay's pattern
-                        if let Some(ref node_path) = render_node {
-                            match create_egl_display(node_path) {
-                                Ok(display) => {
-                                    if let Ok(pool) = CUDABufferPool::new(&ctx) {
-                                        gst::info!(CAT, imp = self, "Using CUDA mode (device {})", device_id);
-                                        state.egl_display = Some(Arc::new(display));
-                                        state.buffer_pool = Some(pool);
-                                        state.cuda_context = Some(ctx);
-                                        state.actual_output_mode = OutputMode::Cuda;
-                                    }
-                                }
-                                Err(e) => gst::warning!(CAT, imp = self, "EGL display failed: {}", e),
+                // Check if we already received a CUDA context via set_context()
+                let have_cuda_context = self.settings.lock().cuda_context.is_some();
+
+                if !have_cuda_context {
+                    // No context pushed by Wolf - try to acquire one from the pipeline
+                    // This matches waylandsrc's fallback behavior
+                    gst::info!(CAT, imp = self, "No CUDA context from set_context, acquiring from pipeline");
+                    let cuda_raw_ptr = self.settings.lock().cuda_raw_ptr.as_ptr();
+                    match CUDAContext::new_from_gstreamer(&elem, device_id, cuda_raw_ptr) {
+                        Ok(ctx) => {
+                            let mut settings = self.settings.lock();
+                            if settings.cuda_context.is_none() {
+                                gst::info!(CAT, imp = self, "Acquired CUDA context via new_from_gstreamer");
+                                settings.cuda_context = Some(Arc::new(std::sync::Mutex::new(ctx)));
                             }
                         }
+                        Err(e) => {
+                            gst::warning!(CAT, imp = self, "Failed to acquire CUDA context: {}", e);
+                        }
                     }
-                    Err(e) => gst::warning!(CAT, imp = self, "CUDA context failed: {}", e),
+                }
+
+                // Now check if we have a context and set up EGL/buffer pool
+                let settings = self.settings.lock();
+                if let Some(ref cuda_context) = settings.cuda_context {
+                    if let Some(ref node_path) = render_node {
+                        match create_egl_display(node_path) {
+                            Ok(display) => {
+                                let cuda_ctx = cuda_context.lock().unwrap();
+                                if let Ok(pool) = CUDABufferPool::new(&cuda_ctx) {
+                                    gst::info!(CAT, imp = self, "Using CUDA mode with shared context");
+                                    state.egl_display = Some(Arc::new(display));
+                                    state.buffer_pool = Some(pool);
+                                    state.actual_output_mode = OutputMode::Cuda;
+                                }
+                            }
+                            Err(e) => gst::warning!(CAT, imp = self, "EGL display failed: {}", e),
+                        }
+                    }
                 }
             }
         }
@@ -237,6 +306,24 @@ impl BaseSrcImpl for PipeWireZeroCopySrc {
 
     fn is_seekable(&self) -> bool { false }
 
+    /// Handle context queries from downstream elements.
+    /// When downstream elements need a CUDA context, we provide ours.
+    fn query(&self, query: &mut gst::QueryRef) -> bool {
+        if query.type_() == gst::QueryType::Context {
+            let settings = self.settings.lock();
+            if let Some(ref cuda_context) = settings.cuda_context {
+                gst::debug!(CAT, imp = self, "Handling CUDA context query from downstream");
+                let cuda_ctx = cuda_context.lock().unwrap();
+                return gst_cuda_handle_context_query_wrapped(
+                    self.obj().as_ref().as_ref(),
+                    query,
+                    &cuda_ctx,
+                );
+            }
+        }
+        BaseSrcImplExt::parent_query(self, query)
+    }
+
     fn caps(&self, filter: Option<&gst::Caps>) -> Option<gst::Caps> {
         let g = self.state.lock();
         let mut caps = match g.as_ref().map(|s| s.actual_output_mode) {
@@ -259,6 +346,9 @@ impl BaseSrcImpl for PipeWireZeroCopySrc {
 
 impl PushSrcImpl for PipeWireZeroCopySrc {
     fn create(&self, _buffer: Option<&mut gst::BufferRef>) -> Result<CreateSuccess, gst::FlowError> {
+        // Get shared CUDA context from settings (cloning the Arc, not the context)
+        let cuda_context = self.settings.lock().cuda_context.clone();
+
         let mut g = self.state.lock();
         let state = g.as_mut().ok_or(gst::FlowError::Eos)?;
         let stream = state.stream.as_ref().ok_or(gst::FlowError::Error)?;
@@ -267,26 +357,29 @@ impl PushSrcImpl for PipeWireZeroCopySrc {
 
         let buffer = match frame {
             FrameData::DmaBuf(dmabuf) if state.actual_output_mode == OutputMode::Cuda => {
-                // Use waylanddisplaycore's battle-tested CUDA conversion
-                let cuda_ctx = state.cuda_context.as_ref().ok_or(gst::FlowError::Error)?;
+                // Use waylanddisplaycore's battle-tested CUDA conversion with shared context
+                let cuda_context_arc = cuda_context.as_ref().ok_or(gst::FlowError::Error)?;
+                let cuda_ctx = cuda_context_arc.lock().unwrap();
                 let egl_display = state.egl_display.as_ref().ok_or(gst::FlowError::Error)?;
 
                 // Get raw EGLDisplay handle for waylanddisplaycore's EGLImage::from()
-                let raw_display = egl_display.get_display_handle().handle;
+                let raw_display: RawEGLDisplay = egl_display.get_display_handle().handle;
 
                 let egl_image = EGLImage::from(&dmabuf, &raw_display)
                     .map_err(|e| { gst::error!(CAT, imp = self, "EGLImage: {}", e); gst::FlowError::Error })?;
 
-                let cuda_image = CUDAImage::from(egl_image, cuda_ctx)
+                let cuda_image = CUDAImage::from(egl_image, &cuda_ctx)
                     .map_err(|e| { gst::error!(CAT, imp = self, "CUDAImage: {}", e); gst::FlowError::Error })?;
 
-                let video_info = VideoInfoDmaDrm::from_video_info(
-                    &VideoInfo::builder(VideoFormat::Bgra, dmabuf.width() as u32, dmabuf.height() as u32).build().unwrap(),
-                    dmabuf.format().code as u32,
-                    dmabuf.format().modifier.into(),
-                ).map_err(|_| gst::FlowError::Error)?;
+                // Create VideoInfoDmaDrm using the new() constructor
+                let base_info = VideoInfo::builder(VideoFormat::Bgra, dmabuf.width() as u32, dmabuf.height() as u32)
+                    .build()
+                    .map_err(|_| gst::FlowError::Error)?;
+                let fourcc: u32 = dmabuf.format().code as u32;
+                let modifier: u64 = dmabuf.format().modifier.into();
+                let video_info = VideoInfoDmaDrm::new(base_info, fourcc, modifier);
 
-                cuda_image.to_gst_buffer(video_info, cuda_ctx, state.buffer_pool.as_ref())
+                cuda_image.to_gst_buffer(video_info, &cuda_ctx, state.buffer_pool.as_ref())
                     .map_err(|e| { gst::error!(CAT, imp = self, "CUDA buffer: {}", e); gst::FlowError::Error })?
             }
             FrameData::DmaBuf(dmabuf) => {
