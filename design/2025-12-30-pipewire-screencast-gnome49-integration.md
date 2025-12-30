@@ -424,37 +424,40 @@ This would be a separate implementation task and is **not recommended** for the 
 
 ```
 wolf/gst-pipewire-zerocopy/
-├── Cargo.toml              # Dependencies: gstreamer, pipewire, waylanddisplaycore
+├── Cargo.toml              # Dependencies: gstreamer, pipewire, waylanddisplaycore, smithay
 ├── build.rs                # GStreamer plugin version helper
 └── src/
-    ├── lib.rs              # Plugin registration
-    ├── dmabuf.rs           # DMA-BUF handling (independent of smithay)
-    ├── cuda.rs             # CUDA/EGL FFI for zero-copy conversion
-    ├── pipewire_stream.rs  # PipeWire stream handling
+    ├── lib.rs              # Plugin registration (minimal)
+    ├── pipewire_stream.rs  # PipeWire stream → smithay Dmabuf
     └── pipewiresrc/
         ├── mod.rs          # Element wrapper
-        └── imp.rs          # Full PushSrc implementation
+        └── imp.rs          # PushSrc using waylanddisplaycore's CUDA code
 ```
+
+**Key Design Decision: Maximum Code Reuse**
+
+The implementation directly reuses waylanddisplaycore's battle-tested types:
+- `EGLImage::from(dmabuf, egl_display)` - DMA-BUF → EGLImage
+- `CUDAImage::from(egl_image, cuda_context)` - EGLImage → CUDA
+- `CUDAImage::to_gst_buffer(video_info, cuda_ctx, buffer_pool)` - CUDA → GStreamer buffer
+- `CUDAContext`, `CUDABufferPool` - Context/pool management
+- smithay's `Dmabuf` type directly from PipeWire buffers
+
+No custom CUDA FFI code - everything flows through proven gst-wayland-display code.
 
 ### What's Implemented
 
 - ✅ GStreamer PushSrc element (`pipewirezerocopysrc`)
 - ✅ Properties: `pipewire-node-id`, `render-node`, `output-mode`, `cuda-device-id`
 - ✅ Pad templates for CUDA, DMABuf, and system memory output
-- ✅ Live source configuration (timestamps, no preroll)
-- ✅ PipeWire MainLoop initialization (separate thread)
-- ✅ Stream connection to ScreenCast node by ID
-- ✅ DMA-BUF extraction from SPA buffers
+- ✅ PipeWire → smithay Dmabuf conversion
+- ✅ waylanddisplaycore CUDA path: `EGLImage::from()` → `CUDAImage::from()` → `to_gst_buffer()`
 - ✅ SHM fallback for non-DMA-BUF buffers
-- ✅ CUDA FFI (EGL→CUDA conversion path)
-- ✅ Frame capture in `PushSrc::create()`
 - ✅ Integration into Wolf Dockerfile build
-- ✅ Integration into `streaming.cpp` (replaces fragile `pipewiresrc ! cudaupload`)
+- ✅ Integration into `streaming.cpp`
 
 ### What's Still TODO
 
-- ❌ Full CUDA buffer pool integration (currently returns error, falls back to copy)
-- ❌ DMA-BUF passthrough mode (currently falls back to copy)
 - ❌ Format negotiation with PipeWire (currently accepts any format)
 - ❌ End-to-end testing with GNOME 49 container
 
