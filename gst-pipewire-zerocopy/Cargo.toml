@@ -40,6 +40,7 @@ gst-plugin-version-helper = "0.8"
 [features]
 default = ["cuda"]
 cuda = []
+capi = []  # Required for cargo-c/cinstall
 
 [package.metadata.capi]
 min_version = "0.9.21"
