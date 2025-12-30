@@ -63,6 +63,9 @@ if (UNIX AND NOT APPLE)
     add_subdirectory(src/platforms/linux/uinput)
     target_link_libraries(wolf_core PUBLIC wolf::uinput)
 
+    add_subdirectory(src/platforms/linux/input-bridge)
+    target_link_libraries(wolf_core PUBLIC wolf_input_bridge)
+
     if (LINK_RUST_WAYLAND)
         message(STATUS "Using Rust C bindings for Wayland")
         list(APPEND CORE_SRC src/platforms/linux/virtual-display/wayland-display.cpp)

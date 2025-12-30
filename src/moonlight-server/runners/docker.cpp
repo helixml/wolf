@@ -93,6 +93,24 @@ void RunDocker::run(std::string_view session_id,
   // Set XDG_RUNTIME_DIR in container to match the mount point
   full_env.push_back("XDG_RUNTIME_DIR=/run/user/1000");
 
+  // Per-lobby socket mounting - provides isolated API for multi-tenant security
+  // The lobby.sock is created by LobbySocketServer in the same app_state_folder
+  // Mount it at a known location so the container can use it
+  auto lobby_socket_host_path = std::filesystem::path(app_state_folder) / "lobby.sock";
+  auto lobby_socket_container_path = "/var/run/wolf/lobby.sock";
+  // Only mount if the socket exists (it's created by LobbySocketServer before container starts)
+  if (std::filesystem::exists(lobby_socket_host_path)) {
+    logs::log(logs::debug, "[DOCKER] Mounting per-lobby socket: {} -> {}",
+              lobby_socket_host_path.string(), lobby_socket_container_path);
+    mounts.push_back(MountPoint{.source = lobby_socket_host_path.string(),
+                                .destination = lobby_socket_container_path,
+                                .mode = "rw"});
+    full_env.push_back(fmt::format("WOLF_LOBBY_SOCKET_PATH={}", lobby_socket_container_path));
+  } else {
+    logs::log(logs::warning, "[DOCKER] Per-lobby socket not found at {}, container won't have isolated API access",
+              lobby_socket_host_path.string());
+  }
+
   // Add equivalent of --gpu=all if on NVIDIA without the custom driver volume
   auto final_json_opts = this->base_create_json;
   if (get_vendor(render_node) == NVIDIA && !utils::get_env("NVIDIA_DRIVER_VOLUME_NAME")) {

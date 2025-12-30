@@ -309,6 +309,13 @@ void mouse_button(const MOUSE_BUTTON_PACKET &pkt, events::StreamSession &session
       } else {
         std::get<wolf::core::virtual_display::WaylandMouse>(session.mouse->value()).release(pkt.button);
       }
+    } else if (std::holds_alternative<input::InputBridgeMouse>(session.mouse->value())) {
+      // InputBridge for PipeWire/RemoteDesktop mode - uses Mutter's D-Bus API
+      if (pkt.type == MOUSE_BUTTON_PRESS) {
+        std::get<input::InputBridgeMouse>(session.mouse->value()).press(pkt.button);
+      } else {
+        std::get<input::InputBridgeMouse>(session.mouse->value()).release(pkt.button);
+      }
     }
   } else {
     logs::log(logs::warning, "Received MOUSE_BUTTON_PACKET but no mouse device is present");
@@ -489,6 +496,23 @@ void touch(const TOUCH_PACKET &pkt, events::StreamSession &session) {
             }
             // Moonlight TOUCH_EVENT does not include TouchFrame events, so we trigger it manually every time
             screen.frame();
+          } else if constexpr (std::is_same_v<T, input::InputBridgeTouchScreen>) {
+            // InputBridge for PipeWire/RemoteDesktop mode - uses Mutter's D-Bus API
+            // place_finger internally tracks slot state to send touch_down vs touch_motion
+            switch (pkt.event_type) {
+            case pkts::TOUCH_EVENT_HOVER:
+            case pkts::TOUCH_EVENT_DOWN:
+            case pkts::TOUCH_EVENT_MOVE:
+              screen.place_finger(finger_id, x, y);
+              break;
+            case pkts::TOUCH_EVENT_UP:
+            case pkts::TOUCH_EVENT_HOVER_LEAVE:
+            case pkts::TOUCH_EVENT_CANCEL:
+              screen.release_finger(finger_id);
+              break;
+            default:
+              logs::log(logs::warning, "[INPUT] Unknown touch event type {}", (int)pkt.event_type);
+            }
           }
         },
         **session.touch_screen);

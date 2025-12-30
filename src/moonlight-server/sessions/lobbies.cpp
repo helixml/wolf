@@ -1,3 +1,4 @@
+#include <api/lobby_socket_server.hpp>
 #include <immer/vector_transient.hpp>
 #include <sessions/handlers.hpp>
 #include <state/config.hpp>
@@ -127,6 +128,12 @@ setup_lobbies_handlers(const immer::box<state::AppState> &app_state,
                           .video_settings = lobby_settings->video_settings});
         app_state->lobbies->update(
             [lobby](const immer::vector<events::Lobby> &lobbies) { return lobbies.push_back(*lobby); });
+
+        // Start per-lobby socket server for multi-tenant API isolation
+        // Each lobby gets its own scoped socket that only exposes lobby-specific endpoints
+        auto socket_path = runner_state_path + "/lobby.sock";
+        lobby->lobby_socket_server = wolf::api::start_lobby_socket_server(socket_path, lobby->id, ev_bus);
+        logs::log(logs::info, "[LOBBY] Started per-lobby socket server at {}", socket_path);
 
         bool use_pipewire_mode = lobby_settings->video_settings.video_source_mode == "pipewire";
 
@@ -335,45 +342,59 @@ setup_lobbies_handlers(const immer::box<state::AppState> &app_state,
         bool use_pipewire_mode = lobby->video_settings.video_source_mode == "pipewire";
 
         if (use_pipewire_mode) {
-          // PipeWire mode: Use inputtino (kernel evdev) devices instead of Wayland
-          // These are passed to the container via fake-udev
-          logs::log(logs::debug, "[LOBBY] Creating inputtino devices for PipeWire mode lobby {}", lobby->id);
+          // PipeWire mode: Check if InputBridge is connected (RemoteDesktop D-Bus input)
+          // or fall back to inputtino devices (kernel evdev)
+          if (lobby->input_bridge->is_connected()) {
+            // Use InputBridge for RemoteDesktop D-Bus input
+            logs::log(logs::debug, "[LOBBY] Using InputBridge for PipeWire mode lobby {}", lobby->id);
 
-          auto mouse = input::Mouse::create();
-          if (!mouse) {
-            logs::log(logs::error, "[LOBBY] Failed to create mouse: {}", mouse.getErrorMessage());
-          } else {
-            auto mouse_ptr = input::Mouse(std::move(*mouse));
-            // Plug device into the lobby's container
-            lobby->plugged_devices_queue->push(immer::box<events::PlugDeviceEvent>(
-                events::PlugDeviceEvent{.session_id = lobby->id,
-                                        .udev_events = mouse_ptr.get_udev_events(),
-                                        .udev_hw_db_entries = mouse_ptr.get_udev_hw_db_entries()}));
-            session->mouse->emplace(std::move(mouse_ptr));
-          }
+            session->mouse->emplace(input::InputBridgeMouse(lobby->input_bridge));
+            session->keyboard->emplace(input::InputBridgeKeyboard(lobby->input_bridge));
 
-          auto keyboard = input::Keyboard::create();
-          if (!keyboard) {
-            logs::log(logs::error, "[LOBBY] Failed to create keyboard: {}", keyboard.getErrorMessage());
+            int width = lobby->video_settings.width;
+            int height = lobby->video_settings.height;
+            session->touch_screen->emplace(input::InputBridgeTouchScreen(lobby->input_bridge, width, height));
           } else {
-            auto keyboard_ptr = input::Keyboard(std::move(*keyboard));
-            lobby->plugged_devices_queue->push(immer::box<events::PlugDeviceEvent>(
-                events::PlugDeviceEvent{.session_id = lobby->id,
-                                        .udev_events = keyboard_ptr.get_udev_events(),
-                                        .udev_hw_db_entries = keyboard_ptr.get_udev_hw_db_entries()}));
-            session->keyboard->emplace(std::move(keyboard_ptr));
-          }
+            // InputBridge not connected yet - use inputtino devices as fallback
+            // These are passed to the container via fake-udev
+            logs::log(logs::debug, "[LOBBY] Creating inputtino devices for PipeWire mode lobby {} (InputBridge not connected yet)", lobby->id);
 
-          auto touch = input::TouchScreen::create();
-          if (!touch) {
-            logs::log(logs::error, "[LOBBY] Failed to create touch screen: {}", touch.getErrorMessage());
-          } else {
-            auto touch_ptr = input::TouchScreen(std::move(*touch));
-            lobby->plugged_devices_queue->push(immer::box<events::PlugDeviceEvent>(
-                events::PlugDeviceEvent{.session_id = lobby->id,
-                                        .udev_events = touch_ptr.get_udev_events(),
-                                        .udev_hw_db_entries = touch_ptr.get_udev_hw_db_entries()}));
-            session->touch_screen->emplace(std::move(touch_ptr));
+            auto mouse = input::Mouse::create();
+            if (!mouse) {
+              logs::log(logs::error, "[LOBBY] Failed to create mouse: {}", mouse.getErrorMessage());
+            } else {
+              auto mouse_ptr = input::Mouse(std::move(*mouse));
+              // Plug device into the lobby's container
+              lobby->plugged_devices_queue->push(immer::box<events::PlugDeviceEvent>(
+                  events::PlugDeviceEvent{.session_id = lobby->id,
+                                          .udev_events = mouse_ptr.get_udev_events(),
+                                          .udev_hw_db_entries = mouse_ptr.get_udev_hw_db_entries()}));
+              session->mouse->emplace(std::move(mouse_ptr));
+            }
+
+            auto keyboard = input::Keyboard::create();
+            if (!keyboard) {
+              logs::log(logs::error, "[LOBBY] Failed to create keyboard: {}", keyboard.getErrorMessage());
+            } else {
+              auto keyboard_ptr = input::Keyboard(std::move(*keyboard));
+              lobby->plugged_devices_queue->push(immer::box<events::PlugDeviceEvent>(
+                  events::PlugDeviceEvent{.session_id = lobby->id,
+                                          .udev_events = keyboard_ptr.get_udev_events(),
+                                          .udev_hw_db_entries = keyboard_ptr.get_udev_hw_db_entries()}));
+              session->keyboard->emplace(std::move(keyboard_ptr));
+            }
+
+            auto touch = input::TouchScreen::create();
+            if (!touch) {
+              logs::log(logs::error, "[LOBBY] Failed to create touch screen: {}", touch.getErrorMessage());
+            } else {
+              auto touch_ptr = input::TouchScreen(std::move(*touch));
+              lobby->plugged_devices_queue->push(immer::box<events::PlugDeviceEvent>(
+                  events::PlugDeviceEvent{.session_id = lobby->id,
+                                          .udev_events = touch_ptr.get_udev_events(),
+                                          .udev_hw_db_entries = touch_ptr.get_udev_hw_db_entries()}));
+              session->touch_screen->emplace(std::move(touch_ptr));
+            }
           }
         } else {
           // Wayland mode: Use the lobby's Wayland compositor for input
@@ -445,6 +466,12 @@ setup_lobbies_handlers(const immer::box<state::AppState> &app_state,
         for (auto &session_id : sessions) {
           app_state->event_bus->fire_event(immer::box<events::LeaveLobbyEvent>{
               events::LeaveLobbyEvent{.lobby_id = lobby->id, .moonlight_session_id = std::stoul(*session_id)}});
+        }
+
+        // Stop the per-lobby socket server
+        if (lobby->lobby_socket_server) {
+          logs::log(logs::info, "[LOBBY] Stopping per-lobby socket server for {}", lobby->id);
+          lobby->lobby_socket_server->stop();
         }
 
         // Finally, remove the lobby from the app_state
@@ -565,6 +592,54 @@ setup_lobbies_handlers(const immer::box<state::AppState> &app_state,
             logs::log(logs::error, "[LOBBY] PipeWire video producer thread unknown exception");
           }
         }).detach();
+      }));
+
+  // When a container reports its input socket path, connect the InputBridge
+  handlers.push_back(app_state->event_bus->register_handler<immer::box<events::SetInputSocketEvent>>(
+      [=](const immer::box<events::SetInputSocketEvent> &input_socket_event) {
+        auto lobbies = app_state->lobbies->load();
+        auto lobby = state::get_lobby_by_id(lobbies.get(), input_socket_event->lobby_id);
+
+        if (!lobby) {
+          logs::log(logs::error, "[LOBBY] SetInputSocketEvent: lobby {} not found", input_socket_event->lobby_id);
+          return;
+        }
+
+        if (lobby->video_settings.video_source_mode != "pipewire") {
+          logs::log(logs::warning, "[LOBBY] SetInputSocketEvent: lobby {} not in pipewire mode, ignoring",
+                    input_socket_event->lobby_id);
+          return;
+        }
+
+        logs::log(logs::info, "[LOBBY] Connecting InputBridge to socket {} for lobby {}",
+                  input_socket_event->input_socket_path, lobby->id);
+
+        if (!lobby->input_bridge->connect(input_socket_event->input_socket_path)) {
+          logs::log(logs::error, "[LOBBY] Failed to connect InputBridge to socket {}",
+                    input_socket_event->input_socket_path);
+          return;
+        }
+
+        logs::log(logs::info, "[LOBBY] InputBridge connected for lobby {}", lobby->id);
+
+        // Update any existing sessions in this lobby to use the InputBridge
+        auto sessions = app_state->running_sessions->load();
+        auto connected_session_ids = lobby->connected_sessions->load();
+        for (const auto &session_id_box : *connected_session_ids) {
+          std::size_t session_id = std::stoul(*session_id_box);
+          auto session = state::get_session_by_id(sessions.get(), session_id);
+          if (session) {
+            logs::log(logs::debug, "[LOBBY] Switching session {} to InputBridge devices", session_id);
+
+            // Switch to InputBridge devices
+            session->mouse->emplace(input::InputBridgeMouse(lobby->input_bridge));
+            session->keyboard->emplace(input::InputBridgeKeyboard(lobby->input_bridge));
+
+            int width = lobby->video_settings.width;
+            int height = lobby->video_settings.height;
+            session->touch_screen->emplace(input::InputBridgeTouchScreen(lobby->input_bridge, width, height));
+          }
+        }
       }));
 
   return handlers.persistent();

@@ -9,6 +9,7 @@
 #include <core/audio.hpp>
 #include <core/input.hpp>
 #include <core/virtual-display.hpp>
+#include <input_bridge.hpp>
 #include <cstddef>
 #include <eventbus/event_bus.hpp>
 #include <helpers/tsqueue.hpp>
@@ -23,6 +24,10 @@
 #include <rfl/json.hpp>
 #include <state/serialised_config.hpp>
 #include <string_view>
+
+namespace wolf::api {
+class LobbySocketServer;
+}
 
 namespace wolf::core::events {
 
@@ -206,6 +211,20 @@ struct Lobby {
    */
   std::shared_ptr<immer::atom<std::optional<unsigned int>>> pipewire_node_id =
       std::make_shared<immer::atom<std::optional<unsigned int>>>(std::nullopt);
+
+  /**
+   * Input bridge for RemoteDesktop input mode.
+   * Provides input injection via the container's RemoteDesktop D-Bus API.
+   * Only used when video_settings.video_source_mode == "pipewire".
+   */
+  std::shared_ptr<input::InputBridge> input_bridge = std::make_shared<input::InputBridge>();
+
+  /**
+   * Per-lobby socket server for multi-tenant API isolation.
+   * Each lobby gets its own scoped socket that only exposes lobby-specific endpoints.
+   * This prevents containers from interfering with other lobbies via the API.
+   */
+  std::shared_ptr<wolf::api::LobbySocketServer> lobby_socket_server;
 };
 
 /**
@@ -215,6 +234,16 @@ struct Lobby {
 struct SetPipeWireNodeIdEvent {
   std::string lobby_id;
   unsigned int node_id;
+};
+
+/**
+ * Event fired when a container reports its input socket path.
+ * Wolf connects to this socket to forward input events to the container's
+ * RemoteDesktop D-Bus API.
+ */
+struct SetInputSocketEvent {
+  std::string lobby_id;
+  std::string input_socket_path;
 };
 
 struct CreateLobbyEvent {
@@ -276,9 +305,9 @@ struct DockerPullImageEndEvent {
   bool success;
 };
 
-using MouseTypes = std::variant<input::Mouse, virtual_display::WaylandMouse>;
-using KeyboardTypes = std::variant<input::Keyboard, virtual_display::WaylandKeyboard>;
-using TouchScreenTypes = std::variant<input::TouchScreen, virtual_display::WaylandTouchScreen>;
+using MouseTypes = std::variant<input::Mouse, virtual_display::WaylandMouse, input::InputBridgeMouse>;
+using KeyboardTypes = std::variant<input::Keyboard, virtual_display::WaylandKeyboard, input::InputBridgeKeyboard>;
+using TouchScreenTypes = std::variant<input::TouchScreen, virtual_display::WaylandTouchScreen, input::InputBridgeTouchScreen>;
 using JoypadTypes = std::variant<input::XboxOneJoypad, input::SwitchJoypad, input::PS5Joypad>;
 using JoypadList = immer::map<int /* controller number */, std::shared_ptr<JoypadTypes>>;
 
@@ -406,6 +435,7 @@ using EventBusHandlers = dp::handler_registration<immer::box<PlugDeviceEvent>,
                                                   immer::box<CreateLobbyEvent>,
                                                   immer::box<StopLobbyEvent>,
                                                   immer::box<SetPipeWireNodeIdEvent>,
+                                                  immer::box<SetInputSocketEvent>,
                                                   immer::box<SwitchStreamProducerEvents>>;
 using EventBusType = dp::event_bus<immer::box<PlugDeviceEvent>,
                                    immer::box<PairSignal>,
@@ -425,6 +455,7 @@ using EventBusType = dp::event_bus<immer::box<PlugDeviceEvent>,
                                    immer::box<CreateLobbyEvent>,
                                    immer::box<StopLobbyEvent>,
                                    immer::box<SetPipeWireNodeIdEvent>,
+                                   immer::box<SetInputSocketEvent>,
                                    immer::box<SwitchStreamProducerEvents>>;
 using EventsVariant = std::variant<immer::box<PlugDeviceEvent>,
                                    immer::box<PairSignal>,
@@ -444,6 +475,7 @@ using EventsVariant = std::variant<immer::box<PlugDeviceEvent>,
                                    immer::box<CreateLobbyEvent>,
                                    immer::box<StopLobbyEvent>,
                                    immer::box<SetPipeWireNodeIdEvent>,
+                                   immer::box<SetInputSocketEvent>,
                                    immer::box<SwitchStreamProducerEvents>>;
 
 /**
