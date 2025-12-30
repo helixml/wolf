@@ -1,426 +1,313 @@
-# PipeWire ScreenCast Integration for GNOME 49+ (Design Doc)
+# PipeWire ScreenCast CUDA Integration for GNOME 49+ (Technical Design)
 
 **Date:** 2025-12-30
 **Author:** Luke / Claude
-**Status:** DRAFT - Needs Wolf maintainer review
-**Wolf Issue:** GNOME 49 removes wl-roots-style direct Wayland capture
+**Status:** DRAFT - Pending Wolf maintainer review
 
-## Key Constraint
+## Executive Summary
 
-**Wolf controls the entire GPU stack.** We force everything (GNOME, apps, encoding) to run on a single GPU. Hybrid/multi-GPU is not a supported configuration.
+GNOME 49 removes wl-roots-style Wayland capture. This document analyzes whether we can use the proven gst-wayland-display EGL→CUDA code to convert PipeWire ScreenCast DMA-BUFs into CUDA buffers.
 
-This means:
-- DMA-BUFs from GNOME are NVIDIA-native (same device)
-- EGL import into CUDA will work (same device, same driver)
-- Zero-copy is achievable
-
-## Problem Statement
-
-GNOME 49 removes the ability for external processes to create wl-roots-style Wayland compositors that receive application buffers directly. Wolf's current `waylanddisplaysrc` element (from gst-wayland-display) relies on this capability.
-
-Going forward, GNOME 49+ requires using **PipeWire ScreenCast portal** for screen capture.
-
-## Wolf Maintainer's Concerns (Quoted)
-
-> That's my concern too, DMA buffers and Nvidia are generally quite painful but I haven't looked into how pipewire does it. If `pipewiresrc` can only output DMA (and not CUDABuffers like we do) you'll have to do:
-> ```
-> pipewiresrc ! glupload ! cudaupload !
-> ```
-> which kinda works until it doesn't.. Plus there's the issue of mouse/keyboard inputs, unless that's something that pipewiresrc supports?
-
-This doc addresses each concern directly.
+**Conclusion:** Yes, technically feasible. The gst-wayland-display code converts **DMA-BUFs** to CUDA buffers (not EGL surfaces), and PipeWire ScreenCast outputs DMA-BUFs. The same conversion path applies.
 
 ---
 
-## Concern 1: DMA Buffers + NVIDIA = Pain
+## The Real Problem: CUDA Buffer Sharing in Lobby Mode
 
-### The Problem
+The Wolf maintainer's concern about `pipewiresrc ! glupload ! cudaupload` being "fragile" relates to **CUDA buffer sharing between multiple viewers in lobby mode**.
 
-`pipewiresrc` outputs `video/x-raw(memory:DMABuf)`. Wolf needs `video/x-raw(memory:CUDAMemory)` for NVENC.
+When multiple Moonlight clients connect to the same Wolf session:
+- The video source outputs frames once
+- Multiple encoders consume the same frames
+- Sharing CUDA buffers between consumers requires careful synchronization
+- The `glupload ! cudaupload` pipeline adds GL context complexity to this already complex sharing
 
-The naive approach is:
-```
-pipewiresrc ! glupload ! cudaupload ! nvh264enc
-```
-
-But this has known failure modes:
-1. **Hybrid graphics**: DMA-BUF from Intel iGPU can't be imported into NVIDIA EGL
-2. **Format mismatches**: PipeWire may negotiate formats NVIDIA can't handle
-3. **Modifier incompatibility**: Tiled/compressed buffers may fail EGL import
-
-### Why gst-wayland-display Works (and PipeWire is Different)
-
-| Aspect | gst-wayland-display | PipeWire ScreenCast |
-|--------|---------------------|---------------------|
-| Who creates buffers? | Applications render to Wolf | GNOME Shell creates buffers |
-| Who controls GPU? | Wolf (can force NVIDIA) | GNOME (user's choice) |
-| Buffer lifecycle | Wolf controls release | PipeWire demands quick return |
-| Cross-device? | Never (same compositor) | Often (hybrid graphics) |
-
-**gst-wayland-display's EGL→CUDA code cannot be directly reused** for PipeWire because:
-- It assumes buffers originate from the same GPU
-- It assumes Wolf controls buffer lifecycle
-- It assumes wl-roots compositor semantics
-
-### Proposed Solution: GPU-Aware Pipeline Selection
-
-```
-┌─────────────────────────────────────────────────────────────────┐
-│                    Pipeline Selection Logic                      │
-├─────────────────────────────────────────────────────────────────┤
-│                                                                  │
-│  1. Query PipeWire buffer device (DMA-BUF ioctl)                │
-│  2. Query NVIDIA device ID                                       │
-│  3. Compare:                                                     │
-│                                                                  │
-│     IF same_device:                                              │
-│        pipewiresrc ! glupload ! cudaupload ! nvh264enc          │
-│        (fast path - same GPU, GL handles import)                 │
-│                                                                  │
-│     ELSE IF nvidia_present_but_not_source:                      │
-│        pipewiresrc ! gldownload ! cudaupload ! nvh264enc        │
-│        (slow path - CPU copy, but guaranteed to work)            │
-│                                                                  │
-│     ELSE (no nvidia, AMD/Intel only):                           │
-│        pipewiresrc ! vapostproc ! vaapih264enc                  │
-│        (native VAAPI path - DMABuf stays on GPU)                 │
-│                                                                  │
-└─────────────────────────────────────────────────────────────────┘
-```
-
-### Code Reuse from gst-wayland-display
-
-We CAN reuse:
-- `wayland-display-core/src/utils/allocator/cuda/` - CUDA FFI bindings and CuGraphicsResource wrapper
-- `wayland-display-core/src/utils/device.rs` - GPU device detection
-- Error handling patterns and logging
-
-We CANNOT reuse:
-- The wl-roots compositor code (irrelevant for PipeWire)
-- The EGLImage import path directly (different buffer ownership model)
-- Buffer lifecycle management (PipeWire has its own)
-
-### Honest Assessment
-
-The `glupload ! cudaupload` pipeline is actually **more robust** than a custom zero-copy element because:
-1. GStreamer's `glupload` handles cross-device cases via fallback
-2. `cudaupload` is maintained by GStreamer devs who understand NVIDIA quirks
-3. It's been battle-tested across many configurations
-
-**Recommendation**: Use the standard GStreamer elements with GPU detection fallback. Don't build a custom zero-copy element that will fail on hybrid graphics.
+The gst-wayland-display approach outputs CUDA buffers **directly**, avoiding the GL intermediary and its associated context/synchronization complexity.
 
 ---
 
-## Concern 2: Mouse/Keyboard Input via PipeWire?
+## Technical Deep Dive: What Does gst-wayland-display Actually Do?
 
-### The Problem
+### Input: DMA-BUF (NOT EGL Surface)
 
-Wolf currently handles input via:
-1. Moonlight client sends input events
-2. Wolf injects into the Wayland compositor (libinput/uinput)
-3. Applications receive native Wayland input
+The CUDA conversion code in `wayland-display-core/src/utils/allocator/cuda/` takes:
+- A `Dmabuf` (smithay type) containing file descriptors to kernel DMA buffers
+- An `EGLDisplay` for the GPU
 
-With PipeWire ScreenCast:
-- It's **capture only** - no input injection
-- The RemoteDesktop portal exists but is separate
+**NOT** an EGL surface or GL texture. The EGL is just an intermediary for CUDA interop.
 
-### PipeWire RemoteDesktop Portal
-
-GNOME provides `org.freedesktop.portal.RemoteDesktop`:
-- Separate from ScreenCast portal
-- Provides input injection (keyboard, mouse, touch)
-- Must be used together with ScreenCast for full remote desktop
-
-```
-┌─────────────────────────────────────────────────────────────────┐
-│                 Full Remote Desktop Stack                        │
-├─────────────────────────────────────────────────────────────────┤
-│                                                                  │
-│  ┌──────────────────┐     ┌──────────────────┐                  │
-│  │ ScreenCast Portal│     │RemoteDesktop     │                  │
-│  │ (capture)        │     │Portal (input)    │                  │
-│  └────────┬─────────┘     └────────┬─────────┘                  │
-│           │                        │                             │
-│           └──────────┬─────────────┘                             │
-│                      │                                           │
-│               Session (linked)                                   │
-│                      │                                           │
-│           ┌──────────┴──────────┐                               │
-│           │                     │                                │
-│      PipeWire stream      D-Bus input                           │
-│      (video frames)       injection                              │
-│                                                                  │
-└─────────────────────────────────────────────────────────────────┘
-```
-
-### API for Input Injection
-
-```python
-# Simplified - actual implementation is D-Bus
-session = portal.CreateSession()
-portal.SelectDevices(session, {
-    'types': KEYBOARD | POINTER,
-    'persist_mode': PERSIST_MODE_PERSISTENT
-})
-portal.Start(session)
-
-# Input injection via D-Bus
-portal.NotifyPointerMotion(session, dx, dy)
-portal.NotifyPointerButton(session, button, state)
-portal.NotifyKeyboardKeycode(session, keycode, state)
-```
-
-### Integration with Wolf
-
-Wolf would need:
-1. **Portal session management**: Create linked ScreenCast + RemoteDesktop session
-2. **Input translation**: Convert Moonlight input events to portal calls
-3. **Latency consideration**: D-Bus adds latency vs. direct uinput
-
-### Rust Crates Available
-
-- `ashpd` - Rust bindings for XDG portals (ScreenCast + RemoteDesktop)
-- `zbus` - D-Bus library (used by ashpd internally)
-
-```rust
-use ashpd::desktop::remote_desktop::{RemoteDesktop, DeviceType};
-use ashpd::desktop::screencast::{ScreenCast, SourceType};
-
-async fn create_session() -> Result<Session> {
-    let portal = RemoteDesktop::new().await?;
-    let session = portal.create_session().await?;
-
-    portal.select_devices(
-        &session,
-        DeviceType::Keyboard | DeviceType::Pointer,
-    ).await?;
-
-    // Link with ScreenCast
-    let screencast = ScreenCast::new().await?;
-    screencast.select_sources(
-        &session,
-        SourceType::Monitor,
-    ).await?;
-
-    portal.start(&session).await?;
-    Ok(session)
-}
-```
-
-### Honest Assessment
-
-Input via RemoteDesktop portal:
-- **Works** - GNOME supports it, it's the official API
-- **Adds latency** - D-Bus round-trip vs. direct uinput
-- **Requires user consent** - Portal shows permission dialog
-- **Session persistence** - Can be persisted to avoid repeated dialogs
-
-**Recommendation**: Implement RemoteDesktop portal integration. It's the only supported path for GNOME 49+.
-
----
-
-## Concern 3: "Until It Doesn't Work"
-
-### Known Failure Modes of glupload ! cudaupload
-
-1. **NVIDIA driver version mismatch**
-   - Old drivers have broken EGL_EXT_image_dma_buf_import
-   - Minimum: 470+ for reasonable support, 525+ recommended
-
-2. **Wayland vs X11**
-   - GStreamer's GL context creation differs
-   - EGL on Wayland, GLX on X11
-   - cudaupload expects EGL context
-
-3. **Modifier negotiation**
-   - PipeWire may offer modifiers NVIDIA can't import
-   - Need to constrain accepted modifiers
-
-4. **Buffer starvation**
-   - PipeWire has limited buffer pool
-   - Holding buffers too long causes capture stutter
-
-### Mitigations
+### The Conversion Pipeline
 
 ```c
-// In GStreamer pipeline setup
-GstCaps *caps = gst_caps_from_string(
-    "video/x-raw(memory:DMABuf),"
-    "format={NV12,BGRA},"          // Limit to known-working formats
-    "drm-format={NV12,AR24},"
-    "width=[1,8192],"
-    "height=[1,8192]"
+// Step 1: Create EGLImage from DMA-BUF
+// File: wayland-display-core/src/utils/allocator/cuda/mod.rs:55-134
+attribs = [
+    EGL_LINUX_DRM_FOURCC_EXT, fourcc,
+    EGL_DMA_BUF_PLANE0_FD_EXT, dmabuf.fd,
+    EGL_DMA_BUF_PLANE0_OFFSET_EXT, dmabuf.offset,
+    EGL_DMA_BUF_PLANE0_PITCH_EXT, dmabuf.stride,
+    EGL_DMA_BUF_PLANE0_MODIFIER_LO_EXT, modifier_lo,
+    EGL_DMA_BUF_PLANE0_MODIFIER_HI_EXT, modifier_hi,
+    ...
+];
+egl_image = eglCreateImageKHR(
+    egl_display,
+    EGL_NO_CONTEXT,        // No GL context needed!
+    EGL_LINUX_DMA_BUF_EXT, // Target: DMA-BUF import
+    NULL,
+    attribs
 );
 
-// Force LINEAR modifier if needed
-gst_caps_set_simple(caps,
-    "drm-modifier", G_TYPE_UINT64, DRM_FORMAT_MOD_LINEAR,
-    NULL);
+// Step 2: Register EGLImage with CUDA
+// File: wayland-display-core/src/utils/allocator/cuda/mod.rs:448-463
+cuGraphicsEGLRegisterImage(&cuda_resource, egl_image, 0);
+
+// Step 3: Get CUDA-accessible frame data
+// File: wayland-display-core/src/utils/allocator/cuda/ffi.rs:208-221
+cuGraphicsResourceGetMappedEglFrame(&egl_frame, cuda_resource, 0, 0);
+
+// Step 4: Copy to CUDA buffer
+// File: wayland-display-core/src/utils/allocator/cuda/ffi.rs:463-538
+CuMemcpy2DAsync(&copy_params, stream);
 ```
 
-### Fallback Chain
+### Key Observation
+
+The conversion is **generic for any DMA-BUF on the same GPU**. It doesn't care whether the DMA-BUF came from:
+- A Wayland client rendering to Wolf's compositor (current use case)
+- GNOME Shell's ScreenCast via PipeWire (proposed use case)
+- Any other source that produces DMA-BUFs
+
+---
+
+## What Does PipeWire ScreenCast Output?
+
+### Buffer Types
+
+PipeWire ScreenCast outputs **DMA-BUFs** when negotiated. From [PipeWire DMA-BUF documentation](https://docs.pipewire.org/page_dma_buf.html):
+
+1. **DMA-BUF mode** (preferred): `SPA_DATA_DmaBuf`
+   - File descriptors to GPU memory
+   - Includes fourcc format code and modifiers
+   - Same structure as what gst-wayland-display handles
+
+2. **SHM fallback**: `SPA_DATA_MemFd` / `SPA_DATA_MemPtr`
+   - CPU memory (used when DMA-BUF negotiation fails)
+   - Requires CPU→GPU upload
+
+### GNOME/Mutter Implementation
+
+From [Mutter MR !1939](https://gitlab.gnome.org/GNOME/mutter/-/merge_requests/1939) and [MR !2086](https://gitlab.gnome.org/GNOME/mutter/-/merge_requests/2086):
+
+- Mutter announces both DMA-BUF and SHM capabilities via PipeWire
+- DMA-BUF buffers are only allocated if the PipeWire client requests them
+- On NVIDIA, Mutter uses the same GPU memory for ScreenCast as for rendering
+
+### Format Negotiation
+
+PipeWire uses SPA (Simple Plugin API) for format negotiation:
+```
+Consumer → Announces: "I accept DMA-BUF with modifiers X, Y, Z"
+Producer → Responds with: Best matching format/modifier
+```
+
+The consumer (our element) must:
+1. Query supported modifiers from our EGL/CUDA stack
+2. Announce them to PipeWire
+3. Accept buffers with negotiated format
+
+---
+
+## Why the Current `pipewiresrc ! glupload ! cudaupload` is Problematic
+
+### The Pipeline
+```
+pipewiresrc (outputs DMA-BUF)
+    ↓
+glupload (imports DMA-BUF into GL texture)
+    ↓
+cudaupload (copies GL texture to CUDA)
+    ↓
+nvh264enc
+```
+
+### Problems
+
+1. **GL Context Complexity**: `glupload` creates/manages GL context, which adds state that must be coordinated with CUDA context.
+
+2. **Buffer Sharing in Lobby Mode**: When multiple encoders share frames:
+   - GL textures have their own reference counting
+   - GL→CUDA synchronization is per-texture
+   - Multiple consumers = multiple sync points = instability
+
+3. **Extra Copy**: `glupload` may perform format conversion into GL texture, then `cudaupload` copies again to CUDA. Two copies vs our one.
+
+4. **Error Propagation**: Failures in `glupload` (EGL context errors, format mismatches) are opaque to the pipeline.
+
+### Our Approach: Direct DMA-BUF → CUDA
 
 ```
-Try: pipewiresrc ! glupload ! cudaupload ! nvh264enc
-     │
-     ├─ On EGL import failure →
-     │   pipewiresrc ! gldownload ! videoconvert ! cudaupload ! nvh264enc
-     │
-     └─ On total GL failure →
-         pipewiresrc ! videoconvert ! x264enc (CPU fallback)
+pipewiresrc (outputs DMA-BUF)
+    ↓ [OUR ELEMENT]
+pipewire-cuda-src (DMA-BUF → EGLImage → CUDA, single copy)
+    ↓
+nvh264enc
+```
+
+Benefits:
+- Single CUDA context, no GL context needed
+- One copy operation (EGL frame → CUDA buffer)
+- Direct control over buffer lifecycle
+- Cleaner error handling
+- Proven code path from gst-wayland-display
+
+---
+
+## Code Reuse Analysis
+
+### What We Reuse from gst-wayland-display
+
+| Module | Path | Reusable? | Notes |
+|--------|------|-----------|-------|
+| CUDA FFI | `utils/allocator/cuda/ffi.rs` | Yes | All CUDA interop functions |
+| EGLImage creation | `utils/allocator/cuda/mod.rs:EGLImage` | Yes | DMA-BUF → EGLImage |
+| CUDAImage | `utils/allocator/cuda/mod.rs:CUDAImage` | Yes | EGLImage → CUDA |
+| GStreamer buffer pool | `utils/allocator/cuda/mod.rs:CUDABufferPool` | Yes | CUDA memory management |
+| wl-roots compositor | `wayland/*`, `comp/*` | No | Not needed for PipeWire |
+| GStreamer PushSrc pattern | `gst-plugin-wayland-display/waylandsrc/imp.rs` | Partial | Different buffer source |
+
+### What We Build New
+
+| Component | Description |
+|-----------|-------------|
+| PipeWire ScreenCast client | Connect to portal, negotiate DMA-BUF format |
+| DMA-BUF adapter | Convert PipeWire's SPA buffer to smithay's `Dmabuf` |
+| GStreamer element | PushSrc that outputs CUDA buffers |
+
+---
+
+## Proposed Architecture
+
+```
+┌─────────────────────────────────────────────────────────────────────┐
+│                    gst-pipewire-zerocopy                            │
+├─────────────────────────────────────────────────────────────────────┤
+│                                                                     │
+│  ┌──────────────┐    ┌──────────────┐    ┌──────────────────────┐  │
+│  │  PipeWire    │    │   DMA-BUF    │    │   CUDA Converter     │  │
+│  │  Client      │───▶│   Adapter    │───▶│   (from gst-wayland- │  │
+│  │  (ashpd)     │    │              │    │    display)          │  │
+│  └──────────────┘    └──────────────┘    └──────────────────────┘  │
+│         │                                          │                │
+│         │ SPA buffers                              │ CUDA buffers   │
+│         │ (DMA-BUF FDs)                            ▼                │
+│         │                              ┌──────────────────────┐     │
+│         └─────────────────────────────▶│  GStreamer PushSrc   │     │
+│                                        │  Element             │     │
+│                                        └──────────────────────┘     │
+└─────────────────────────────────────────────────────────────────────┘
+                                    │
+                                    ▼
+                          video/x-raw(memory:CUDAMemory)
+```
+
+### GPU Support Matrix
+
+| GPU | Buffer Type | Implementation |
+|-----|-------------|----------------|
+| NVIDIA | `video/x-raw(memory:CUDAMemory)` | EGLImage → CUDA (reuse gst-wayland-display) |
+| AMD/Intel | `video/x-raw(memory:DMABuf)` | Pass through DMA-BUF directly |
+| Software | `video/x-raw` | SHM fallback, CPU copy |
+
+---
+
+## Validation: Will This Actually Work?
+
+### Technical Requirements
+
+1. **Same GPU**: PipeWire DMA-BUFs must be from the same GPU as CUDA context
+   - **Wolf controls this**: Container runs on specific GPU, GNOME renders there
+
+2. **EGL_EXT_image_dma_buf_import**: Must be supported
+   - **NVIDIA supports this**: Since driver 470+
+
+3. **cuGraphicsEGLRegisterImage**: Must work on imported EGLImages
+   - **Already works**: This is exactly what gst-wayland-display uses
+
+4. **Modifier compatibility**: GNOME's modifiers must be importable
+   - **Negotiable**: We announce our supported modifiers to PipeWire
+
+### Risk Assessment
+
+| Risk | Likelihood | Mitigation |
+|------|------------|------------|
+| GNOME uses unsupported modifier | Low | Negotiate LINEAR modifier as fallback |
+| Buffer lifecycle mismatch | Medium | Use pw_stream buffer callbacks properly |
+| CUDA context issues | Low | Reuse gst-wayland-display's proven context management |
+| Format conversion needed | Low | Negotiate compatible formats upfront |
+
+### Proof of Concept Test
+
+Before full implementation, validate with:
+```bash
+# In Wolf container with GNOME 49
+# 1. Start GNOME ScreenCast session
+# 2. Manually import DMA-BUF into EGLImage
+# 3. Register with CUDA
+# 4. Verify cuGraphicsResourceGetMappedEglFrame succeeds
 ```
 
 ---
 
-## Architecture Decision
+## Implementation Plan
 
-### Option A: Custom GStreamer Element (gst-pipewire-zerocopy)
+### Phase 1: Validation (1-2 days)
+1. Build minimal PipeWire client that receives DMA-BUFs
+2. Import received DMA-BUF using gst-wayland-display's `EGLImage::from`
+3. Convert to CUDA using `CUDAImage::from`
+4. Verify data integrity
 
-**Pros:**
-- Maximum control over buffer handling
-- Can optimize for Wolf's specific needs
-- Reuse some gst-wayland-display code
+### Phase 2: GStreamer Element (3-5 days)
+1. Create `gst-pipewire-zerocopy` crate in Wolf repo
+2. Add wayland-display-core as git dependency
+3. Implement PushSrc element
+4. Handle CUDA/DMABuf/SHM output modes
 
-**Cons:**
-- Significant development effort
-- Must handle all edge cases ourselves
-- Duplicates work GStreamer already does
-- Will fail on hybrid graphics without extensive fallback code
-
-**Verdict: NOT RECOMMENDED**
-
-### Option B: Use Standard GStreamer Elements + Smart Pipeline Selection
-
-**Pros:**
-- Uses battle-tested GStreamer elements
-- Maintained by GStreamer community
-- Handles edge cases we haven't thought of
-- Less code to maintain in Wolf
-
-**Cons:**
-- Less control over exact behavior
-- May have overhead from element negotiation
-
-**Verdict: RECOMMENDED**
-
-### Option C: Maintain wl-roots Path for Non-GNOME + PipeWire for GNOME
-
-**Pros:**
-- Keep what works for Sway, wl-roots compositors
-- Add PipeWire only for GNOME 49+
-- Best of both worlds
-
-**Cons:**
-- Two code paths to maintain
-- Must detect compositor type
-
-**Verdict: RECOMMENDED (in combination with B)**
+### Phase 3: Integration (2-3 days)
+1. Update Wolf Dockerfile to build new plugin
+2. Add `video_source_mode: pipewire` configuration
+3. Test with GNOME 49 container
+4. Test lobby mode with multiple viewers
 
 ---
 
-## Proposed Implementation
+## Input Handling (Separate Concern)
 
-### Phase 1: PipeWire ScreenCast + RemoteDesktop Integration
+Mouse/keyboard via [RemoteDesktop Portal](https://flatpak.github.io/xdg-desktop-portal/docs/#gdbus-org.freedesktop.portal.RemoteDesktop):
+- Separate from ScreenCast but can share session
+- Uses D-Bus for input injection
+- Adds ~1-5ms latency vs direct uinput
+- Required for GNOME 49+
 
-```rust
-// New module in Wolf: src/pipewire/mod.rs
-pub struct PipeWireSession {
-    screencast: ScreenCastSession,
-    remote_desktop: RemoteDesktopSession,
-    pw_stream: PipeWireStream,
-}
-
-impl PipeWireSession {
-    pub async fn new() -> Result<Self> {
-        // Create linked ScreenCast + RemoteDesktop session
-        // Return PipeWire stream for video + input injection handles
-    }
-
-    pub fn inject_input(&self, event: InputEvent) -> Result<()> {
-        // Convert Moonlight input → portal calls
-    }
-}
-```
-
-### Phase 2: GStreamer Pipeline with GPU Detection
-
-```rust
-fn create_pipeline(gpu_info: &GpuInfo) -> gst::Pipeline {
-    match gpu_info.primary_gpu {
-        Gpu::Nvidia { device_id } if gpu_info.screencast_same_device => {
-            // Fast path: same GPU
-            parse_launch("pipewiresrc ! glupload ! cudaupload ! nvh264enc")
-        }
-        Gpu::Nvidia { .. } => {
-            // Slow path: different GPU, need copy
-            parse_launch("pipewiresrc ! gldownload ! cudaupload ! nvh264enc")
-        }
-        Gpu::Amd | Gpu::Intel => {
-            // VAAPI path
-            parse_launch("pipewiresrc ! vaapih264enc")
-        }
-    }
-}
-```
-
-### Phase 3: Compositor Detection
-
-```rust
-fn select_video_source() -> VideoSourceConfig {
-    if is_gnome_49_or_later() {
-        VideoSourceConfig::PipeWireScreenCast
-    } else if is_wlroots_compositor() {
-        VideoSourceConfig::WaylandDisplay  // Existing waylanddisplaysrc
-    } else {
-        VideoSourceConfig::PipeWireScreenCast  // Default for unknown
-    }
-}
-```
+This is a separate implementation task from the video path.
 
 ---
 
-## Code Reuse Summary
+## Questions for Wolf Maintainer
 
-| gst-wayland-display Component | Reuse in PipeWire Path? |
-|-------------------------------|-------------------------|
-| `wayland-display-core/utils/allocator/cuda/` | Yes - CUDA FFI, but not EGL import |
-| `wayland-display-core/utils/device.rs` | Yes - GPU detection |
-| `gst-plugin-wayland-display/waylandsrc/` | No - wl-roots specific |
-| Build system (cargo-c, Dockerfile) | Yes - pattern reuse |
+1. **Buffer pool sharing**: Should we reuse GstCudaBufferPool pattern from gst-wayland-display for consistent buffer management?
 
----
+2. **Modifier preferences**: Any specific modifiers to prefer/avoid for encoder compatibility?
 
-## Open Questions for Wolf Maintainer
+3. **Fallback behavior**: If DMA-BUF negotiation fails, fall back to SHM (CPU path) or error out?
 
-1. **Latency tolerance**: Is D-Bus latency for input injection acceptable for gaming? (Typical: 1-5ms added)
-
-2. **Compositor detection**: How should Wolf detect GNOME 49 vs wl-roots? (Wayland protocol checks? Environment variables?)
-
-3. **Fallback behavior**: If PipeWire pipeline fails, should Wolf:
-   - Retry with CPU fallback?
-   - Show error to user?
-   - Attempt wl-roots path anyway?
-
-4. **Session persistence**: Should Wolf persist RemoteDesktop portal sessions to avoid repeated permission dialogs?
+4. **Integration point**: New GStreamer element, or modify existing `start_pipewire_video_producer`?
 
 ---
 
-## Conclusion
+## References
 
-The path forward for GNOME 49+ is:
-
-1. **Accept that `pipewiresrc` outputs DMA-BUF** - build robust fallback chains
-2. **Use RemoteDesktop portal for input** - it's the only supported API
-3. **Keep waylanddisplaysrc for wl-roots** - don't break what works
-4. **Reuse gst-wayland-display selectively** - CUDA FFI and device detection, not the EGL import path
-
-The custom zero-copy element (gst-pipewire-zerocopy) is **not recommended** because:
-- It would fail on hybrid graphics without extensive fallback code
-- Standard GStreamer elements already handle the edge cases
-- Development time is better spent on portal integration
-
-**Next Steps:**
-1. Review this design with Wolf maintainer
-2. Prototype PipeWire + RemoteDesktop portal integration
-3. Test `glupload ! cudaupload` pipeline on various hardware
-4. Implement compositor detection and pipeline selection
+- [PipeWire DMA-BUF Sharing](https://docs.pipewire.org/page_dma_buf.html)
+- [Mutter DMA-BUF ScreenCast MR](https://gitlab.gnome.org/GNOME/mutter/-/merge_requests/1939)
+- [gst-wayland-display source](https://github.com/games-on-whales/gst-wayland-display)
+- [CUDA-EGL Interop](https://docs.nvidia.com/cuda/cuda-driver-api/group__CUDA__EGL.html)
