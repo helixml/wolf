@@ -49,8 +49,9 @@ min_version = "0.9.21"
 enabled = false
 
 [package.metadata.capi.library]
-name = "gstpipewirezerocopy"
-version_suffix_components = 0
+install_subdir = "gstreamer-1.0"
+versioning = false
+import_library = false
 
 [package.metadata.capi.pkg_config]
 requires_private = "gstreamer-1.0, gstreamer-base-1.0, gstreamer-video-1.0"
