@@ -115,6 +115,11 @@ setup_lobbies_handlers(const immer::box<state::AppState> &app_state,
         auto runner_state_path = (std::filesystem::path(app_state->host->local_base_state_folder) /
                                   lobby_settings->runner_state_folder).string();
 
+        // CRITICAL: Create the directory BEFORE starting the lobby socket server
+        // The socket server needs to bind to a path inside this directory
+        std::filesystem::create_directories(runner_state_path);
+        logs::log(logs::debug, "[LOBBY] Created runner state folder: {}", runner_state_path);
+
         auto lobby = std::make_shared<events::Lobby>(
             events::Lobby{.id = lobby_settings->id,
                           .name = lobby_settings->name,
@@ -143,9 +148,8 @@ setup_lobbies_handlers(const immer::box<state::AppState> &app_state,
           logs::log(logs::info, "[LOBBY] Using PipeWire video source mode (GNOME 49+)");
           logs::log(logs::debug, "[LOBBY] Starting runner first, video producer will start when node ID is reported");
 
-          auto full_path = std::filesystem::path(app_state->host->local_base_state_folder) /
-                           lobby_settings->runner_state_folder;
-          std::filesystem::create_directories(full_path);
+          // Directory already created above (runner_state_path)
+          auto full_path = std::filesystem::path(runner_state_path);
 
           std::thread([=]() {
             try {
@@ -212,10 +216,10 @@ setup_lobbies_handlers(const immer::box<state::AppState> &app_state,
 
                 { // Start runner
                   logs::log(logs::debug, "[LOBBY] Start runner");
+                  // Directory already created at lobby creation time (runner_state_path)
                   auto full_path = std::filesystem::path(host->local_base_state_folder) /
                                    lobby_settings->runner_state_folder;
-                  logs::log(logs::debug, "Host app state folder: {}, creating paths", full_path.string());
-                  std::filesystem::create_directories(full_path);
+                  logs::log(logs::debug, "Host app state folder: {}", full_path.string());
 
                   std::thread([=]() {
                     try {
