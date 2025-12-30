@@ -83,6 +83,16 @@ void RunDocker::run(std::string_view session_id,
               fake_udev_cli_path);
   }
 
+  // PipeWire socket sharing - allows Wolf to connect to PipeWire running inside the container
+  // This is needed for PipeWire ScreenCast video capture mode (GNOME 49+)
+  auto pipewire_base_path = std::filesystem::path(app_state_folder) / "pipewire";
+  std::filesystem::create_directories(pipewire_base_path);
+  logs::log(logs::debug, "[DOCKER] PipeWire socket path: {}", pipewire_base_path.string());
+  // Mount at /run/user/1000 where PipeWire daemon creates its socket (pipewire-0)
+  mounts.push_back(MountPoint{.source = pipewire_base_path.string(), .destination = "/run/user/1000", .mode = "rw"});
+  // Set XDG_RUNTIME_DIR in container to match the mount point
+  full_env.push_back("XDG_RUNTIME_DIR=/run/user/1000");
+
   // Add equivalent of --gpu=all if on NVIDIA without the custom driver volume
   auto final_json_opts = this->base_create_json;
   if (get_vendor(render_node) == NVIDIA && !utils::get_env("NVIDIA_DRIVER_VOLUME_NAME")) {
@@ -282,6 +292,11 @@ void RunDocker::run(std::string_view session_id,
       std::filesystem::remove_all(udev_base_path);
     } catch (const std::filesystem::filesystem_error &e) {
       logs::log(logs::warning, "Failed to remove udev base path: {}", e.what());
+    }
+    try {
+      std::filesystem::remove_all(pipewire_base_path);
+    } catch (const std::filesystem::filesystem_error &e) {
+      logs::log(logs::warning, "Failed to remove pipewire base path: {}", e.what());
     }
   }
 }

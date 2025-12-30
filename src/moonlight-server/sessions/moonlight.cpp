@@ -110,6 +110,7 @@ setup_moonlight_handlers(const immer::box<state::AppState> &app_state,
               streaming::start_pipewire_video_producer(
                   std::to_string(session->session_id),
                   session->app->pipewire_node_id.value(),
+                  session->app_local_state_folder,
                   session->app->video_producer_buffer_caps,
                   session->app->render_node,
                   {.width = session->display_mode.width,

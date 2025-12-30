@@ -1,6 +1,7 @@
 #include "platforms/hw.hpp"
 
 #include <control/control.hpp>
+#include <filesystem>
 #include <gst-video-context.hpp>
 #include <gstreamer-1.0/gst/app/gstappsink.h>
 #include <gstreamer-1.0/gst/app/gstappsrc.h>
@@ -166,6 +167,7 @@ void start_video_producer(const std::string &session_id,
 
 void start_pipewire_video_producer(const std::string &session_id,
                                    unsigned int pipewire_node_id,
+                                   const std::string &pipewire_socket_path,
                                    const std::string &buffer_caps,
                                    const std::string &render_node,
                                    const wolf::core::virtual_display::DisplayMode &display_mode,
@@ -180,6 +182,13 @@ void start_pipewire_video_producer(const std::string &session_id,
   //
   // This replaces the fragile "pipewiresrc ! cudaupload" pipeline which had
   // CUDA buffer sharing issues with multiple viewers in lobby mode.
+
+  // Set PIPEWIRE_RUNTIME_DIR to the shared socket path
+  // The container mounts its /run/user/1000 at pipewire_socket_path/pipewire
+  // so the socket is at pipewire_socket_path/pipewire/pipewire-0
+  auto pipewire_runtime_dir = std::filesystem::path(pipewire_socket_path) / "pipewire";
+  setenv("PIPEWIRE_RUNTIME_DIR", pipewire_runtime_dir.c_str(), 1);
+  logs::log(logs::debug, "[GSTREAMER] PIPEWIRE_RUNTIME_DIR set to: {}", pipewire_runtime_dir.string());
 
   std::string output_mode;
   if (buffer_caps.find("CUDAMemory") != std::string::npos) {

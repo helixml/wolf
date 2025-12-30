@@ -110,12 +110,17 @@ setup_lobbies_handlers(const immer::box<state::AppState> &app_state,
         logs::log(logs::info, "[LOBBY] Creating new lobby");
         auto ev_bus = app_state->event_bus;
 
+        // Compute runner state folder path for PipeWire socket sharing
+        auto runner_state_path = (std::filesystem::path(app_state->host->local_base_state_folder) /
+                                  lobby_settings->runner_state_folder).string();
+
         auto lobby = std::make_shared<events::Lobby>(
             events::Lobby{.id = lobby_settings->id,
                           .name = lobby_settings->name,
                           .started_by_profile_id = lobby_settings->profile_id,
                           .icon_png_path = lobby_settings->icon_png_path,
                           .multi_user = lobby_settings->multi_user,
+                          .runner_state_folder_path = runner_state_path,
                           .pin = lobby_settings->pin,
                           .stop_when_everyone_leaves = lobby_settings->stop_when_everyone_leaves,
                           .runner = lobby_settings->runner,
@@ -536,7 +541,8 @@ setup_lobbies_handlers(const immer::box<state::AppState> &app_state,
         auto gst_context = app_state->gst_context;
         auto video_settings = lobby->video_settings;
 
-        std::thread([lobby_id = lobby->id, node_id = node_id_event->node_id, video_settings, ev_bus, gst_context]() {
+        std::thread([lobby_id = lobby->id, node_id = node_id_event->node_id, video_settings, ev_bus, gst_context,
+                     pipewire_socket_path = lobby->runner_state_folder_path]() {
           try {
             // Create a promise that we won't use (pipewiresrc doesn't need wayland display setup)
             std::shared_ptr<boost::promise<streaming::WaylandDisplayReady>> on_ready =
@@ -544,6 +550,7 @@ setup_lobbies_handlers(const immer::box<state::AppState> &app_state,
 
             streaming::start_pipewire_video_producer(lobby_id,
                                                      node_id,
+                                                     pipewire_socket_path,
                                                      video_settings.video_producer_buffer_caps,
                                                      video_settings.wayland_render_node,
                                                      {.width = video_settings.width,

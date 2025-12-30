@@ -98,6 +98,7 @@ void start_test_audio_producer(const std::string &session_id,
  */
 void start_pipewire_video_producer(const std::string &session_id,
                                    unsigned int pipewire_node_id,
+                                   const std::string &pipewire_socket_path,
                                    const std::string &buffer_caps,
                                    const std::string &render_node,
                                    const wolf::core::virtual_display::DisplayMode &display_mode,

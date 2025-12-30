@@ -155,6 +155,11 @@ struct Lobby {
   std::optional<std::string> icon_png_path;
   const bool multi_user;
   /**
+   * The full path to the runner state folder (e.g., /home/user/.local/share/wolf/apps/lobby_id)
+   * Used for PipeWire socket sharing between Wolf and container.
+   */
+  std::string runner_state_folder_path;
+  /**
    * The pin that is required to join and control the lobby
    * If this is not set, then the lobby is open to everyone
    */
