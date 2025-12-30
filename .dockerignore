@@ -14,3 +14,4 @@
 !docker/pulse-lowmem.conf
 !third_party
 !gst-wayland-display
+!gst-pipewire-zerocopy
