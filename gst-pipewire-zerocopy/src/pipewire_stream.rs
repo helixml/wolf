@@ -1,7 +1,7 @@
 //! PipeWire stream handling - outputs smithay Dmabuf directly
 
 use parking_lot::Mutex;
-use pipewire::{context::Context, main_loop::MainLoop, properties::properties, stream::{Stream, StreamFlags}};
+use pipewire::{context::Context, main_loop::MainLoop, properties::properties, stream::{Stream, StreamFlags}, spa};
 use smithay::backend::allocator::{Fourcc, Modifier};
 use smithay::backend::allocator::dmabuf::{Dmabuf, DmabufFlags};
 use std::os::fd::BorrowedFd;
@@ -88,6 +88,37 @@ impl Drop for PipeWireStream {
     }
 }
 
+/// Convert SPA VideoFormat to DRM fourcc code
+/// SPA format enum values: https://docs.pipewire.org/spa_2param_2video_2format_8h.html
+fn spa_video_format_to_drm_fourcc(format: spa::param::video::VideoFormat) -> u32 {
+    // DRM fourcc codes (little-endian):
+    // AR24 = 0x34325241 = ARGB8888
+    // AB24 = 0x34324241 = ABGR8888
+    // XR24 = 0x34325258 = XRGB8888
+    // XB24 = 0x34324258 = XBGR8888
+    // RA24 = 0x34324152 = RGBA8888
+    // BA24 = 0x34324142 = BGRA8888
+    // RX24 = 0x34325852 = RGBX8888
+    // BX24 = 0x34325842 = BGRX8888
+    // NV12 = 0x3231564e = NV12
+    match format {
+        spa::param::video::VideoFormat::BGRA => 0x34324142, // BA24 = BGRA8888
+        spa::param::video::VideoFormat::RGBA => 0x34324152, // RA24 = RGBA8888
+        spa::param::video::VideoFormat::BGRx => 0x34325842, // BX24 = BGRX8888
+        spa::param::video::VideoFormat::RGBx => 0x34325852, // RX24 = RGBX8888
+        spa::param::video::VideoFormat::ARGB => 0x34325241, // AR24 = ARGB8888
+        spa::param::video::VideoFormat::ABGR => 0x34324241, // AB24 = ABGR8888
+        spa::param::video::VideoFormat::xRGB => 0x34325258, // XR24 = XRGB8888
+        spa::param::video::VideoFormat::xBGR => 0x34324258, // XB24 = XBGR8888
+        spa::param::video::VideoFormat::NV12 => 0x3231564e, // NV12
+        spa::param::video::VideoFormat::I420 => 0x32315549, // I420
+        _ => {
+            tracing::warn!("Unknown SPA video format {:?}, defaulting to ARGB8888", format);
+            0x34325241 // AR24 = ARGB8888
+        }
+    }
+}
+
 fn run_pipewire_loop(
     node_id: u32,
     frame_tx: mpsc::SyncSender<FrameData>,
@@ -110,20 +141,68 @@ fn run_pipewire_loop(
         .map_err(|e| format!("Stream: {}", e))?;
 
     let frame_tx = Arc::new(Mutex::new(frame_tx));
-    let _video_info_cb = video_info.clone();
+    let video_info_param = video_info.clone();
     let frame_tx_process = frame_tx.clone();
 
     let _listener = stream
-        .add_local_listener_with_user_data(())
+        .add_local_listener_with_user_data(spa::param::video::VideoInfoRaw::default())
         .state_changed(|_, _, old, new| {
             tracing::info!("PipeWire state: {:?} -> {:?}", old, new);
         })
-        .param_changed(move |_, _, id, pod| {
-            if id == libspa::param::ParamType::Format.as_raw() {
-                if let Some(_pod) = pod {
-                    // TODO: Parse format from pod - for now rely on buffer metadata
-                }
+        .param_changed(move |_, user_data, id, pod| {
+            if id != spa::param::ParamType::Format.as_raw() {
+                return;
             }
+            let Some(param) = pod else {
+                return;
+            };
+
+            // Parse media type and subtype
+            let (media_type, media_subtype) = match spa::param::format_utils::parse_format(param) {
+                Ok(v) => v,
+                Err(e) => {
+                    tracing::warn!("Failed to parse format: {:?}", e);
+                    return;
+                }
+            };
+
+            // We only handle video/raw
+            if media_type != spa::param::format::MediaType::Video
+                || media_subtype != spa::param::format::MediaSubtype::Raw
+            {
+                tracing::debug!("Ignoring non-raw video format: {:?}/{:?}", media_type, media_subtype);
+                return;
+            }
+
+            // Parse the VideoInfoRaw from the pod
+            if let Err(e) = user_data.parse(param) {
+                tracing::warn!("Failed to parse VideoInfoRaw: {:?}", e);
+                return;
+            }
+
+            let width = user_data.size().width;
+            let height = user_data.size().height;
+            let format_raw = user_data.format().as_raw();
+
+            tracing::info!(
+                "PipeWire video format: {}x{} format={} ({:?}) framerate={}/{}",
+                width,
+                height,
+                format_raw,
+                user_data.format(),
+                user_data.framerate().num,
+                user_data.framerate().denom
+            );
+
+            // Update VideoParams - convert SPA video format to DRM fourcc
+            // SPA formats: BGRA=2, RGBA=4, BGRx=5, RGBx=6, ARGB=7, ABGR=8, xRGB=9, xBGR=10
+            // See: https://pipewire.pages.freedesktop.org/pipewire/group__spa__param.html
+            let drm_fourcc = spa_video_format_to_drm_fourcc(user_data.format());
+            let mut params = video_info_param.lock();
+            params.width = width;
+            params.height = height;
+            params.format = drm_fourcc;
+            // Note: modifier comes from buffer metadata for DMA-BUF
         })
         .process(move |stream, _| {
             if let Some(mut buffer) = stream.dequeue_buffer() {
@@ -140,7 +219,7 @@ fn run_pipewire_loop(
         .map_err(|e| format!("Listener: {}", e))?;
 
     // Create empty params slice
-    let params: &mut [&libspa::pod::Pod] = &mut [];
+    let params: &mut [&spa::pod::Pod] = &mut [];
 
     stream.connect(
         pipewire::spa::utils::Direction::Input,
@@ -177,8 +256,15 @@ fn extract_frame(datas: &mut [pipewire::spa::buffer::Data], params: &VideoParams
     if data_type == pipewire::spa::buffer::DataType::DmaBuf {
         if fd < 0 { return None; }
 
+        // Use params from format negotiation, fallback to calculated values only if not set
         let width = if params.width > 0 { params.width } else { (stride / 4) as u32 };
         let height = if params.height > 0 { params.height } else if stride > 0 { (size as u32) / (stride as u32) } else { 0 };
+
+        tracing::debug!(
+            "extract_frame: params={}x{} format=0x{:x}, chunk: size={} stride={} offset={}, calculated={}x{}",
+            params.width, params.height, params.format, size, stride, offset, width, height
+        );
+
         if width == 0 || height == 0 { return None; }
 
         // Build smithay Dmabuf from PipeWire buffer info
