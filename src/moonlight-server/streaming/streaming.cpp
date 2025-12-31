@@ -204,9 +204,12 @@ void start_pipewire_video_producer(const std::string &session_id,
     logs::log(logs::info, "[GSTREAMER] PipeWire producer configured for system memory output");
   }
 
+  // pipewirezerocopysrc outputs CUDA/DMABuf/system memory with specific formats.
+  // We need to add format=NV12 to the caps filter for proper negotiation.
+  // The encoder chain expects NV12 format.
   auto pipeline = fmt::format(
       "pipewirezerocopysrc pipewire-node-id={node_id} render-node={render_node} output-mode={output_mode} ! "
-      "{buffer_caps}, width={width}, height={height}, framerate={fps}/1 ! "
+      "{buffer_caps}, format=NV12, width={width}, height={height}, framerate={fps}/1 ! "
       "interpipesink sync=true async=false name={session_id}_video max-buffers=5",
       fmt::arg("node_id", pipewire_node_id),
       fmt::arg("render_node", render_node),
