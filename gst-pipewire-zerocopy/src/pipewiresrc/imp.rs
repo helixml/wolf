@@ -355,11 +355,34 @@ impl BaseSrcImpl for PipeWireZeroCopySrc {
     }
 
     fn caps(&self, filter: Option<&gst::Caps>) -> Option<gst::Caps> {
+        // First check if state is initialized (after start())
         let g = self.state.lock();
-        let mut caps = match g.as_ref().map(|s| s.actual_output_mode) {
-            Some(OutputMode::Cuda) => VideoCapsBuilder::new().features([CAPS_FEATURE_MEMORY_CUDA_MEMORY]).format_list([VideoFormat::Bgra, VideoFormat::Rgba, VideoFormat::Nv12]).build(),
-            Some(OutputMode::DmaBuf) => VideoCapsBuilder::new().features([gstreamer_allocators::CAPS_FEATURE_MEMORY_DMABUF]).format(VideoFormat::DmaDrm).build(),
-            _ => VideoCapsBuilder::new().format_list([VideoFormat::Bgra, VideoFormat::Rgba]).build(),
+        let actual_mode = g.as_ref().map(|s| s.actual_output_mode);
+        drop(g); // Release state lock before acquiring settings lock
+
+        // Determine output mode: use actual mode if available, otherwise use configured mode
+        let output_mode = match actual_mode {
+            Some(mode) => mode,
+            None => {
+                // State not initialized yet (before start()) - use configured output_mode
+                // This is crucial for caps negotiation during pipeline linking
+                self.settings.lock().output_mode
+            }
+        };
+
+        let mut caps = match output_mode {
+            OutputMode::Cuda => VideoCapsBuilder::new().features([CAPS_FEATURE_MEMORY_CUDA_MEMORY]).format_list([VideoFormat::Bgra, VideoFormat::Rgba, VideoFormat::Nv12]).build(),
+            OutputMode::DmaBuf => VideoCapsBuilder::new().features([gstreamer_allocators::CAPS_FEATURE_MEMORY_DMABUF]).format(VideoFormat::DmaDrm).build(),
+            OutputMode::System => VideoCapsBuilder::new().format_list([VideoFormat::Bgra, VideoFormat::Rgba]).build(),
+            OutputMode::Auto => {
+                // Auto mode before start(): advertise all capabilities (like pad template)
+                // GStreamer will negotiate based on downstream requirements
+                let mut all_caps = gst::Caps::new_empty();
+                all_caps.merge(VideoCapsBuilder::new().features([CAPS_FEATURE_MEMORY_CUDA_MEMORY]).format_list([VideoFormat::Bgra, VideoFormat::Rgba, VideoFormat::Nv12]).build());
+                all_caps.merge(VideoCapsBuilder::new().features([gstreamer_allocators::CAPS_FEATURE_MEMORY_DMABUF]).format(VideoFormat::DmaDrm).build());
+                all_caps.merge(VideoCapsBuilder::new().format_list([VideoFormat::Bgra, VideoFormat::Rgba]).build());
+                all_caps
+            }
         };
         if let Some(f) = filter { caps = caps.intersect(f); }
         Some(caps)
