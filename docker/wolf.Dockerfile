@@ -174,9 +174,10 @@ RUN apt-get update -y && \
 
 # PipeWire runtime dependencies for gst-pipewire-zerocopy
 # Used for GNOME 49+ ScreenCast capture
+# Install full pipewire package to get client.conf (required for PipeWire context creation)
 RUN apt-get update -y && \
     apt-get install -y --no-install-recommends \
-    libpipewire-0.3-0 \
+    pipewire \
     && rm -rf /var/lib/apt/lists/*
 
 # Install Docker inside Wolf container for nested sandboxes
