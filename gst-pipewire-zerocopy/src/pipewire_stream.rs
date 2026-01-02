@@ -104,12 +104,16 @@ fn spa_video_format_to_drm_fourcc(format: spa::param::video::VideoFormat) -> u32
     match format {
         spa::param::video::VideoFormat::BGRA => 0x34324142, // BA24 = BGRA8888
         spa::param::video::VideoFormat::RGBA => 0x34324152, // RA24 = RGBA8888
-        spa::param::video::VideoFormat::BGRx => 0x34325842, // BX24 = BGRX8888
-        spa::param::video::VideoFormat::RGBx => 0x34325852, // RX24 = RGBX8888
+        // BGRx/RGBx have memory layout B,G,R,X and R,G,B,X respectively
+        // These match DRM XRGB8888/XBGR8888 which also define memory byte order
+        // NOTE: Previously mapped to BGRA/RGBA which have DIFFERENT memory layouts and caused R/B swap
+        spa::param::video::VideoFormat::BGRx => 0x34325258, // XR24 = XRGB8888 (memory: B,G,R,X)
+        spa::param::video::VideoFormat::RGBx => 0x34324258, // XB24 = XBGR8888 (memory: R,G,B,X)
         spa::param::video::VideoFormat::ARGB => 0x34325241, // AR24 = ARGB8888
         spa::param::video::VideoFormat::ABGR => 0x34324241, // AB24 = ABGR8888
-        spa::param::video::VideoFormat::xRGB => 0x34325258, // XR24 = XRGB8888
-        spa::param::video::VideoFormat::xBGR => 0x34324258, // XB24 = XBGR8888
+        // Map xRGB/xBGR to ARGB/ABGR - same memory layout
+        spa::param::video::VideoFormat::xRGB => 0x34325241, // Map to ARGB8888 (same as AR24)
+        spa::param::video::VideoFormat::xBGR => 0x34324241, // Map to ABGR8888 (same as AB24)
         spa::param::video::VideoFormat::NV12 => 0x3231564e, // NV12
         spa::param::video::VideoFormat::I420 => 0x32315549, // I420
         _ => {
@@ -147,13 +151,15 @@ fn run_pipewire_loop(
     let _listener = stream
         .add_local_listener_with_user_data(spa::param::video::VideoInfoRaw::default())
         .state_changed(|_, _, old, new| {
-            tracing::info!("PipeWire state: {:?} -> {:?}", old, new);
+            tracing::warn!("[PIPEWIRE_DEBUG] PipeWire state: {:?} -> {:?}", old, new);
         })
         .param_changed(move |_, user_data, id, pod| {
+            tracing::warn!("[PIPEWIRE_DEBUG] param_changed called: id={}", id);
             if id != spa::param::ParamType::Format.as_raw() {
                 return;
             }
             let Some(param) = pod else {
+                tracing::warn!("[PIPEWIRE_DEBUG] param_changed: pod is None");
                 return;
             };
 
@@ -161,22 +167,24 @@ fn run_pipewire_loop(
             let (media_type, media_subtype) = match spa::param::format_utils::parse_format(param) {
                 Ok(v) => v,
                 Err(e) => {
-                    tracing::warn!("Failed to parse format: {:?}", e);
+                    tracing::warn!("[PIPEWIRE_DEBUG] Failed to parse format: {:?}", e);
                     return;
                 }
             };
+
+            tracing::warn!("[PIPEWIRE_DEBUG] media_type={:?} media_subtype={:?}", media_type, media_subtype);
 
             // We only handle video/raw
             if media_type != spa::param::format::MediaType::Video
                 || media_subtype != spa::param::format::MediaSubtype::Raw
             {
-                tracing::debug!("Ignoring non-raw video format: {:?}/{:?}", media_type, media_subtype);
+                tracing::warn!("[PIPEWIRE_DEBUG] Ignoring non-raw video format");
                 return;
             }
 
             // Parse the VideoInfoRaw from the pod
             if let Err(e) = user_data.parse(param) {
-                tracing::warn!("Failed to parse VideoInfoRaw: {:?}", e);
+                tracing::warn!("[PIPEWIRE_DEBUG] Failed to parse VideoInfoRaw: {:?}", e);
                 return;
             }
 
@@ -184,8 +192,8 @@ fn run_pipewire_loop(
             let height = user_data.size().height;
             let format_raw = user_data.format().as_raw();
 
-            tracing::info!(
-                "PipeWire video format: {}x{} format={} ({:?}) framerate={}/{}",
+            tracing::warn!(
+                "[PIPEWIRE_DEBUG] PipeWire video format: {}x{} format={} ({:?}) framerate={}/{}",
                 width,
                 height,
                 format_raw,
@@ -198,11 +206,16 @@ fn run_pipewire_loop(
             // SPA formats: BGRA=2, RGBA=4, BGRx=5, RGBx=6, ARGB=7, ABGR=8, xRGB=9, xBGR=10
             // See: https://pipewire.pages.freedesktop.org/pipewire/group__spa__param.html
             let drm_fourcc = spa_video_format_to_drm_fourcc(user_data.format());
+            let modifier = user_data.modifier();
+            tracing::warn!(
+                "[PIPEWIRE_DEBUG] Converted to DRM fourcc: 0x{:x}, modifier: 0x{:x}",
+                drm_fourcc, modifier
+            );
             let mut params = video_info_param.lock();
             params.width = width;
             params.height = height;
             params.format = drm_fourcc;
-            // Note: modifier comes from buffer metadata for DMA-BUF
+            params.modifier = modifier;
         })
         .process(move |stream, _| {
             if let Some(mut buffer) = stream.dequeue_buffer() {
@@ -237,6 +250,11 @@ fn run_pipewire_loop(
     Ok(())
 }
 
+/// Extract DRM fourcc code from SPA video format - exposed for testing
+pub fn spa_format_to_drm_fourcc(format: spa::param::video::VideoFormat) -> u32 {
+    spa_video_format_to_drm_fourcc(format)
+}
+
 fn extract_frame(datas: &mut [pipewire::spa::buffer::Data], params: &VideoParams) -> Option<FrameData> {
     // Get chunk info from first element before we need mutable access
     let (size, stride, data_type, fd, offset) = {
@@ -260,16 +278,23 @@ fn extract_frame(datas: &mut [pipewire::spa::buffer::Data], params: &VideoParams
         let width = if params.width > 0 { params.width } else { (stride / 4) as u32 };
         let height = if params.height > 0 { params.height } else if stride > 0 { (size as u32) / (stride as u32) } else { 0 };
 
-        tracing::debug!(
-            "extract_frame: params={}x{} format=0x{:x}, chunk: size={} stride={} offset={}, calculated={}x{}",
-            params.width, params.height, params.format, size, stride, offset, width, height
+        // Use WARN level to ensure visibility with RUST_LOG=WARN
+        tracing::warn!(
+            "[PIPEWIRE_DEBUG] extract_frame: params={}x{} format=0x{:x} modifier=0x{:x}, chunk: size={} stride={} offset={}, fd={}",
+            params.width, params.height, params.format, params.modifier, size, stride, offset, fd
         );
 
         if width == 0 || height == 0 { return None; }
 
         // Build smithay Dmabuf from PipeWire buffer info
         let fourcc = Fourcc::try_from(params.format).unwrap_or(Fourcc::Argb8888);
+        // Use the modifier from PipeWire format negotiation:
+        // - 0x0 (Linear) = explicit linear layout, most common
+        // - 0xffffffffffffff (Invalid) = implicit modifier, let driver decide
+        // - Other values = explicit tiled/compressed formats (GPU-specific)
+        // We pass through whatever PipeWire negotiated; EGL/CUDA will reject incompatible formats
         let modifier = Modifier::from(params.modifier);
+        tracing::warn!("[PIPEWIRE_DEBUG] Using fourcc={:?} modifier={:?} (raw: 0x{:x})", fourcc, modifier, params.modifier);
 
         // Clone the fd to create OwnedFd
         let owned_fd = unsafe {
@@ -312,4 +337,91 @@ fn extract_frame(datas: &mut [pipewire::spa::buffer::Data], params: &VideoParams
     }
 
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use pipewire::spa;
+
+    /// Test SPA video format to DRM fourcc conversion for common formats
+    #[test]
+    fn test_spa_to_drm_fourcc_bgra() {
+        let fourcc = spa_video_format_to_drm_fourcc(spa::param::video::VideoFormat::BGRA);
+        // BA24 = BGRA8888 = 0x34324142
+        assert_eq!(fourcc, 0x34324142, "BGRA should map to BA24");
+    }
+
+    #[test]
+    fn test_spa_to_drm_fourcc_rgba() {
+        let fourcc = spa_video_format_to_drm_fourcc(spa::param::video::VideoFormat::RGBA);
+        // RA24 = RGBA8888 = 0x34324152
+        assert_eq!(fourcc, 0x34324152, "RGBA should map to RA24");
+    }
+
+    #[test]
+    fn test_spa_to_drm_fourcc_bgrx() {
+        // BGRx has memory layout B,G,R,X which matches DRM XRGB8888
+        let fourcc = spa_video_format_to_drm_fourcc(spa::param::video::VideoFormat::BGRx);
+        assert_eq!(fourcc, 0x34325258, "BGRx should map to XRGB8888 (XR24)");
+    }
+
+    #[test]
+    fn test_spa_to_drm_fourcc_rgbx() {
+        // RGBx has memory layout R,G,B,X which matches DRM XBGR8888
+        let fourcc = spa_video_format_to_drm_fourcc(spa::param::video::VideoFormat::RGBx);
+        assert_eq!(fourcc, 0x34324258, "RGBx should map to XBGR8888 (XB24)");
+    }
+
+    #[test]
+    fn test_spa_to_drm_fourcc_argb() {
+        let fourcc = spa_video_format_to_drm_fourcc(spa::param::video::VideoFormat::ARGB);
+        // AR24 = ARGB8888 = 0x34325241
+        assert_eq!(fourcc, 0x34325241, "ARGB should map to AR24");
+    }
+
+    #[test]
+    fn test_spa_to_drm_fourcc_abgr() {
+        let fourcc = spa_video_format_to_drm_fourcc(spa::param::video::VideoFormat::ABGR);
+        // AB24 = ABGR8888 = 0x34324241
+        assert_eq!(fourcc, 0x34324241, "ABGR should map to AB24");
+    }
+
+    #[test]
+    fn test_spa_to_drm_fourcc_xrgb() {
+        // xRGB should map to ARGB8888
+        let fourcc = spa_video_format_to_drm_fourcc(spa::param::video::VideoFormat::xRGB);
+        assert_eq!(fourcc, 0x34325241, "xRGB should map to ARGB8888");
+    }
+
+    #[test]
+    fn test_spa_to_drm_fourcc_xbgr() {
+        // xBGR should map to ABGR8888
+        let fourcc = spa_video_format_to_drm_fourcc(spa::param::video::VideoFormat::xBGR);
+        assert_eq!(fourcc, 0x34324241, "xBGR should map to ABGR8888");
+    }
+
+    #[test]
+    fn test_spa_to_drm_fourcc_nv12() {
+        let fourcc = spa_video_format_to_drm_fourcc(spa::param::video::VideoFormat::NV12);
+        // NV12 = 0x3231564e
+        assert_eq!(fourcc, 0x3231564e, "NV12 should map correctly");
+    }
+
+    #[test]
+    fn test_spa_to_drm_fourcc_i420() {
+        let fourcc = spa_video_format_to_drm_fourcc(spa::param::video::VideoFormat::I420);
+        // I420 = 0x32315549
+        assert_eq!(fourcc, 0x32315549, "I420 should map correctly");
+    }
+
+    /// Test VideoParams default values
+    #[test]
+    fn test_video_params_default() {
+        let params = VideoParams::default();
+        assert_eq!(params.width, 0);
+        assert_eq!(params.height, 0);
+        assert_eq!(params.format, 0);
+        assert_eq!(params.modifier, 0);
+    }
 }

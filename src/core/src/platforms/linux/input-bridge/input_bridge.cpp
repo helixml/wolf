@@ -77,12 +77,32 @@ void InputBridge::move_abs(float x, float y, int screen_width, int screen_height
   send(fmt::format(R"({{"type":"mouse_move_abs","x":{},"y":{}}})", x, y));
 }
 
+// Convert Moonlight button codes to evdev button codes for Mutter's D-Bus API
+// Moonlight: 1=left, 2=middle, 3=right, 4=side, 5+=extra
+// Evdev: 272=BTN_LEFT, 273=BTN_RIGHT, 274=BTN_MIDDLE, 275=BTN_SIDE, 276=BTN_EXTRA
+static int moonlight_button_to_evdev(int button) {
+  switch (button) {
+  case 1:
+    return 272; // BTN_LEFT
+  case 2:
+    return 274; // BTN_MIDDLE
+  case 3:
+    return 273; // BTN_RIGHT
+  case 4:
+    return 275; // BTN_SIDE
+  default:
+    return 276 + (button - 5); // BTN_EXTRA and beyond
+  }
+}
+
 void InputBridge::press(int button) {
-  send(fmt::format(R"({{"type":"button","button":{},"state":true}})", button));
+  int evdev_button = moonlight_button_to_evdev(button);
+  send(fmt::format(R"({{"type":"button","button":{},"state":true}})", evdev_button));
 }
 
 void InputBridge::release(int button) {
-  send(fmt::format(R"({{"type":"button","button":{},"state":false}})", button));
+  int evdev_button = moonlight_button_to_evdev(button);
+  send(fmt::format(R"({{"type":"button","button":{},"state":false}})", evdev_button));
 }
 
 void InputBridge::vertical_scroll(int amount) {
