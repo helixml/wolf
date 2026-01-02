@@ -431,8 +431,15 @@ setup_lobbies_handlers(const immer::box<state::AppState> &app_state,
         // TODO: hotplug pen_tablet
 
         // Switch audio/video gstreamer stream producers
-        app_state->event_bus->fire_event(immer::box<events::SwitchStreamProducerEvents>{
-            events::SwitchStreamProducerEvents{.session_id = session->session_id, .interpipe_src_id = lobby->id}});
+        // Skip if session was already attached via immediate_lobby_id - pipelines already listening to lobby's interpipe
+        if (session->immediate_lobby_id.has_value() && session->immediate_lobby_id.value() == lobby->id) {
+          logs::log(logs::info, "[LOBBY] Session {} already attached to lobby {} via immediate_lobby_id - skipping interpipe switch",
+                    session->session_id, lobby->id);
+        } else {
+          logs::log(logs::debug, "[LOBBY] Switching session {} interpipe to lobby {}", session->session_id, lobby->id);
+          app_state->event_bus->fire_event(immer::box<events::SwitchStreamProducerEvents>{
+              events::SwitchStreamProducerEvents{.session_id = session->session_id, .interpipe_src_id = lobby->id}});
+        }
         join_lobby_event->error_message.get()->set_value("");
       }));
 

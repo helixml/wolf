@@ -225,6 +225,21 @@ UnixSocketServer::UnixSocketServer(boost::asio::io_context &io_context,
           .handler = [this](auto req, auto socket) { endpoint_StreamSessionHandleInput(req, socket); },
       });
 
+  state_->http.add(
+      HTTPMethod::POST,
+      "/api/v1/sessions/configure",
+      {
+          .summary = "Pre-configure a pending session for immediate lobby attachment",
+          .description = "Allows Helix to configure a session before the Moonlight client connects. "
+                         "When a client connects with the matching client_unique_id, Wolf applies the "
+                         "immediate_lobby_id so the session attaches directly to the lobby's interpipe.",
+          .request_description = APIDescription{.json_schema = rfl::json::to_schema<ConfigurePendingSessionRequest>()},
+          .response_description = {{200, {.json_schema = rfl::json::to_schema<ConfigurePendingSessionResponse>()}},
+                                   {400, {.json_schema = rfl::json::to_schema<GenericErrorResponse>()}},
+                                   {500, {.json_schema = rfl::json::to_schema<GenericErrorResponse>()}}},
+          .handler = [this](auto req, auto socket) { endpoint_StreamSessionConfigure(req, socket); },
+      });
+
   state_->http.add(HTTPMethod::POST,
                    "/api/v1/runners/start",
                    {

@@ -96,11 +96,56 @@ setup_moonlight_handlers(const immer::box<state::AppState> &app_state,
         std::shared_ptr<boost::promise<streaming::WaylandDisplayReady>> on_ready =
             std::make_shared<boost::promise<streaming::WaylandDisplayReady>>();
 
+        // Check for immediate lobby attachment mode
+        bool use_immediate_lobby = session->immediate_lobby_id.has_value();
+        if (use_immediate_lobby) {
+          logs::log(logs::info, "[STREAM_SESSION] Session {} using immediate lobby attachment to lobby {}",
+                    session->session_id, session->immediate_lobby_id.value());
+          logs::log(logs::info, "[STREAM_SESSION] Skipping video/audio producers - will attach directly to lobby interpipe");
+        }
+
         // Check video source mode: "wayland" (default) or "pipewire" (GNOME 49+)
         bool use_pipewire_source = session->app->video_source_mode == "pipewire" &&
                                    session->app->pipewire_node_id.has_value();
 
-        if (use_pipewire_source) {
+        if (use_immediate_lobby) {
+          // Immediate lobby attachment: SKIP creating video/audio producers entirely.
+          // The streaming pipelines will attach directly to the lobby's interpipe source.
+          // We only need to create virtual devices for input routing.
+          logs::log(logs::info, "[STREAM_SESSION] Creating input devices only (no video/audio producers)");
+
+          auto mouse = input::Mouse::create();
+          if (!mouse) {
+            logs::log(logs::error, "Failed to create mouse: {}", mouse.getErrorMessage());
+          } else {
+            auto mouse_ptr = input::Mouse(std::move(*mouse));
+            devices_q->push(immer::box<events::PlugDeviceEvent>(
+                events::PlugDeviceEvent{.session_id = std::to_string(session->session_id),
+                                        .udev_events = mouse_ptr.get_udev_events(),
+                                        .udev_hw_db_entries = mouse_ptr.get_udev_hw_db_entries()}));
+            session->mouse->emplace(std::move(mouse_ptr));
+          }
+
+          auto keyboard = input::Keyboard::create();
+          if (!keyboard) {
+            logs::log(logs::error, "Failed to create keyboard: {}", keyboard.getErrorMessage());
+          } else {
+            auto keyboard_ptr = input::Keyboard(std::move(*keyboard));
+            devices_q->push(immer::box<events::PlugDeviceEvent>(
+                events::PlugDeviceEvent{.session_id = std::to_string(session->session_id),
+                                        .udev_events = keyboard_ptr.get_udev_events(),
+                                        .udev_hw_db_entries = keyboard_ptr.get_udev_hw_db_entries()}));
+            session->keyboard->emplace(std::move(keyboard_ptr));
+          }
+
+          // For immediate lobby attachment, we DON'T set on_ready promise because:
+          // 1. We don't have a wayland_plugin (using lobby's interpipe instead)
+          // 2. The .then() callback would try to create wayland display from null
+          // 3. We don't need to start a runner (lobby already started it)
+          // The streaming pipelines will attach directly to the lobby's interpipe source.
+          logs::log(logs::info, "[STREAM_SESSION] Immediate lobby setup complete (session {} attached to lobby {})",
+                    session->session_id, session->immediate_lobby_id.value());
+        } else if (use_pipewire_source) {
           // PipeWire mode: GNOME 49+ uses ScreenCast via PipeWire instead of nested Wayland
           logs::log(logs::info, "[STREAM_SESSION] Using PipeWire video source (GNOME 49+ mode), node_id={}",
                     session->app->pipewire_node_id.value());
@@ -200,7 +245,8 @@ setup_moonlight_handlers(const immer::box<state::AppState> &app_state,
 
           // If app has custom video source, start test pattern producer pipeline
           // This allows lobby switching to work for placeholder apps (e.g., Blank with videotestsrc)
-          if (session->app->video_producer_source.has_value()) {
+          // Skip if immediate_lobby_id is set - session will attach directly to lobby's interpipe
+          if (session->app->video_producer_source.has_value() && !session->immediate_lobby_id.has_value()) {
             logs::log(logs::debug, "[STREAM_SESSION] Starting test pattern producer for session {}",
                       session->session_id);
             // CRITICAL: Pass gst_context to share CUDA context with waylanddisplaysrc.
@@ -230,33 +276,36 @@ setup_moonlight_handlers(const immer::box<state::AppState> &app_state,
         }
 
         /* Create audio virtual sink */
-        logs::log(logs::debug, "[STREAM_SESSION] Create virtual audio sink");
-        auto pulse_sink_name = fmt::format("virtual_sink_{}", session->session_id);
-        std::shared_ptr<audio::VSink> v_device;
-        if (session->app->start_audio_server && audio_server && audio_server->server) {
-          v_device = audio::create_virtual_sink(
-              audio_server->server,
-              audio::AudioDevice{.sink_name = pulse_sink_name,
-                                 .mode = state::get_audio_mode(session->audio_channel_count, true)});
-          session->audio_sink->store(v_device);
+        // Skip audio producer for immediate lobby attachment - we'll use lobby's interpipe
+        if (!use_immediate_lobby) {
+          logs::log(logs::debug, "[STREAM_SESSION] Create virtual audio sink");
+          auto pulse_sink_name = fmt::format("virtual_sink_{}", session->session_id);
+          std::shared_ptr<audio::VSink> v_device;
+          if (session->app->start_audio_server && audio_server && audio_server->server) {
+            v_device = audio::create_virtual_sink(
+                audio_server->server,
+                audio::AudioDevice{.sink_name = pulse_sink_name,
+                                   .mode = state::get_audio_mode(session->audio_channel_count, true)});
+            session->audio_sink->store(v_device);
 
-          std::thread([session, audio_server = audio_server->server]() {
-            try {
-              auto sink_name = fmt::format("virtual_sink_{}.monitor", session->session_id);
-              streaming::start_audio_producer(std::to_string(session->session_id),
-                                              session->event_bus,
-                                              session->audio_channel_count,
-                                              sink_name,
-                                              audio::get_server_name(audio_server));
-            } catch (const std::exception &e) {
-              logs::log(logs::error, "[STREAM_SESSION] Audio producer thread exception: {}", e.what());
-            } catch (...) {
-              logs::log(logs::error, "[STREAM_SESSION] Audio producer thread unknown exception");
-            }
-          }).detach();
-        } else if (session->app->audio_producer_source.has_value()) {
+            std::thread([session, audio_server = audio_server->server]() {
+              try {
+                auto sink_name = fmt::format("virtual_sink_{}.monitor", session->session_id);
+                streaming::start_audio_producer(std::to_string(session->session_id),
+                                                session->event_bus,
+                                                session->audio_channel_count,
+                                                sink_name,
+                                                audio::get_server_name(audio_server));
+              } catch (const std::exception &e) {
+                logs::log(logs::error, "[STREAM_SESSION] Audio producer thread exception: {}", e.what());
+              } catch (...) {
+                logs::log(logs::error, "[STREAM_SESSION] Audio producer thread unknown exception");
+              }
+            }).detach();
+          } else if (session->app->audio_producer_source.has_value()) {
           // If app has custom audio source, start test audio producer pipeline
           // This allows lobby switching to work for placeholder apps (e.g., Blank with audiotestsrc)
+          // Skip if immediate_lobby_id is set - session will attach directly to lobby's interpipe
           logs::log(logs::debug, "[STREAM_SESSION] Starting test audio producer for session {}",
                     session->session_id);
           std::thread([session]() {
@@ -273,26 +322,31 @@ setup_moonlight_handlers(const immer::box<state::AppState> &app_state,
             }
           }).detach();
         }
+        } // end if (!use_immediate_lobby) for audio
 
-        // TODO: timeout? What if the wayland display is never ready?
-        auto w_display_ready = on_ready->get_future().then([session](auto fut) {
-          streaming::WaylandDisplayReady ready = fut.get();
+        // For immediate lobby attachment, we skip the wayland display setup and runner start
+        // because the lobby already has those running - we just attach to its interpipe.
+        if (!use_immediate_lobby) {
+          // TODO: timeout? What if the wayland display is never ready?
+          auto w_display_ready = on_ready->get_future().then([session](auto fut) {
+            streaming::WaylandDisplayReady ready = fut.get();
 
-          auto wl_state = virtual_display::create_wayland_display(ready.wayland_plugin, ready.wayland_socket_name);
-          // Set the wayland display
-          session->wayland_display->store(wl_state);
+            auto wl_state = virtual_display::create_wayland_display(ready.wayland_plugin, ready.wayland_socket_name);
+            // Set the wayland display
+            session->wayland_display->store(wl_state);
 
-          // Set virtual devices
-          session->mouse->emplace(virtual_display::WaylandMouse(wl_state));
-          session->keyboard->emplace(virtual_display::WaylandKeyboard(wl_state));
-          session->touch_screen->emplace(virtual_display::WaylandTouchScreen(wl_state));
+            // Set virtual devices
+            session->mouse->emplace(virtual_display::WaylandMouse(wl_state));
+            session->keyboard->emplace(virtual_display::WaylandKeyboard(wl_state));
+            session->touch_screen->emplace(virtual_display::WaylandTouchScreen(wl_state));
 
-          logs::log(logs::debug, "[STREAM_SESSION] Start runner");
-          session->event_bus->fire_event(immer::box<events::StartRunner>(
-              events::StartRunner{.stop_stream_when_over = true,
-                                  .runner = session->app->runner,
-                                  .stream_session = std::make_shared<events::StreamSession>(*session)}));
-        });
+            logs::log(logs::debug, "[STREAM_SESSION] Start runner");
+            session->event_bus->fire_event(immer::box<events::StartRunner>(
+                events::StartRunner{.stop_stream_when_over = true,
+                                    .runner = session->app->runner,
+                                    .stream_session = std::make_shared<events::StreamSession>(*session)}));
+          });
+        }
       }));
 
   /* Start runner */

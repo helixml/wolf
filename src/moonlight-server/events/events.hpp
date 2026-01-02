@@ -349,6 +349,13 @@ struct VideoSession {
 
   std::string client_ip;
   std::array<char, 16> rtp_secret_payload;
+
+  /**
+   * Optional: Initial interpipe source ID for the video pipeline.
+   * When set, the interpipesrc will listen to "{initial_interpipe_source_id}_video"
+   * instead of "{session_id}_video", enabling immediate lobby attachment.
+   */
+  std::optional<std::string> initial_interpipe_source_id;
 };
 
 struct AudioSession {
@@ -368,6 +375,13 @@ struct AudioSession {
 
   int packet_duration;
   wolf::core::audio::AudioMode audio_mode;
+
+  /**
+   * Optional: Initial interpipe source ID for the audio pipeline.
+   * When set, the interpipesrc will listen to "{initial_interpipe_source_id}_audio"
+   * instead of "{session_id}_audio", enabling immediate lobby attachment.
+   */
+  std::optional<std::string> initial_interpipe_source_id;
 };
 
 struct IDRRequestEvent {
@@ -547,6 +561,13 @@ struct StreamSession {
    */
   std::shared_ptr<std::atomic<std::chrono::steady_clock::time_point>> last_activity =
       std::make_shared<std::atomic<std::chrono::steady_clock::time_point>>(std::chrono::steady_clock::now());
+
+  /**
+   * Optional: If set, session should attach directly to this lobby's interpipe
+   * instead of starting its own test pattern producer.
+   * This avoids interpipesrc switching entirely, which prevents format mismatch issues.
+   */
+  std::optional<std::string> immediate_lobby_id;
 };
 
 } // namespace wolf::core::events

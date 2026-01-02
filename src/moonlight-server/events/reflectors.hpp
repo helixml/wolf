@@ -172,6 +172,11 @@ template <> struct Reflector<events::StreamSession> {
     // Observability: seconds since last ENET packet received
     // Used by session timeout monitor to detect stale sessions
     int idle_seconds;
+
+    // Optional: If set, session should attach directly to this lobby's interpipe
+    // instead of starting its own test pattern producer.
+    // This avoids interpipesrc switching entirely, which prevents format mismatch issues.
+    std::optional<std::string> immediate_lobby_id;
   };
 
   static ReflType from(const events::StreamSession &v) {
@@ -195,7 +200,8 @@ template <> struct Reflector<events::StreamSession> {
             .video_refresh_rate = v.display_mode.refreshRate,
             .audio_channel_count = v.audio_channel_count,
             .client_settings = v.client_settings,
-            .idle_seconds = idle_seconds};
+            .idle_seconds = idle_seconds,
+            .immediate_lobby_id = v.immediate_lobby_id};
   }
 };
 

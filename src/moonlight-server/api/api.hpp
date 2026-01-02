@@ -328,6 +328,23 @@ struct KeyboardResetResponse {
   std::string message;
 };
 
+/**
+ * Request to pre-configure a pending session for immediate lobby attachment.
+ * This allows Helix to set up lobby attachment before the Moonlight client connects.
+ * Security: Only accessible via Unix socket (Helix API container).
+ */
+struct ConfigurePendingSessionRequest {
+  rfl::Description<"Moonlight client unique ID for matching (e.g., helix-agent-{sessionId})",
+                   std::string> client_unique_id;
+  rfl::Description<"Lobby ID to attach to immediately when session starts",
+                   std::string> immediate_lobby_id;
+};
+
+struct ConfigurePendingSessionResponse {
+  bool success = true;
+  std::string message;
+};
+
 struct UnixSocket {
   boost::asio::local::stream_protocol::socket socket;
   bool is_alive = true;
@@ -383,6 +400,7 @@ private:
   void endpoint_SystemHealth(const HTTPRequest &req, std::shared_ptr<UnixSocket> socket);
   void endpoint_KeyboardState(const HTTPRequest &req, std::shared_ptr<UnixSocket> socket);
   void endpoint_KeyboardReset(const HTTPRequest &req, std::shared_ptr<UnixSocket> socket);
+  void endpoint_StreamSessionConfigure(const HTTPRequest &req, std::shared_ptr<UnixSocket> socket);
 
   void sse_broadcast(const std::string &payload);
   void sse_keepalive(const boost::system::error_code &e);

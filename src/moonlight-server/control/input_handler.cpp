@@ -254,6 +254,9 @@ void mouse_move_rel(const MOUSE_MOVE_REL_PACKET &pkt, events::StreamSession &ses
   }
 }
 
+// Debug counter for mouse_move_abs logging
+static int mouse_move_abs_log_count = 0;
+
 void mouse_move_abs(const MOUSE_MOVE_ABS_PACKET &pkt, events::StreamSession &session) {
   if (session.mouse->has_value()) {
     auto pointer_acceleration = session.client_settings->mouse_acceleration;
@@ -264,6 +267,14 @@ void mouse_move_abs(const MOUSE_MOVE_ABS_PACKET &pkt, events::StreamSession &ses
 
     auto absolute_x = (x / window_width) * static_cast<float>(session.display_mode.width) * pointer_acceleration;
     auto absolute_y = (y / window_height) * static_cast<float>(session.display_mode.height) * pointer_acceleration;
+
+    // Debug logging: log first 5 and then every 100th
+    mouse_move_abs_log_count++;
+    if (mouse_move_abs_log_count <= 5 || mouse_move_abs_log_count % 100 == 0) {
+      logs::log(logs::info, "[INPUT_HANDLER] mouse_move_abs #{}: pkt=({:.0f},{:.0f} ref={:.0f}x{:.0f}) -> abs=({:.1f},{:.1f}) display_mode={}x{} accel={}",
+                mouse_move_abs_log_count, x, y, window_width, window_height,
+                absolute_x, absolute_y, session.display_mode.width, session.display_mode.height, pointer_acceleration);
+    }
 
     std::visit([absolute_x,
                 absolute_y,
@@ -311,6 +322,8 @@ void mouse_button(const MOUSE_BUTTON_PACKET &pkt, events::StreamSession &session
       }
     } else if (std::holds_alternative<input::InputBridgeMouse>(session.mouse->value())) {
       // InputBridge for PipeWire/RemoteDesktop mode - uses Mutter's D-Bus API
+      logs::log(logs::info, "[INPUT_HANDLER] mouse_button: type={} button={} (via InputBridge)",
+                pkt.type == MOUSE_BUTTON_PRESS ? "press" : "release", pkt.button);
       if (pkt.type == MOUSE_BUTTON_PRESS) {
         std::get<input::InputBridgeMouse>(session.mouse->value()).press(pkt.button);
       } else {

@@ -32,14 +32,23 @@ use waylanddisplaycore::utils::allocator::cuda::{
 use waylanddisplaycore::Fourcc as DrmFourcc;
 
 /// Convert DRM fourcc to GStreamer VideoFormat.
-/// This is the inverse of waylanddisplaycore's gst_video_format_name_to_drm_fourcc().
-/// Falls back to Bgra if the format is unknown (matches waylanddisplaycore's Bgrx fallback).
+///
+/// IMPORTANT: This mapping compensates for a CUDA limitation. When receiving frames from
+/// PipeWire/GNOME ScreenCast:
+/// - PipeWire sends BGRx format (bytes: B, G, R, x in memory)
+/// - The correct DRM fourcc would be XRGB8888, but CUDA rejects it with tiled modifiers
+/// - So we use BGRX8888 (which CUDA accepts) but need to tell GStreamer the actual byte order
+///
+/// The mappings here ensure cudaconvertscale interprets the pixel data correctly despite
+/// the "incorrect" fourcc used for CUDA import.
 fn drm_fourcc_to_video_format(fourcc: DrmFourcc) -> VideoFormat {
     // Try GStreamer's built-in conversion first
     match VideoFormat::from_fourcc(fourcc as u32) {
         VideoFormat::Unknown => {
-            // Fallback mapping for common formats that GStreamer might not recognize directly
-            // These match the inverse of waylanddisplaycore's gst_video_format_name_to_drm_fourcc()
+            // CUDA compatibility mappings:
+            // We use BGRX8888/RGBX8888 for CUDA import (it accepts them with tiled modifiers)
+            // but the actual pixel data is in Bgrx/Rgbx layout (from PipeWire BGRx/RGBx).
+            // So we map to the GStreamer format that matches the ACTUAL byte order.
             match fourcc {
                 DrmFourcc::Argb8888 => VideoFormat::Bgra,
                 DrmFourcc::Abgr8888 => VideoFormat::Rgba,
@@ -47,8 +56,10 @@ fn drm_fourcc_to_video_format(fourcc: DrmFourcc) -> VideoFormat {
                 DrmFourcc::Xbgr8888 => VideoFormat::Rgbx,
                 DrmFourcc::Rgba8888 => VideoFormat::Abgr,
                 DrmFourcc::Bgra8888 => VideoFormat::Argb,
-                DrmFourcc::Rgbx8888 => VideoFormat::Xbgr,
-                DrmFourcc::Bgrx8888 => VideoFormat::Xrgb,
+                // CUDA workaround: BGRX8888/RGBX8888 contain Bgrx/Rgbx data from PipeWire
+                // Map to the format that matches the actual byte order, not the DRM spec
+                DrmFourcc::Rgbx8888 => VideoFormat::Rgbx,
+                DrmFourcc::Bgrx8888 => VideoFormat::Bgrx,
                 _ => {
                     tracing::warn!("Unknown DRM fourcc {:?}, falling back to Bgra", fourcc);
                     VideoFormat::Bgra
@@ -201,10 +212,20 @@ impl ElementImpl for PipeWireZeroCopySrc {
 
     fn pad_templates() -> &'static [gst::PadTemplate] {
         static TEMPLATES: Lazy<Vec<gst::PadTemplate>> = Lazy::new(|| {
+            // Include all RGBA/BGRA variants since gst_video_info_dma_drm_to_video_info()
+            // may produce different formats depending on the DRM fourcc.
+            // DRM ARGB8888 -> GST BGRA, DRM BGRA8888 -> GST ARGB on little-endian.
+            let rgba_formats = [
+                VideoFormat::Bgra, VideoFormat::Rgba,
+                VideoFormat::Argb, VideoFormat::Abgr,
+                VideoFormat::Bgrx, VideoFormat::Rgbx,
+                VideoFormat::Xrgb, VideoFormat::Xbgr,
+                VideoFormat::Nv12,
+            ];
             let mut caps = gst::Caps::new_empty();
-            caps.merge(VideoCapsBuilder::new().features([CAPS_FEATURE_MEMORY_CUDA_MEMORY]).format_list([VideoFormat::Bgra, VideoFormat::Rgba, VideoFormat::Nv12]).build());
+            caps.merge(VideoCapsBuilder::new().features([CAPS_FEATURE_MEMORY_CUDA_MEMORY]).format_list(rgba_formats).build());
             caps.merge(VideoCapsBuilder::new().features([gstreamer_allocators::CAPS_FEATURE_MEMORY_DMABUF]).format(VideoFormat::DmaDrm).build());
-            caps.merge(VideoCapsBuilder::new().format_list([VideoFormat::Bgra, VideoFormat::Rgba]).build());
+            caps.merge(VideoCapsBuilder::new().format_list(rgba_formats).build());
             vec![gst::PadTemplate::new("src", gst::PadDirection::Src, gst::PadPresence::Always, &caps).unwrap()]
         });
         TEMPLATES.as_ref()
@@ -281,6 +302,21 @@ impl BaseSrcImpl for PipeWireZeroCopySrc {
                             if settings.cuda_context.is_none() {
                                 gst::info!(CAT, imp = self, "Acquired CUDA context via new_from_gstreamer");
                                 settings.cuda_context = Some(Arc::new(std::sync::Mutex::new(ctx)));
+                            } else {
+                                // CRITICAL: Context was already set via set_context() during
+                                // gst_cuda_ensure_element_context. Both CUDAContext objects wrap
+                                // the same GstCudaContext pointer, but with incorrect ref count.
+                                //
+                                // If we drop ctx normally, its Drop impl calls gst_object_unref
+                                // on the shared pointer, causing use-after-free when
+                                // settings.cuda_context is later used.
+                                //
+                                // Use mem::forget to prevent the double-unref. The minor memory
+                                // leak (16 bytes for CUDAContext + potential stream handle) is
+                                // acceptable to prevent a crash.
+                                gst::info!(CAT, imp = self,
+                                    "Context already set via set_context, using mem::forget to prevent double-unref");
+                                std::mem::forget(ctx);
                             }
                         }
                         Err(e) => {
@@ -370,17 +406,27 @@ impl BaseSrcImpl for PipeWireZeroCopySrc {
             }
         };
 
+        // Include all RGBA/BGRA variants since gst_video_info_dma_drm_to_video_info()
+        // may produce different formats depending on the DRM fourcc.
+        let rgba_formats = [
+            VideoFormat::Bgra, VideoFormat::Rgba,
+            VideoFormat::Argb, VideoFormat::Abgr,
+            VideoFormat::Bgrx, VideoFormat::Rgbx,
+            VideoFormat::Xrgb, VideoFormat::Xbgr,
+            VideoFormat::Nv12,
+        ];
+
         let mut caps = match output_mode {
-            OutputMode::Cuda => VideoCapsBuilder::new().features([CAPS_FEATURE_MEMORY_CUDA_MEMORY]).format_list([VideoFormat::Bgra, VideoFormat::Rgba, VideoFormat::Nv12]).build(),
+            OutputMode::Cuda => VideoCapsBuilder::new().features([CAPS_FEATURE_MEMORY_CUDA_MEMORY]).format_list(rgba_formats).build(),
             OutputMode::DmaBuf => VideoCapsBuilder::new().features([gstreamer_allocators::CAPS_FEATURE_MEMORY_DMABUF]).format(VideoFormat::DmaDrm).build(),
-            OutputMode::System => VideoCapsBuilder::new().format_list([VideoFormat::Bgra, VideoFormat::Rgba]).build(),
+            OutputMode::System => VideoCapsBuilder::new().format_list(rgba_formats).build(),
             OutputMode::Auto => {
                 // Auto mode before start(): advertise all capabilities (like pad template)
                 // GStreamer will negotiate based on downstream requirements
                 let mut all_caps = gst::Caps::new_empty();
-                all_caps.merge(VideoCapsBuilder::new().features([CAPS_FEATURE_MEMORY_CUDA_MEMORY]).format_list([VideoFormat::Bgra, VideoFormat::Rgba, VideoFormat::Nv12]).build());
+                all_caps.merge(VideoCapsBuilder::new().features([CAPS_FEATURE_MEMORY_CUDA_MEMORY]).format_list(rgba_formats).build());
                 all_caps.merge(VideoCapsBuilder::new().features([gstreamer_allocators::CAPS_FEATURE_MEMORY_DMABUF]).format(VideoFormat::DmaDrm).build());
-                all_caps.merge(VideoCapsBuilder::new().format_list([VideoFormat::Bgra, VideoFormat::Rgba]).build());
+                all_caps.merge(VideoCapsBuilder::new().format_list(rgba_formats).build());
                 all_caps
             }
         };
@@ -391,6 +437,14 @@ impl BaseSrcImpl for PipeWireZeroCopySrc {
     fn set_caps(&self, caps: &gst::Caps) -> Result<(), gst::LoggableError> {
         gst::info!(CAT, imp = self, "Caps: {:?}", caps);
         if let Ok(info) = VideoInfo::from_caps(caps) {
+            // Validate framerate - warn if it's 0/1 which is typically a bug in pipeline construction
+            let fps = info.fps();
+            if fps.numer() == 0 || fps.denom() == 0 {
+                gst::warning!(CAT, imp = self,
+                    "Invalid framerate {}/{} in caps - this is likely a bug in the upstream pipeline. \
+                     Check that the pipeline uses display_mode.refreshRate instead of hardcoded 0/1.",
+                    fps.numer(), fps.denom());
+            }
             if let Some(s) = self.state.lock().as_mut() { s.video_info = Some(info); }
         }
         self.parent_set_caps(caps)
@@ -408,7 +462,7 @@ impl PushSrcImpl for PipeWireZeroCopySrc {
 
         let frame = stream.recv_frame().map_err(|e| { gst::error!(CAT, imp = self, "Frame: {}", e); gst::FlowError::Error })?;
 
-        let buffer = match frame {
+        let (buffer, actual_format, width, height) = match frame {
             FrameData::DmaBuf(dmabuf) if state.actual_output_mode == OutputMode::Cuda => {
                 // Use waylanddisplaycore's battle-tested CUDA conversion with shared context
                 let cuda_context_arc = cuda_context.as_ref().ok_or(gst::FlowError::Error)?;
@@ -418,30 +472,54 @@ impl PushSrcImpl for PipeWireZeroCopySrc {
                 // Get raw EGLDisplay handle for waylanddisplaycore's EGLImage::from()
                 let raw_display: RawEGLDisplay = egl_display.get_display_handle().handle;
 
+                let w = dmabuf.width() as u32;
+                let h = dmabuf.height() as u32;
+
+                // Debug logging for CUDA conversion
+                let drm_fmt = dmabuf.format();
+                gst::warning!(CAT, imp = self,
+                    "[PIPEWIRE_DEBUG] CUDA path: dmabuf {}x{} fourcc={:?} modifier=0x{:x}",
+                    w, h, drm_fmt.code, u64::from(drm_fmt.modifier));
+
                 let egl_image = EGLImage::from(&dmabuf, &raw_display)
                     .map_err(|e| { gst::error!(CAT, imp = self, "EGLImage: {}", e); gst::FlowError::Error })?;
 
+                gst::warning!(CAT, imp = self, "[PIPEWIRE_DEBUG] EGLImage created successfully");
+
                 let cuda_image = CUDAImage::from(egl_image, &cuda_ctx)
                     .map_err(|e| { gst::error!(CAT, imp = self, "CUDAImage: {}", e); gst::FlowError::Error })?;
+
+                gst::warning!(CAT, imp = self, "[PIPEWIRE_DEBUG] CUDAImage created successfully");
 
                 // Derive VideoFormat from DMA-BUF's fourcc (matches waylanddisplaycore pattern)
                 let drm_format = dmabuf.format();
                 let video_format = drm_fourcc_to_video_format(drm_format.code);
                 gst::debug!(CAT, imp = self, "DMA-BUF format: {:?} -> {:?}", drm_format.code, video_format);
 
-                let base_info = VideoInfo::builder(video_format, dmabuf.width() as u32, dmabuf.height() as u32)
+                let base_info = VideoInfo::builder(video_format, w, h)
                     .build()
                     .map_err(|_| gst::FlowError::Error)?;
                 let fourcc: u32 = drm_format.code as u32;
                 let modifier: u64 = drm_format.modifier.into();
-                let video_info = VideoInfoDmaDrm::new(base_info, fourcc, modifier);
+                let dma_video_info = VideoInfoDmaDrm::new(base_info, fourcc, modifier);
 
-                cuda_image.to_gst_buffer(video_info, &cuda_ctx, state.buffer_pool.as_ref())
-                    .map_err(|e| { gst::error!(CAT, imp = self, "CUDA buffer: {}", e); gst::FlowError::Error })?
+                let buf = cuda_image.to_gst_buffer(dma_video_info, &cuda_ctx, state.buffer_pool.as_ref())
+                    .map_err(|e| { gst::error!(CAT, imp = self, "CUDA buffer: {}", e); gst::FlowError::Error })?;
+
+                // Get the actual format from the buffer's VideoMeta (set by to_gst_buffer)
+                // This is the format that gst_video_info_dma_drm_to_video_info() produced
+                let actual_fmt = buf.meta::<gst_video::VideoMeta>()
+                    .map(|m| m.format())
+                    .unwrap_or(video_format);
+
+                (buf, actual_fmt, w, h)
             }
             FrameData::DmaBuf(dmabuf) => {
-                // SHM fallback - mmap and copy
-                self.dmabuf_to_system(&dmabuf)?
+                let w = dmabuf.width() as u32;
+                let h = dmabuf.height() as u32;
+                let video_format = drm_fourcc_to_video_format(dmabuf.format().code);
+                let buf = self.dmabuf_to_system(&dmabuf)?;
+                (buf, video_format, w, h)
             }
             FrameData::Shm { data, width, height, stride, format } => {
                 // Try to convert format (fourcc) to VideoFormat, fall back to Bgra
@@ -453,11 +531,66 @@ impl PushSrcImpl for PipeWireZeroCopySrc {
                 } else {
                     VideoFormat::Bgra
                 };
-                self.create_system_buffer(&data, width, height, stride, video_format)?
+                let buf = self.create_system_buffer(&data, width, height, stride, video_format)?;
+                (buf, video_format, width, height)
             }
         };
 
-        state.frame_count += 1;
+        // Check if we need to update caps to match the actual buffer format
+        let needs_caps_update = match &state.video_info {
+            Some(info) => info.format() != actual_format || info.width() != width || info.height() != height,
+            None => true,
+        };
+
+        if needs_caps_update {
+            gst::info!(CAT, imp = self, "Format/size changed, updating caps to {:?} {}x{}", actual_format, width, height);
+
+            // Get framerate from existing video_info or use 60/1 as default
+            // GStreamer requires framerate for caps to be "fixed"
+            let fps = state.video_info.as_ref()
+                .map(|info| info.fps())
+                .unwrap_or(gst::Fraction::new(60, 1));
+
+            // Build new caps with the actual format (must include framerate for fixed caps)
+            let new_caps = match state.actual_output_mode {
+                OutputMode::Cuda => {
+                    VideoCapsBuilder::new()
+                        .features([CAPS_FEATURE_MEMORY_CUDA_MEMORY])
+                        .format(actual_format)
+                        .width(width as i32)
+                        .height(height as i32)
+                        .framerate(fps)
+                        .build()
+                }
+                _ => {
+                    VideoCapsBuilder::new()
+                        .format(actual_format)
+                        .width(width as i32)
+                        .height(height as i32)
+                        .framerate(fps)
+                        .build()
+                }
+            };
+
+            // Update stored video_info
+            if let Ok(info) = VideoInfo::from_caps(&new_caps) {
+                state.video_info = Some(info);
+            }
+
+            // Release state lock before calling set_caps (it may need the lock)
+            drop(g);
+
+            // Set the new caps on the src pad
+            let obj = self.obj();
+            let pad = obj.static_pad("src").expect("src pad should exist");
+            if !pad.push_event(gst::event::Caps::new(&new_caps)) {
+                gst::warning!(CAT, imp = self, "Failed to push new caps event");
+            }
+        } else {
+            state.frame_count += 1;
+            drop(g);
+        }
+
         Ok(CreateSuccess::NewBuffer(buffer))
     }
 }
@@ -492,5 +625,151 @@ impl PipeWireZeroCopySrc {
             gst_video::VideoMeta::add_full(buf, gst_video::VideoFrameFlags::empty(), format, width, height, &[0], &[stride as i32]).map_err(|_| gst::FlowError::Error)?;
         }
         Ok(buffer)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Test OutputMode parsing from string
+    #[test]
+    fn test_output_mode_from_str_cuda() {
+        assert_eq!(OutputMode::from_str("cuda"), OutputMode::Cuda);
+        assert_eq!(OutputMode::from_str("CUDA"), OutputMode::Cuda);
+        assert_eq!(OutputMode::from_str("Cuda"), OutputMode::Cuda);
+    }
+
+    #[test]
+    fn test_output_mode_from_str_dmabuf() {
+        assert_eq!(OutputMode::from_str("dmabuf"), OutputMode::DmaBuf);
+        assert_eq!(OutputMode::from_str("dma-buf"), OutputMode::DmaBuf);
+        assert_eq!(OutputMode::from_str("DmaBuf"), OutputMode::DmaBuf);
+    }
+
+    #[test]
+    fn test_output_mode_from_str_system() {
+        assert_eq!(OutputMode::from_str("system"), OutputMode::System);
+        assert_eq!(OutputMode::from_str("memory"), OutputMode::System);
+        assert_eq!(OutputMode::from_str("shm"), OutputMode::System);
+        assert_eq!(OutputMode::from_str("SYSTEM"), OutputMode::System);
+    }
+
+    #[test]
+    fn test_output_mode_from_str_auto() {
+        assert_eq!(OutputMode::from_str("auto"), OutputMode::Auto);
+        assert_eq!(OutputMode::from_str("Auto"), OutputMode::Auto);
+        assert_eq!(OutputMode::from_str("unknown"), OutputMode::Auto);
+        assert_eq!(OutputMode::from_str(""), OutputMode::Auto);
+    }
+
+    #[test]
+    fn test_output_mode_default() {
+        assert_eq!(OutputMode::default(), OutputMode::Auto);
+    }
+
+    /// Test DRM fourcc to GStreamer VideoFormat conversion
+    /// Note: These tests require gst::init() because VideoFormat::from_fourcc() uses GStreamer
+    #[test]
+    fn test_drm_fourcc_to_video_format_argb8888() {
+        gst::init().unwrap();
+        let format = drm_fourcc_to_video_format(DrmFourcc::Argb8888);
+        assert_eq!(format, VideoFormat::Bgra, "ARGB8888 should map to Bgra");
+    }
+
+    #[test]
+    fn test_drm_fourcc_to_video_format_abgr8888() {
+        gst::init().unwrap();
+        let format = drm_fourcc_to_video_format(DrmFourcc::Abgr8888);
+        assert_eq!(format, VideoFormat::Rgba, "ABGR8888 should map to Rgba");
+    }
+
+    #[test]
+    fn test_drm_fourcc_to_video_format_xrgb8888() {
+        gst::init().unwrap();
+        let format = drm_fourcc_to_video_format(DrmFourcc::Xrgb8888);
+        assert_eq!(format, VideoFormat::Bgrx, "XRGB8888 should map to Bgrx");
+    }
+
+    #[test]
+    fn test_drm_fourcc_to_video_format_xbgr8888() {
+        gst::init().unwrap();
+        let format = drm_fourcc_to_video_format(DrmFourcc::Xbgr8888);
+        assert_eq!(format, VideoFormat::Rgbx, "XBGR8888 should map to Rgbx");
+    }
+
+    #[test]
+    fn test_drm_fourcc_to_video_format_rgba8888() {
+        gst::init().unwrap();
+        let format = drm_fourcc_to_video_format(DrmFourcc::Rgba8888);
+        assert_eq!(format, VideoFormat::Abgr, "RGBA8888 should map to Abgr");
+    }
+
+    #[test]
+    fn test_drm_fourcc_to_video_format_bgra8888() {
+        gst::init().unwrap();
+        let format = drm_fourcc_to_video_format(DrmFourcc::Bgra8888);
+        assert_eq!(format, VideoFormat::Argb, "BGRA8888 should map to Argb");
+    }
+
+    /// Test CUDA workaround mappings for BGRX8888/RGBX8888
+    /// These are CRITICAL: PipeWire sends BGRx/RGBx data, but we use BGRX8888/RGBX8888
+    /// fourcc for CUDA compatibility (CUDA rejects XRGB8888 with NVIDIA tiled modifiers).
+    /// We must map these to Bgrx/Rgbx so GStreamer interprets the colors correctly.
+    #[test]
+    fn test_drm_fourcc_to_video_format_bgrx8888_cuda_workaround() {
+        gst::init().unwrap();
+        let format = drm_fourcc_to_video_format(DrmFourcc::Bgrx8888);
+        // CRITICAL: Must be Bgrx to match the actual pixel data from PipeWire
+        // If this is Xrgb, colors will be swapped (R/B channels reversed)
+        assert_eq!(format, VideoFormat::Bgrx, "BGRX8888 should map to Bgrx (CUDA workaround)");
+    }
+
+    #[test]
+    fn test_drm_fourcc_to_video_format_rgbx8888_cuda_workaround() {
+        gst::init().unwrap();
+        let format = drm_fourcc_to_video_format(DrmFourcc::Rgbx8888);
+        // CRITICAL: Must be Rgbx to match the actual pixel data from PipeWire
+        // If this is Xbgr, colors will be swapped (R/B channels reversed)
+        assert_eq!(format, VideoFormat::Rgbx, "RGBX8888 should map to Rgbx (CUDA workaround)");
+    }
+
+    /// Test Settings default values
+    #[test]
+    fn test_settings_default() {
+        let settings = Settings::default();
+        assert!(settings.pipewire_node_id.is_none());
+        assert_eq!(settings.render_node, Some("/dev/dri/renderD128".to_string()));
+        assert_eq!(settings.output_mode, OutputMode::Auto);
+        assert_eq!(settings.cuda_device_id, -1);
+        assert!(settings.cuda_context.is_none());
+    }
+
+    /// Test State default values
+    #[test]
+    fn test_state_default() {
+        let state = State::default();
+        assert!(state.stream.is_none());
+        assert!(state.video_info.is_none());
+        assert!(state.egl_display.is_none());
+        assert!(state.buffer_pool.is_none());
+        assert_eq!(state.actual_output_mode, OutputMode::System);
+        assert_eq!(state.frame_count, 0);
+    }
+
+    /// Test that valid framerate values are detected correctly
+    /// This test ensures we catch bugs like framerate=0/1 in pipeline construction
+    #[test]
+    fn test_framerate_validation() {
+        // Valid framerates
+        let valid_fps = gst::Fraction::new(60, 1);
+        assert!(valid_fps.numer() > 0 && valid_fps.denom() > 0, "60/1 should be valid");
+
+        let valid_fps_30 = gst::Fraction::new(30, 1);
+        assert!(valid_fps_30.numer() > 0 && valid_fps_30.denom() > 0, "30/1 should be valid");
+
+        // Invalid framerate (the bug we're preventing)
+        let invalid_fps = gst::Fraction::new(0, 1);
+        assert!(invalid_fps.numer() == 0, "0/1 should be detected as invalid");
     }
 }

@@ -102,7 +102,8 @@ TEST_CASE("Pair APIs", "[API]") {
       .pairing_cache = std::make_shared<immer::atom<immer::map<std::string, state::PairCache>>>(),
       .pairing_atom = std::make_shared<immer::atom<immer::map<std::string, immer::box<events::PairSignal>>>>(),
       .event_bus = event_bus,
-      .running_sessions = running_sessions});
+      .running_sessions = running_sessions,
+      .pending_session_configs = std::make_shared<immer::atom<immer::map<std::string, state::PendingSessionConfig>>>()});
 
   // Start the server
   std::thread server_thread([app_state]() { wolf::api::start_server("/tmp/", app_state); });
@@ -207,7 +208,8 @@ TEST_CASE("APPs APIs", "[API]") {
       .pairing_cache = std::make_shared<immer::atom<immer::map<std::string, state::PairCache>>>(),
       .pairing_atom = std::make_shared<immer::atom<immer::map<std::string, immer::box<events::PairSignal>>>>(),
       .event_bus = event_bus,
-      .running_sessions = running_sessions});
+      .running_sessions = running_sessions,
+      .pending_session_configs = std::make_shared<immer::atom<immer::map<std::string, state::PendingSessionConfig>>>()});
 
   // Start the server
   std::thread server_thread([app_state]() { wolf::api::start_server("/tmp/", app_state); });
@@ -285,7 +287,8 @@ TEST_CASE("Profile APIs", "[API]") {
       .pairing_cache = std::make_shared<immer::atom<immer::map<std::string, state::PairCache>>>(),
       .pairing_atom = std::make_shared<immer::atom<immer::map<std::string, immer::box<events::PairSignal>>>>(),
       .event_bus = event_bus,
-      .running_sessions = running_sessions});
+      .running_sessions = running_sessions,
+      .pending_session_configs = std::make_shared<immer::atom<immer::map<std::string, state::PendingSessionConfig>>>()});
 
   // Start the server
   std::thread server_thread([app_state]() { wolf::api::start_server("/tmp/", app_state); });
@@ -366,7 +369,8 @@ TEST_CASE("Sessions APIs", "[API]") {
       .pairing_cache = std::make_shared<immer::atom<immer::map<std::string, state::PairCache>>>(),
       .pairing_atom = std::make_shared<immer::atom<immer::map<std::string, immer::box<events::PairSignal>>>>(),
       .event_bus = event_bus,
-      .running_sessions = running_sessions});
+      .running_sessions = running_sessions,
+      .pending_session_configs = std::make_shared<immer::atom<immer::map<std::string, state::PendingSessionConfig>>>()});
 
   // Start the server
   std::thread server_thread([app_state]() { wolf::api::start_server("/tmp/", app_state); });
@@ -436,7 +440,8 @@ TEST_CASE("Lobbies APIs", "[API]") {
       .pairing_atom = std::make_shared<immer::atom<immer::map<std::string, immer::box<events::PairSignal>>>>(),
       .event_bus = event_bus,
       .lobbies = std::make_shared<immer::atom<immer::vector<events::Lobby>>>(),
-      .running_sessions = running_sessions});
+      .running_sessions = running_sessions,
+      .pending_session_configs = std::make_shared<immer::atom<immer::map<std::string, state::PendingSessionConfig>>>()});
   // Start the server
   std::thread server_thread([app_state]() { wolf::api::start_server("/tmp/", app_state); });
   server_thread.detach();
@@ -589,7 +594,8 @@ TEST_CASE("Utils APIs", "[API]") {
       .pairing_atom = std::make_shared<immer::atom<immer::map<std::string, immer::box<events::PairSignal>>>>(),
       .event_bus = event_bus,
       .lobbies = std::make_shared<immer::atom<immer::vector<events::Lobby>>>(),
-      .running_sessions = running_sessions});
+      .running_sessions = running_sessions,
+      .pending_session_configs = std::make_shared<immer::atom<immer::map<std::string, state::PendingSessionConfig>>>()});
   // Start the server
   std::thread server_thread([app_state]() { wolf::api::start_server("/tmp/", app_state); });
   server_thread.detach();
@@ -664,7 +670,8 @@ TEST_CASE("SSE APIs", "[API]") {
       .pairing_cache = std::make_shared<immer::atom<immer::map<std::string, state::PairCache>>>(),
       .pairing_atom = std::make_shared<immer::atom<immer::map<std::string, immer::box<events::PairSignal>>>>(),
       .event_bus = event_bus,
-      .running_sessions = running_sessions});
+      .running_sessions = running_sessions,
+      .pending_session_configs = std::make_shared<immer::atom<immer::map<std::string, state::PendingSessionConfig>>>()});
 
   // Start the server
   std::thread server_thread([app_state]() { wolf::api::start_server("/tmp/", app_state); });

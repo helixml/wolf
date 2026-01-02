@@ -104,16 +104,17 @@ fn spa_video_format_to_drm_fourcc(format: spa::param::video::VideoFormat) -> u32
     match format {
         spa::param::video::VideoFormat::BGRA => 0x34324142, // BA24 = BGRA8888
         spa::param::video::VideoFormat::RGBA => 0x34324152, // RA24 = RGBA8888
-        // BGRx/RGBx have memory layout B,G,R,X and R,G,B,X respectively
-        // These match DRM XRGB8888/XBGR8888 which also define memory byte order
-        // NOTE: Previously mapped to BGRA/RGBA which have DIFFERENT memory layouts and caused R/B swap
-        spa::param::video::VideoFormat::BGRx => 0x34325258, // XR24 = XRGB8888 (memory: B,G,R,X)
-        spa::param::video::VideoFormat::RGBx => 0x34324258, // XB24 = XBGR8888 (memory: R,G,B,X)
+        // BGRx/RGBx: Use ARGB/ABGR for CUDA compatibility
+        // CUDA rejects both XRGB8888 and BGRX8888 with NVIDIA tiled modifiers.
+        // Use formats with alpha channels (ARGB/ABGR) which CUDA accepts.
+        // BGRx bytes: B,G,R,x -> ARGB8888 bytes: B,G,R,A (same layout, alpha treated as opaque)
+        // RGBx bytes: R,G,B,x -> ABGR8888 bytes: R,G,B,A (same layout, alpha treated as opaque)
+        spa::param::video::VideoFormat::BGRx => 0x34325241, // AR24 = ARGB8888 (CUDA accepts with tiled modifiers)
+        spa::param::video::VideoFormat::RGBx => 0x34324241, // AB24 = ABGR8888 (CUDA accepts with tiled modifiers)
         spa::param::video::VideoFormat::ARGB => 0x34325241, // AR24 = ARGB8888
         spa::param::video::VideoFormat::ABGR => 0x34324241, // AB24 = ABGR8888
-        // Map xRGB/xBGR to ARGB/ABGR - same memory layout
-        spa::param::video::VideoFormat::xRGB => 0x34325241, // Map to ARGB8888 (same as AR24)
-        spa::param::video::VideoFormat::xBGR => 0x34324241, // Map to ABGR8888 (same as AB24)
+        spa::param::video::VideoFormat::xRGB => 0x34325258, // XR24 = XRGB8888
+        spa::param::video::VideoFormat::xBGR => 0x34324258, // XB24 = XBGR8888
         spa::param::video::VideoFormat::NV12 => 0x3231564e, // NV12
         spa::param::video::VideoFormat::I420 => 0x32315549, // I420
         _ => {
@@ -361,16 +362,18 @@ mod tests {
 
     #[test]
     fn test_spa_to_drm_fourcc_bgrx() {
-        // BGRx has memory layout B,G,R,X which matches DRM XRGB8888
+        // BGRx maps to ARGB8888 for CUDA compatibility
+        // CUDA rejects XRGB8888 and BGRX8888 with tiled modifiers, but accepts ARGB8888
         let fourcc = spa_video_format_to_drm_fourcc(spa::param::video::VideoFormat::BGRx);
-        assert_eq!(fourcc, 0x34325258, "BGRx should map to XRGB8888 (XR24)");
+        assert_eq!(fourcc, 0x34325241, "BGRx should map to ARGB8888 (AR24) for CUDA compatibility");
     }
 
     #[test]
     fn test_spa_to_drm_fourcc_rgbx() {
-        // RGBx has memory layout R,G,B,X which matches DRM XBGR8888
+        // RGBx maps to ABGR8888 for CUDA compatibility
+        // CUDA rejects XBGR8888 and RGBX8888 with tiled modifiers, but accepts ABGR8888
         let fourcc = spa_video_format_to_drm_fourcc(spa::param::video::VideoFormat::RGBx);
-        assert_eq!(fourcc, 0x34324258, "RGBx should map to XBGR8888 (XB24)");
+        assert_eq!(fourcc, 0x34324241, "RGBx should map to ABGR8888 (AB24) for CUDA compatibility");
     }
 
     #[test]
@@ -389,16 +392,16 @@ mod tests {
 
     #[test]
     fn test_spa_to_drm_fourcc_xrgb() {
-        // xRGB should map to ARGB8888
+        // xRGB should map to XRGB8888 (XR24)
         let fourcc = spa_video_format_to_drm_fourcc(spa::param::video::VideoFormat::xRGB);
-        assert_eq!(fourcc, 0x34325241, "xRGB should map to ARGB8888");
+        assert_eq!(fourcc, 0x34325258, "xRGB should map to XRGB8888 (XR24)");
     }
 
     #[test]
     fn test_spa_to_drm_fourcc_xbgr() {
-        // xBGR should map to ABGR8888
+        // xBGR should map to XBGR8888 (XB24)
         let fourcc = spa_video_format_to_drm_fourcc(spa::param::video::VideoFormat::xBGR);
-        assert_eq!(fourcc, 0x34324241, "xBGR should map to ABGR8888");
+        assert_eq!(fourcc, 0x34324258, "xBGR should map to XBGR8888 (XB24)");
     }
 
     #[test]

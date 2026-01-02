@@ -67,7 +67,9 @@ WORKDIR /wolf
 
 # Build gst-pipewire-zerocopy GStreamer plugin
 # This provides pipewirezerocopysrc element for unified PipeWire capture
+# Run unit tests first to catch issues early (tests pure logic, no GPU needed)
 WORKDIR /wolf/gst-pipewire-zerocopy
+RUN cargo test --lib -- --nocapture
 RUN cargo cinstall --features cuda --prefix=/usr/local/lib/x86_64-linux-gnu/ --libdir=/usr/local/lib/x86_64-linux-gnu/gstreamer-1.0
 
 WORKDIR /wolf

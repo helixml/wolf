@@ -5,6 +5,7 @@
 #include <gst-video-context.hpp>
 #include <gstreamer-1.0/gst/app/gstappsink.h>
 #include <gstreamer-1.0/gst/app/gstappsrc.h>
+#include <gstreamer-1.0/gst/video/video.h>
 #include <immer/array.hpp>
 #include <immer/box.hpp>
 #include <memory>
@@ -119,9 +120,19 @@ void start_video_producer(const std::string &session_id,
                           std::shared_ptr<immer::atom<gst_video_context::gst_context_ptr>> video_context,
                           std::shared_ptr<boost::promise<WaylandDisplayReady>> on_ready,
                           std::shared_ptr<events::EventBusType> event_bus) {
+  // waylanddisplaysrc outputs CUDA memory in the compositor's native format (typically BGRA).
+  // We use cudaconvertscale to convert to NV12, matching the test pattern producer format.
+  // This ensures compatible caps when switching between test pattern and waylanddisplaysrc,
+  // preventing "segment format mismatch" errors that cause the stream to hang.
+  // CRITICAL: Add queue before interpipesink to decouple producer from consumer timing.
+  // Without queue, GStreamer warns "Pipeline construction is invalid, please add queues"
+  // and the pipeline can deadlock when interpipesrc switches sources.
   auto pipeline = fmt::format("waylanddisplaysrc name=wolf_wayland_source render_node={render_node} ! "
-                              "{buffer_format}, width={width}, height={height}, framerate={fps}/1 ! \n"    //
-                              "interpipesink sync=true async=false name={session_id}_video max-buffers=5", //
+                              "{buffer_format} ! "
+                              "cudaconvertscale ! "
+                              "{buffer_format}, format=NV12, width={width}, height={height}, framerate={fps}/1 ! "
+                              "queue max-size-buffers=5 leaky=downstream ! "
+                              "interpipesink sync=true async=false name={session_id}_video max-buffers=5",
                               fmt::arg("buffer_format", buffer_format),
                               fmt::arg("render_node", render_node),
                               fmt::arg("session_id", session_id),
@@ -205,12 +216,22 @@ void start_pipewire_video_producer(const std::string &session_id,
   }
 
   // pipewirezerocopysrc outputs CUDA/DMABuf/system memory in PipeWire's native format (typically BGRA).
-  // Format conversion to NV12 happens in the encoder pipeline via cudaconvertscale.
-  // This matches how waylanddisplaysrc works - the producer outputs native format,
-  // the encoder pipeline handles conversion.
+  // GNOME's ScreenCast may provide a different resolution than requested (e.g., 1280x720 instead of 3840x2160).
+  // We use cudaconvertscale to:
+  // 1. Convert from BGRA to NV12 (required by the encoder)
+  // 2. Scale to the target resolution
+  // CRITICAL: The output format MUST be NV12 to match the test pattern producer format.
+  // Without explicit format=NV12, the encoder's interpipesrc gets a "segment format mismatch" error
+  // when switching from test pattern (NV12) to PipeWire (BGRA), causing the stream to hang.
+  // CRITICAL: Add queue before interpipesink to decouple producer from consumer timing.
+  // Without queue, GStreamer warns "Pipeline construction is invalid, please add queues"
+  // and the pipeline can deadlock when interpipesrc switches sources.
   auto pipeline = fmt::format(
       "pipewirezerocopysrc pipewire-node-id={node_id} render-node={render_node} output-mode={output_mode} ! "
-      "{buffer_caps}, width={width}, height={height}, framerate={fps}/1 ! "
+      "{buffer_caps} ! "
+      "cudaconvertscale ! "
+      "{buffer_caps}, format=NV12, width={width}, height={height}, framerate={fps}/1 ! "
+      "queue max-size-buffers=5 leaky=downstream ! "
       "interpipesink sync=true async=false name={session_id}_video max-buffers=5",
       fmt::arg("node_id", pipewire_node_id),
       fmt::arg("render_node", render_node),
@@ -328,18 +349,17 @@ void start_test_pattern_producer(const std::string &session_id,
   // Build GPU upload element based on buffer_caps to ensure consistent memory format
   // This prevents buffer pool corruption when interpipesrc switches between test pattern and lobby
   //
-  // CRITICAL: Output caps MUST EXACTLY MATCH waylanddisplaysrc's format:
-  //   waylanddisplaysrc ! {buffer_caps}, width={width}, height={height}, framerate={fps}/1 ! interpipesink
-  //
-  // Previous fix had explicit format=NV12 and missing framerate, causing caps negotiation
-  // differences that led to black screen on second session.
+  // CRITICAL: Output caps MUST include format=NV12 to match the PipeWire producer format.
+  // When interpipesrc switches between sources, both must have compatible caps to avoid
+  // "segment format mismatch" errors that cause the stream to hang.
+  // Previous note: format=NV12 was removed but this caused issues with PipeWire producer switching.
   std::string gpu_upload;
   if (buffer_caps.find("CUDAMemory") != std::string::npos) {
-    // NVIDIA: upload to CUDA memory, use EXACT same caps format as waylanddisplaysrc
-    gpu_upload = fmt::format("cudaupload ! "
-                             "{}, width={}, height={}, framerate={}/1",
+    // NVIDIA: upload to CUDA memory and convert to NV12 (matching PipeWire producer)
+    gpu_upload = fmt::format("cudaupload ! cudaconvertscale ! "
+                             "{}, format=NV12, width={}, height={}, framerate={}/1",
                              buffer_caps, display_mode.width, display_mode.height, display_mode.refreshRate);
-    logs::log(logs::info, "[GSTREAMER] Test pattern using CUDA memory upload (matching waylanddisplaysrc)");
+    logs::log(logs::info, "[GSTREAMER] Test pattern using CUDA memory with NV12 format (matching PipeWire producer)");
   } else if (buffer_caps.find("DMABuf") != std::string::npos) {
     // AMD/Intel: use VA-API postprocessor, output DMABuf with EXACT same caps format as waylanddisplaysrc
     gpu_upload = fmt::format("vapostproc ! "
@@ -360,7 +380,11 @@ void start_test_pattern_producer(const std::string &session_id,
                              "lobby switching may cause black screen");
   }
 
+  // CRITICAL: Add queue before interpipesink to decouple producer from consumer timing.
+  // Without queue, GStreamer warns "Pipeline construction is invalid, please add queues"
+  // and the pipeline can deadlock when interpipesrc switches sources.
   auto pipeline = fmt::format("{source} ! {gpu_upload} ! "
+                              "queue max-size-buffers=5 leaky=downstream ! "
                               "interpipesink sync=true async=false name={session_id}_video max-buffers=5",
                               fmt::arg("source", formatted_source),
                               fmt::arg("gpu_upload", gpu_upload),
@@ -531,8 +555,18 @@ void start_streaming_video(immer::box<events::VideoSession> video_session,
                            std::shared_ptr<udp::socket> video_socket) {
   auto [color_range, color_space] = get_color_params(video_session);
 
+  // Use initial_interpipe_source_id if set (for immediate lobby attachment),
+  // otherwise use session_id (default behavior)
+  auto interpipe_source_id = video_session->initial_interpipe_source_id.value_or(
+      std::to_string(video_session->session_id));
+
+  if (video_session->initial_interpipe_source_id.has_value()) {
+    logs::log(logs::info, "[GSTREAMER] Video pipeline using immediate lobby attachment: interpipe source {}",
+              interpipe_source_id);
+  }
+
   auto pipeline = fmt::format(fmt::runtime(video_session->gst_pipeline),
-                              fmt::arg("session_id", video_session->session_id),
+                              fmt::arg("session_id", interpipe_source_id),
                               fmt::arg("width", video_session->display_mode.width),
                               fmt::arg("height", video_session->display_mode.height),
                               fmt::arg("fps", video_session->display_mode.refreshRate),
@@ -584,7 +618,34 @@ void start_streaming_video(immer::box<events::VideoSession> video_session,
 
             // Set allow-renegotiation to true to handle resolution changes
             g_object_set(src, "allow-renegotiation", TRUE, nullptr);
+
+            // CRITICAL: Send flush events BEFORE changing listen-to property!
+            // Order matters: flush-start → change source → flush-stop
+            // 1. FLUSH_START puts downstream in flushing state (ignores incoming data)
+            // 2. Change listen-to property (switch to new source)
+            // 3. FLUSH_STOP with reset_time=TRUE resets segment, accepts new segment from new source
+            //
+            // Without this order, GStreamer warns "segment format mismatched, ignore" and the
+            // new source's segment is rejected, causing frames to not reach the encoder.
+            auto src_pad = gst_element_get_static_pad(src, "src");
+            if (src_pad) {
+              logs::log(logs::warning, "[HANG_DEBUG] Sending FLUSH_START before switch");
+              gst_pad_send_event(src_pad, gst_event_new_flush_start());
+            }
+
+            // Now change the source - downstream is in flushing state so segment won't be rejected
             g_object_set(src, "listen-to", interpipe_id, nullptr);
+
+            if (src_pad) {
+              logs::log(logs::warning, "[HANG_DEBUG] Sending FLUSH_STOP after switch");
+              gst_pad_send_event(src_pad, gst_event_new_flush_stop(TRUE));  // reset_time=TRUE
+              gst_object_unref(src_pad);
+            }
+
+            // Force an IDR frame after switching so the client can start decoding immediately
+            logs::log(logs::warning, "[HANG_DEBUG] Requesting IDR frame after switch");
+            gst_element_send_event(pipeline_ptr,
+              gst_video_event_new_upstream_force_key_unit(GST_CLOCK_TIME_NONE, TRUE, 0));
 
             logs::log(logs::warning, "[HANG_DEBUG] Unrefing interpipesrc element");
             gst_object_unref(src);
@@ -728,9 +789,19 @@ void start_streaming_audio(immer::box<events::AudioSession> audio_session,
                            std::shared_ptr<udp::socket> audio_socket,
                            const std::string &sink_name,
                            const std::string &server_name) {
+  // Use initial_interpipe_source_id if set (for immediate lobby attachment),
+  // otherwise use session_id (default behavior)
+  auto interpipe_source_id = audio_session->initial_interpipe_source_id.value_or(
+      std::to_string(audio_session->session_id));
+
+  if (audio_session->initial_interpipe_source_id.has_value()) {
+    logs::log(logs::info, "[GSTREAMER] Audio pipeline using immediate lobby attachment: interpipe source {}",
+              interpipe_source_id);
+  }
+
   auto pipeline = fmt::format(
       fmt::runtime(audio_session->gst_pipeline),
-      fmt::arg("session_id", audio_session->session_id),
+      fmt::arg("session_id", interpipe_source_id),
       fmt::arg("channels", audio_session->audio_mode.channels),
       fmt::arg("bitrate", audio_session->audio_mode.bitrate),
       // TODO: opusenc hardcodes those two
@@ -778,7 +849,25 @@ void start_streaming_audio(immer::box<events::AudioSession> audio_session,
           if (auto src = gst_bin_get_by_name(GST_BIN(pipeline_ptr), pipe_name.c_str())) {
             logs::log(logs::warning, "[HANG_DEBUG] Switching audio interpipesrc listen-to: {} → {}", pipe_name, interpipe_id);
 
+            // CRITICAL: Send flush events BEFORE changing listen-to property!
+            // Order matters: flush-start → change source → flush-stop
+            // 1. FLUSH_START puts downstream in flushing state (ignores incoming data)
+            // 2. Change listen-to property (switch to new source)
+            // 3. FLUSH_STOP with reset_time=TRUE resets segment, accepts new segment from new source
+            auto src_pad = gst_element_get_static_pad(src, "src");
+            if (src_pad) {
+              logs::log(logs::warning, "[HANG_DEBUG] Sending FLUSH_START before audio switch");
+              gst_pad_send_event(src_pad, gst_event_new_flush_start());
+            }
+
+            // Now change the source - downstream is in flushing state so segment won't be rejected
             g_object_set(src, "listen-to", interpipe_id, nullptr);
+
+            if (src_pad) {
+              logs::log(logs::warning, "[HANG_DEBUG] Sending FLUSH_STOP after audio switch");
+              gst_pad_send_event(src_pad, gst_event_new_flush_stop(TRUE));  // reset_time=TRUE
+              gst_object_unref(src_pad);
+            }
 
             logs::log(logs::warning, "[HANG_DEBUG] Unrefing audio interpipesrc element");
             gst_object_unref(src);

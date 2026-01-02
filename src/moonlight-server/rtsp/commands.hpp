@@ -237,6 +237,9 @@ announce(const RTSP_PACKET &req, const events::StreamSession &session) {
 
       .client_ip = session.ip,
       .rtp_secret_payload = session.rtp_secret_payload,
+
+      // For immediate lobby attachment: use lobby ID instead of session ID for interpipe
+      .initial_interpipe_source_id = session.immediate_lobby_id,
   };
   session.event_bus->fire_event(immer::box<events::VideoSession>(video));
 
@@ -257,7 +260,11 @@ announce(const RTSP_PACKET &req, const events::StreamSession &session) {
       .rtp_secret_payload = session.rtp_secret_payload,
 
       .packet_duration = args["x-nv-aqos.packetDuration"].value_or(5),
-      .audio_mode = audio_mode};
+      .audio_mode = audio_mode,
+
+      // For immediate lobby attachment: use lobby ID instead of session ID for interpipe
+      .initial_interpipe_source_id = session.immediate_lobby_id,
+  };
   session.event_bus->fire_event(immer::box<events::AudioSession>(audio));
 
   return ok_msg(req.seq_number);

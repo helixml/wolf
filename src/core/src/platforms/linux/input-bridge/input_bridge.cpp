@@ -1,9 +1,13 @@
 #include "input_bridge.hpp"
+#include <cstdio>
 #include <cstring>
 #include <fmt/format.h>
 #include <sys/socket.h>
 #include <sys/un.h>
 #include <unistd.h>
+
+// Debug counter for move_abs logging
+static int move_abs_log_count = 0;
 
 namespace wolf::core::input {
 
@@ -73,6 +77,13 @@ void InputBridge::move(float dx, float dy) {
 }
 
 void InputBridge::move_abs(float x, float y, int screen_width, int screen_height) {
+  // Debug logging: log first 5 and then every 100th
+  move_abs_log_count++;
+  if (move_abs_log_count <= 5 || move_abs_log_count % 100 == 0) {
+    fprintf(stderr, "[INPUT_BRIDGE] move_abs #%d: x=%.1f y=%.1f screen=%dx%d\n",
+            move_abs_log_count, x, y, screen_width, screen_height);
+    fflush(stderr);
+  }
   // The input bridge expects absolute coordinates in screen pixels
   send(fmt::format(R"({{"type":"mouse_move_abs","x":{},"y":{}}})", x, y));
 }
@@ -97,11 +108,15 @@ static int moonlight_button_to_evdev(int button) {
 
 void InputBridge::press(int button) {
   int evdev_button = moonlight_button_to_evdev(button);
+  fprintf(stderr, "[INPUT_BRIDGE] press: moonlight_button=%d -> evdev_button=%d\n", button, evdev_button);
+  fflush(stderr);
   send(fmt::format(R"({{"type":"button","button":{},"state":true}})", evdev_button));
 }
 
 void InputBridge::release(int button) {
   int evdev_button = moonlight_button_to_evdev(button);
+  fprintf(stderr, "[INPUT_BRIDGE] release: moonlight_button=%d -> evdev_button=%d\n", button, evdev_button);
+  fflush(stderr);
   send(fmt::format(R"({{"type":"button","button":{},"state":false}})", evdev_button));
 }
 

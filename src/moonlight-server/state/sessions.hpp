@@ -94,6 +94,22 @@ inline std::shared_ptr<events::StreamSession> create_stream_session(immer::box<s
   std::uniform_int_distribution<> ints(0, 255);
   auto rtsp_fake_ip = fmt::format("{}.{}.{}.{}", ints(generator), ints(generator), ints(generator), ints(generator));
 
+  // Check for pending session configuration (immediate lobby attachment)
+  std::optional<std::string> immediate_lobby_id;
+  if (!client_unique_id.empty() && state->pending_session_configs) {
+    auto pending_configs = state->pending_session_configs->load();
+    if (auto pending_config = pending_configs.get().find(client_unique_id)) {
+      immediate_lobby_id = pending_config->immediate_lobby_id;
+      logs::log(logs::info, "[SESSION] Found pending config for client_unique_id='{}' -> immediate_lobby_id='{}'",
+                client_unique_id, pending_config->immediate_lobby_id);
+
+      // Remove the pending config (one-time use)
+      state->pending_session_configs->update([&client_unique_id](const auto &configs) {
+        return configs.erase(client_unique_id);
+      });
+    }
+  }
+
   auto session = events::StreamSession{
       .display_mode = display_mode,
       .audio_channel_count = audio_channel_count,
@@ -118,7 +134,8 @@ inline std::shared_ptr<events::StreamSession> create_stream_session(immer::box<s
       .client_unique_id = client_unique_id,  // Moonlight uniqueid for secure session matching
       .video_stream_port = static_cast<unsigned short>(get_port(VIDEO_PING_PORT)),
       .audio_stream_port = static_cast<unsigned short>(get_port(AUDIO_PING_PORT)),
-      .control_stream_port = static_cast<unsigned short>(get_port(CONTROL_PORT))};
+      .control_stream_port = static_cast<unsigned short>(get_port(CONTROL_PORT)),
+      .immediate_lobby_id = immediate_lobby_id};  // Pre-configured lobby attachment
 
   return std::make_shared<events::StreamSession>(session);
 }

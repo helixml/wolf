@@ -522,7 +522,8 @@ TEST_CASE("Multiple users", "[HTTP]") {
       .host = {},
       .pairing_cache = std::make_shared<immer::atom<immer::map<std::string, state::PairCache>>>(),
       .event_bus = event_bus,
-      .running_sessions = std::make_shared<immer::atom<immer::vector<events::StreamSession>>>()};
+      .running_sessions = std::make_shared<immer::atom<immer::vector<events::StreamSession>>>(),
+      .pending_session_configs = std::make_shared<immer::atom<immer::map<std::string, state::PendingSessionConfig>>>()};
 
   auto client1 = state::PairedClient{.app_state_folder = "test"};
   auto app1 = events::App{.base = moonlight::App{.title = "test_app"}};

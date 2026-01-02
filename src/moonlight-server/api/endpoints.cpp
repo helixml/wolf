@@ -271,6 +271,13 @@ void UnixSocketServer::endpoint_StreamSessionAdd(const HTTPRequest &req, std::sh
     new_session->ip = ss.client_ip;
     new_session->rtsp_fake_ip = ss.rtsp_fake_ip;
 
+    // Copy immediate_lobby_id if provided - enables bypassing interpipesrc switching
+    if (ss.immediate_lobby_id.has_value()) {
+      new_session->immediate_lobby_id = ss.immediate_lobby_id;
+      logs::log(logs::info, "[API] Session {} will immediately attach to lobby {}",
+                new_session->session_id, ss.immediate_lobby_id.value());
+    }
+
     state_->app_state->running_sessions->update(
         [new_session](const immer::vector<events::StreamSession> &ses_v) { return ses_v.push_back(*new_session); });
     state_->app_state->event_bus->fire_event(immer::box<events::StreamSession>(*new_session));
@@ -1298,6 +1305,48 @@ void UnixSocketServer::endpoint_KeyboardReset(const HTTPRequest &req, std::share
     res.released_keys.push_back(wolf::control::moonlight_key_to_name(key));
   }
   res.message = "Released " + std::to_string(released_keys.size()) + " stuck keys";
+
+  send_http(socket, 200, rfl::json::write(res));
+}
+
+void UnixSocketServer::endpoint_StreamSessionConfigure(const HTTPRequest &req, std::shared_ptr<UnixSocket> socket) {
+  auto req_data = rfl::json::read<ConfigurePendingSessionRequest>(req.body);
+  if (!req_data) {
+    auto res = GenericErrorResponse{.error = "Invalid JSON: " + std::string(req_data.error().what())};
+    send_http(socket, 400, rfl::json::write(res));
+    return;
+  }
+
+  const auto &config = req_data.value();
+  std::string client_unique_id = config.client_unique_id.value();
+  std::string immediate_lobby_id = config.immediate_lobby_id.value();
+
+  if (client_unique_id.empty()) {
+    auto res = GenericErrorResponse{.error = "client_unique_id is required"};
+    send_http(socket, 400, rfl::json::write(res));
+    return;
+  }
+
+  if (immediate_lobby_id.empty()) {
+    auto res = GenericErrorResponse{.error = "immediate_lobby_id is required"};
+    send_http(socket, 400, rfl::json::write(res));
+    return;
+  }
+
+  // Store the pending configuration
+  auto pending_config = state::PendingSessionConfig(client_unique_id, immediate_lobby_id);
+
+  state_->app_state->pending_session_configs->update(
+      [&pending_config, &client_unique_id](const auto &configs) {
+        return configs.set(client_unique_id, pending_config);
+      });
+
+  logs::log(logs::info, "[API] Pre-configured session: client_unique_id='{}' -> immediate_lobby_id='{}'",
+            client_unique_id, immediate_lobby_id);
+
+  ConfigurePendingSessionResponse res;
+  res.success = true;
+  res.message = "Session pre-configured for immediate lobby attachment";
 
   send_http(socket, 200, rfl::json::write(res));
 }

@@ -153,6 +153,22 @@ struct PairCache {
 using SessionsAtoms = std::shared_ptr<immer::atom<immer::vector<events::StreamSession>>>;
 
 /**
+ * Configuration for a pending session that hasn't connected yet.
+ * Used for immediate lobby attachment - Helix pre-configures the session
+ * before the Moonlight client connects, allowing direct lobby attachment.
+ */
+struct PendingSessionConfig {
+  std::string client_unique_id;      // Moonlight client unique ID (e.g., "helix-agent-{sessionId}")
+  std::string immediate_lobby_id;    // Lobby to attach to immediately when session starts
+  std::chrono::steady_clock::time_point created_at;  // For expiration cleanup
+
+  PendingSessionConfig(std::string client_id, std::string lobby_id)
+      : client_unique_id(std::move(client_id)),
+        immediate_lobby_id(std::move(lobby_id)),
+        created_at(std::chrono::steady_clock::now()) {}
+};
+
+/**
  * The whole application state as a composition of immutable datastructures
  */
 struct AppState {
@@ -194,6 +210,15 @@ struct AppState {
    * A list of all currently running (and paused) streaming sessions
    */
   SessionsAtoms running_sessions;
+
+  /**
+   * Pending session configurations for immediate lobby attachment.
+   * Key: client_unique_id, Value: PendingSessionConfig
+   * When a Moonlight session connects, Wolf checks this map and applies
+   * the immediate_lobby_id if a matching config exists.
+   * Configs are one-time use and expire after 60 seconds.
+   */
+  std::shared_ptr<immer::atom<immer::map<std::string, PendingSessionConfig>>> pending_session_configs;
 };
 
 const static immer::array<audio::AudioMode> AUDIO_CONFIGURATIONS = {
