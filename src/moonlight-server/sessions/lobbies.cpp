@@ -37,23 +37,14 @@ void leave_lobby(const std::shared_ptr<events::EventBusType> &ev_bus,
   bool use_pipewire_mode = lobby.video_settings.video_source_mode == "pipewire";
 
   if (use_pipewire_mode) {
-    // PipeWire mode: Create new inputtino devices for the session's test pattern
-    logs::log(logs::debug, "[LOBBY] Creating inputtino devices for session {} leaving PipeWire lobby", session.session_id);
-
-    auto mouse = input::Mouse::create();
-    if (mouse) {
-      session.mouse->emplace(input::Mouse(std::move(*mouse)));
-    }
-
-    auto keyboard = input::Keyboard::create();
-    if (keyboard) {
-      session.keyboard->emplace(input::Keyboard(std::move(*keyboard)));
-    }
-
-    auto touch = input::TouchScreen::create();
-    if (touch) {
-      session.touch_screen->emplace(input::TouchScreen(std::move(*touch)));
-    }
+    // PipeWire mode: Clear input devices when leaving lobby
+    // NEVER create inputtino devices - they would leak to host's /dev/uinput!
+    // Input is handled via D-Bus InputBridge which is lobby-specific, so
+    // when the session leaves the lobby, there's no input until they rejoin.
+    logs::log(logs::debug, "[LOBBY] Clearing input devices for session {} leaving PipeWire lobby (no inputtino fallback)", session.session_id);
+    session.mouse->reset();
+    session.keyboard->reset();
+    session.touch_screen->reset();
   } else {
     // Wayland mode: Switch back to session's Wayland compositor
     auto wl_state = session.wayland_display->load();
@@ -346,8 +337,10 @@ setup_lobbies_handlers(const immer::box<state::AppState> &app_state,
         bool use_pipewire_mode = lobby->video_settings.video_source_mode == "pipewire";
 
         if (use_pipewire_mode) {
-          // PipeWire mode: Check if InputBridge is connected (RemoteDesktop D-Bus input)
-          // or fall back to inputtino devices (kernel evdev)
+          // PipeWire mode: Use InputBridge for RemoteDesktop D-Bus input
+          // NEVER create inputtino devices - they would leak to host's /dev/uinput!
+          // If InputBridge isn't connected yet, input will be unavailable until it connects.
+          // The InputBridge connection handler (below) will set up input devices when ready.
           if (lobby->input_bridge->is_connected()) {
             // Use InputBridge for RemoteDesktop D-Bus input
             logs::log(logs::debug, "[LOBBY] Using InputBridge for PipeWire mode lobby {}", lobby->id);
@@ -359,46 +352,11 @@ setup_lobbies_handlers(const immer::box<state::AppState> &app_state,
             int height = lobby->video_settings.height;
             session->touch_screen->emplace(input::InputBridgeTouchScreen(lobby->input_bridge, width, height));
           } else {
-            // InputBridge not connected yet - use inputtino devices as fallback
-            // These are passed to the container via fake-udev
-            logs::log(logs::debug, "[LOBBY] Creating inputtino devices for PipeWire mode lobby {} (InputBridge not connected yet)", lobby->id);
-
-            auto mouse = input::Mouse::create();
-            if (!mouse) {
-              logs::log(logs::error, "[LOBBY] Failed to create mouse: {}", mouse.getErrorMessage());
-            } else {
-              auto mouse_ptr = input::Mouse(std::move(*mouse));
-              // Plug device into the lobby's container
-              lobby->plugged_devices_queue->push(immer::box<events::PlugDeviceEvent>(
-                  events::PlugDeviceEvent{.session_id = lobby->id,
-                                          .udev_events = mouse_ptr.get_udev_events(),
-                                          .udev_hw_db_entries = mouse_ptr.get_udev_hw_db_entries()}));
-              session->mouse->emplace(std::move(mouse_ptr));
-            }
-
-            auto keyboard = input::Keyboard::create();
-            if (!keyboard) {
-              logs::log(logs::error, "[LOBBY] Failed to create keyboard: {}", keyboard.getErrorMessage());
-            } else {
-              auto keyboard_ptr = input::Keyboard(std::move(*keyboard));
-              lobby->plugged_devices_queue->push(immer::box<events::PlugDeviceEvent>(
-                  events::PlugDeviceEvent{.session_id = lobby->id,
-                                          .udev_events = keyboard_ptr.get_udev_events(),
-                                          .udev_hw_db_entries = keyboard_ptr.get_udev_hw_db_entries()}));
-              session->keyboard->emplace(std::move(keyboard_ptr));
-            }
-
-            auto touch = input::TouchScreen::create();
-            if (!touch) {
-              logs::log(logs::error, "[LOBBY] Failed to create touch screen: {}", touch.getErrorMessage());
-            } else {
-              auto touch_ptr = input::TouchScreen(std::move(*touch));
-              lobby->plugged_devices_queue->push(immer::box<events::PlugDeviceEvent>(
-                  events::PlugDeviceEvent{.session_id = lobby->id,
-                                          .udev_events = touch_ptr.get_udev_events(),
-                                          .udev_hw_db_entries = touch_ptr.get_udev_hw_db_entries()}));
-              session->touch_screen->emplace(std::move(touch_ptr));
-            }
+            // InputBridge not connected yet - wait for it (no fallback to inputtino!)
+            // Input will be unavailable for a few seconds until the container's
+            // remotedesktop-session.py connects to Wolf's input socket.
+            // The InputBridge connection handler will switch to D-Bus input when ready.
+            logs::log(logs::info, "[LOBBY] PipeWire mode: waiting for InputBridge connection (no inputtino fallback)");
           }
         } else {
           // Wayland mode: Use the lobby's Wayland compositor for input

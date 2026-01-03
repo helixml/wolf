@@ -111,32 +111,13 @@ setup_moonlight_handlers(const immer::box<state::AppState> &app_state,
         if (use_immediate_lobby) {
           // Immediate lobby attachment: SKIP creating video/audio producers entirely.
           // The streaming pipelines will attach directly to the lobby's interpipe source.
-          // We only need to create virtual devices for input routing.
-          logs::log(logs::info, "[STREAM_SESSION] Creating input devices only (no video/audio producers)");
-
-          auto mouse = input::Mouse::create();
-          if (!mouse) {
-            logs::log(logs::error, "Failed to create mouse: {}", mouse.getErrorMessage());
-          } else {
-            auto mouse_ptr = input::Mouse(std::move(*mouse));
-            devices_q->push(immer::box<events::PlugDeviceEvent>(
-                events::PlugDeviceEvent{.session_id = std::to_string(session->session_id),
-                                        .udev_events = mouse_ptr.get_udev_events(),
-                                        .udev_hw_db_entries = mouse_ptr.get_udev_hw_db_entries()}));
-            session->mouse->emplace(std::move(mouse_ptr));
-          }
-
-          auto keyboard = input::Keyboard::create();
-          if (!keyboard) {
-            logs::log(logs::error, "Failed to create keyboard: {}", keyboard.getErrorMessage());
-          } else {
-            auto keyboard_ptr = input::Keyboard(std::move(*keyboard));
-            devices_q->push(immer::box<events::PlugDeviceEvent>(
-                events::PlugDeviceEvent{.session_id = std::to_string(session->session_id),
-                                        .udev_events = keyboard_ptr.get_udev_events(),
-                                        .udev_hw_db_entries = keyboard_ptr.get_udev_hw_db_entries()}));
-            session->keyboard->emplace(std::move(keyboard_ptr));
-          }
+          // CRITICAL: Do NOT create inputtino devices here!
+          // - Input devices are set up by lobbies.cpp when session joins lobby
+          // - Lobbies.cpp calls emplace() which replaces any devices we create here
+          // - Creating inputtino here causes them to leak to host /dev/uinput before replacement
+          // - For PipeWire mode, InputBridge handles input via D-Bus (no kernel devices)
+          // - For Wayland mode, WaylandMouse/Keyboard are used (nested compositor)
+          logs::log(logs::info, "[STREAM_SESSION] Immediate lobby attachment - skipping input device creation (lobby join will set them up)");
 
           // For immediate lobby attachment, we DON'T set on_ready promise because:
           // 1. We don't have a wayland_plugin (using lobby's interpipe instead)
@@ -145,6 +126,32 @@ setup_moonlight_handlers(const immer::box<state::AppState> &app_state,
           // The streaming pipelines will attach directly to the lobby's interpipe source.
           logs::log(logs::info, "[STREAM_SESSION] Immediate lobby setup complete (session {} attached to lobby {})",
                     session->session_id, session->immediate_lobby_id.value());
+
+          // CRITICAL: Fire JoinLobbyEvent to set up InputBridge devices for PipeWire mode input
+          // Without this, immediate lobby sessions have no input devices because they bypass
+          // the normal lobby join flow. The JoinLobbyEvent handler in lobbies.cpp sets up
+          // InputBridge mouse/keyboard/touchscreen for PipeWire mode.
+          logs::log(logs::info, "[STREAM_SESSION] Firing JoinLobbyEvent for immediate lobby session {} -> lobby {}",
+                    session->session_id, session->immediate_lobby_id.value());
+
+          // Fire JoinLobbyEvent asynchronously to avoid blocking on the error_message promise
+          std::thread([ev_bus = app_state->event_bus, session]() {
+            auto join_event = immer::box<events::JoinLobbyEvent>(
+                events::JoinLobbyEvent{.lobby_id = session->immediate_lobby_id.value(),
+                                       .moonlight_session_id = session->session_id,
+                                       .pin = std::nullopt}); // No PIN needed for pre-configured sessions
+            ev_bus->fire_event(join_event);
+
+            // Wait for result (success = empty string, failure = error message)
+            auto error_msg = join_event->error_message.get()->get_future().get();
+            if (error_msg.empty()) {
+              logs::log(logs::info, "[STREAM_SESSION] JoinLobbyEvent succeeded for immediate lobby session {}",
+                        session->session_id);
+            } else {
+              logs::log(logs::error, "[STREAM_SESSION] JoinLobbyEvent failed for immediate lobby session {}: {}",
+                        session->session_id, error_msg);
+            }
+          }).detach();
         } else if (use_pipewire_source) {
           // PipeWire mode: GNOME 49+ uses ScreenCast via PipeWire instead of nested Wayland
           logs::log(logs::info, "[STREAM_SESSION] Using PipeWire video source (GNOME 49+ mode), node_id={}",
@@ -171,30 +178,12 @@ setup_moonlight_handlers(const immer::box<state::AppState> &app_state,
             }
           }).detach();
 
-          // Still need virtual devices for input
-          auto mouse = input::Mouse::create();
-          if (!mouse) {
-            logs::log(logs::error, "Failed to create mouse: {}", mouse.getErrorMessage());
-          } else {
-            auto mouse_ptr = input::Mouse(std::move(*mouse));
-            devices_q->push(immer::box<events::PlugDeviceEvent>(
-                events::PlugDeviceEvent{.session_id = std::to_string(session->session_id),
-                                        .udev_events = mouse_ptr.get_udev_events(),
-                                        .udev_hw_db_entries = mouse_ptr.get_udev_hw_db_entries()}));
-            session->mouse->emplace(std::move(mouse_ptr));
-          }
-
-          auto keyboard = input::Keyboard::create();
-          if (!keyboard) {
-            logs::log(logs::error, "Failed to create keyboard: {}", keyboard.getErrorMessage());
-          } else {
-            auto keyboard_ptr = input::Keyboard(std::move(*keyboard));
-            devices_q->push(immer::box<events::PlugDeviceEvent>(
-                events::PlugDeviceEvent{.session_id = std::to_string(session->session_id),
-                                        .udev_events = keyboard_ptr.get_udev_events(),
-                                        .udev_hw_db_entries = keyboard_ptr.get_udev_hw_db_entries()}));
-            session->keyboard->emplace(std::move(keyboard_ptr));
-          }
+          // CRITICAL: Do NOT create inputtino devices for PipeWire mode!
+          // - PipeWire mode uses InputBridge for D-Bus RemoteDesktop input
+          // - Creating inputtino devices here would leak to host /dev/uinput
+          // - Input devices will be set up by lobbies.cpp when session joins a lobby
+          // - If session doesn't join a lobby, input is unavailable (expected for PipeWire)
+          logs::log(logs::info, "[STREAM_SESSION] PipeWire mode - skipping inputtino creation (input via InputBridge)");
         } else if (session->app->start_virtual_compositor) {
           // Wayland mode: Use nested Wayland compositor (for Sway/KDE)
           logs::log(logs::debug, "[STREAM_SESSION] Create wayland compositor");
