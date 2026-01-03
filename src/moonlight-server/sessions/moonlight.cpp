@@ -176,6 +176,15 @@ setup_moonlight_handlers(const immer::box<state::AppState> &app_state,
             } catch (...) {
               logs::log(logs::error, "[STREAM_SESSION] PipeWire video producer thread unknown exception");
             }
+
+            // CRITICAL: When the video producer exits (for ANY reason - error, EOS, or user action),
+            // fire StopStreamEvent to clean up the session's streaming pipelines.
+            // Otherwise, the streaming consumer pipelines (interpipesrc → nvh264enc) will wait forever
+            // for data that will never come, causing watchdog to trigger and crash Wolf for everyone.
+            logs::log(logs::warning, "[STREAM_SESSION] PipeWire video producer exited for session {}, stopping stream",
+                      session->session_id);
+            session->event_bus->fire_event(immer::box<events::StopStreamEvent>(
+                events::StopStreamEvent{.session_id = session->session_id}));
           }).detach();
 
           // CRITICAL: Do NOT create inputtino devices for PipeWire mode!

@@ -560,6 +560,14 @@ setup_lobbies_handlers(const immer::box<state::AppState> &app_state,
           } catch (...) {
             logs::log(logs::error, "[LOBBY] PipeWire video producer thread unknown exception");
           }
+
+          // CRITICAL: When the video producer exits (for ANY reason - error, EOS, or user action),
+          // fire StopLobbyEvent to clean up all connected sessions.
+          // Otherwise, the streaming consumer pipelines (interpipesrc → nvh264enc) will wait forever
+          // for data that will never come, causing watchdog to trigger and crash Wolf for everyone.
+          logs::log(logs::warning, "[LOBBY] PipeWire video producer exited for lobby {}, stopping lobby", lobby_id);
+          ev_bus->fire_event<immer::box<events::StopLobbyEvent>>(
+              immer::box<events::StopLobbyEvent>{events::StopLobbyEvent{.lobby_id = lobby_id}});
         }).detach();
       }));
 
