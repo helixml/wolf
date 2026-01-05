@@ -388,6 +388,26 @@ setup_lobbies_handlers(const immer::box<state::AppState> &app_state,
         }
         // TODO: hotplug pen_tablet
 
+        // PipeWire mode: Restart video producer if needed
+        // The producer may have exited due to no consumers. When a new consumer joins,
+        // we need to restart it so they can receive video frames.
+        if (use_pipewire_mode) {
+          auto node_id_box = lobby->pipewire_node_id->load();
+          auto node_id_opt = *node_id_box;  // Dereference immer::box to get std::optional
+          bool producer_running = lobby->video_producer_running->load();
+
+          if (node_id_opt.has_value() && !producer_running) {
+            logs::log(logs::info, "[LOBBY] Video producer not running, restarting for session {} joining lobby {}",
+                      session->session_id, lobby->id);
+            // Fire the SetPipeWireNodeIdEvent to restart the producer
+            app_state->event_bus->fire_event(immer::box<events::SetPipeWireNodeIdEvent>{
+                events::SetPipeWireNodeIdEvent{.lobby_id = lobby->id, .node_id = node_id_opt.value()}});
+          } else if (producer_running) {
+            logs::log(logs::debug, "[LOBBY] Video producer already running for session {} joining lobby {}",
+                      session->session_id, lobby->id);
+          }
+        }
+
         // Switch audio/video gstreamer stream producers
         // Skip if session was already attached via immediate_lobby_id - pipelines already listening to lobby's interpipe
         if (session->immediate_lobby_id.has_value() && session->immediate_lobby_id.value() == lobby->id) {
@@ -532,13 +552,24 @@ setup_lobbies_handlers(const immer::box<state::AppState> &app_state,
         logs::log(logs::info, "[LOBBY] PipeWire node ID {} received for lobby {}, starting pipewiresrc video producer",
                   node_id_event->node_id, lobby->id);
 
+        // Check if producer is already running to avoid duplicate starts
+        if (lobby->video_producer_running->load()) {
+          logs::log(logs::info, "[LOBBY] Video producer already running for lobby {}, skipping restart",
+                    lobby->id);
+          return;
+        }
+
+        // Mark producer as starting
+        lobby->video_producer_running->store(true);
+
         // Start the pipewiresrc video producer
         auto ev_bus = app_state->event_bus;
         auto gst_context = app_state->gst_context;
         auto video_settings = lobby->video_settings;
+        auto video_producer_running = lobby->video_producer_running;
 
         std::thread([lobby_id = lobby->id, node_id = node_id_event->node_id, video_settings, ev_bus, gst_context,
-                     pipewire_socket_path = lobby->runner_state_folder_path]() {
+                     pipewire_socket_path = lobby->runner_state_folder_path, video_producer_running]() {
           try {
             // Create a promise that we won't use (pipewiresrc doesn't need wayland display setup)
             std::shared_ptr<boost::promise<streaming::WaylandDisplayReady>> on_ready =
@@ -561,13 +592,17 @@ setup_lobbies_handlers(const immer::box<state::AppState> &app_state,
             logs::log(logs::error, "[LOBBY] PipeWire video producer thread unknown exception");
           }
 
-          // CRITICAL: When the video producer exits (for ANY reason - error, EOS, or user action),
-          // fire StopLobbyEvent to clean up all connected sessions.
-          // Otherwise, the streaming consumer pipelines (interpipesrc → nvh264enc) will wait forever
-          // for data that will never come, causing watchdog to trigger and crash Wolf for everyone.
-          logs::log(logs::warning, "[LOBBY] PipeWire video producer exited for lobby {}, stopping lobby", lobby_id);
-          ev_bus->fire_event<immer::box<events::StopLobbyEvent>>(
-              immer::box<events::StopLobbyEvent>{events::StopLobbyEvent{.lobby_id = lobby_id}});
+          // Mark producer as stopped so it can be restarted when new consumers connect
+          video_producer_running->store(false);
+
+          // NOTE: Do NOT stop the lobby when the video producer exits.
+          // For Helix sandboxes, the desktop should keep running even if streaming stops.
+          // The producer may exit due to:
+          // - No consumers connected (30-second timeout in pipewirezerocopysrc)
+          // - Actual streaming error
+          // Either way, the desktop session should remain active. Streaming can be restarted
+          // by reconnecting a client via JoinLobbyEvent (which will trigger producer restart).
+          logs::log(logs::warning, "[LOBBY] PipeWire video producer exited for lobby {} (streaming stopped, desktop still running)", lobby_id);
         }).detach();
       }));
 

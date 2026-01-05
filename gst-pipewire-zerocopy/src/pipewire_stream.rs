@@ -69,7 +69,10 @@ impl PipeWireStream {
         if let Some(err) = self.error.lock().take() {
             return Err(err);
         }
-        self.frame_rx.recv_timeout(Duration::from_secs(5))
+        // 30s timeout: GNOME ScreenCast only sends frames when there's damage (screen changes).
+        // A static desktop can have long gaps between frames, so we need a generous timeout.
+        // See: design/2026-01-05-screenshot-video-pipeline-interference.md
+        self.frame_rx.recv_timeout(Duration::from_secs(30))
             .map_err(|e| format!("Failed to receive frame: {}", e))
     }
 
