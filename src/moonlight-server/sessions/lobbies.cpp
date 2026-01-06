@@ -1,10 +1,12 @@
 #include <api/lobby_socket_server.hpp>
+#include <chrono>
 #include <immer/vector_transient.hpp>
 #include <sessions/handlers.hpp>
 #include <state/config.hpp>
 #include <state/data-structures.hpp>
 #include <state/sessions.hpp>
 #include <streaming/streaming.hpp>
+#include <thread>
 
 namespace wolf::core::sessions {
 
@@ -388,23 +390,22 @@ setup_lobbies_handlers(const immer::box<state::AppState> &app_state,
         }
         // TODO: hotplug pen_tablet
 
-        // PipeWire mode: Restart video producer if needed
-        // The producer may have exited due to no consumers. When a new consumer joins,
-        // we need to restart it so they can receive video frames.
+        // PipeWire mode: Always request video producer restart when a consumer joins.
+        // The producer may have exited due to no consumers (30s timeout), and the
+        // video_producer_running flag may still be true during the race window while
+        // the producer thread is exiting. By always firing the event, we let the
+        // SetPipeWireNodeIdEvent handler decide via atomic compare-exchange whether
+        // to actually start a new producer.
         if (use_pipewire_mode) {
           auto node_id_box = lobby->pipewire_node_id->load();
           auto node_id_opt = *node_id_box;  // Dereference immer::box to get std::optional
-          bool producer_running = lobby->video_producer_running->load();
 
-          if (node_id_opt.has_value() && !producer_running) {
-            logs::log(logs::info, "[LOBBY] Video producer not running, restarting for session {} joining lobby {}",
+          if (node_id_opt.has_value()) {
+            logs::log(logs::info, "[LOBBY] Requesting video producer for session {} joining lobby {}",
                       session->session_id, lobby->id);
-            // Fire the SetPipeWireNodeIdEvent to restart the producer
+            // Fire the SetPipeWireNodeIdEvent - handler will atomically check if restart is needed
             app_state->event_bus->fire_event(immer::box<events::SetPipeWireNodeIdEvent>{
                 events::SetPipeWireNodeIdEvent{.lobby_id = lobby->id, .node_id = node_id_opt.value()}});
-          } else if (producer_running) {
-            logs::log(logs::debug, "[LOBBY] Video producer already running for session {} joining lobby {}",
-                      session->session_id, lobby->id);
           }
         }
 
@@ -552,15 +553,34 @@ setup_lobbies_handlers(const immer::box<state::AppState> &app_state,
         logs::log(logs::info, "[LOBBY] PipeWire node ID {} received for lobby {}, starting pipewiresrc video producer",
                   node_id_event->node_id, lobby->id);
 
-        // Check if producer is already running to avoid duplicate starts
-        if (lobby->video_producer_running->load()) {
-          logs::log(logs::info, "[LOBBY] Video producer already running for lobby {}, skipping restart",
-                    lobby->id);
-          return;
-        }
+        // Atomically try to start the producer - prevents race condition where
+        // producer is exiting but flag is still true. Uses update() with atomic
+        // compare-exchange semantics: only starts if currently not running.
+        bool was_already_running = false;
+        lobby->video_producer_running->update([&was_already_running](bool current) {
+          was_already_running = current;
+          return true;  // Always set to true (claim ownership)
+        });
 
-        // Mark producer as starting
-        lobby->video_producer_running->store(true);
+        if (was_already_running) {
+          // Another producer is/was running. Wait briefly in case it's exiting,
+          // then re-check. This handles the race where producer is dying but
+          // hasn't set the flag to false yet.
+          std::this_thread::sleep_for(std::chrono::milliseconds(100));
+
+          bool still_running = lobby->video_producer_running->load();
+          if (still_running) {
+            logs::log(logs::info, "[LOBBY] Video producer already running for lobby {}, skipping restart",
+                      lobby->id);
+            return;
+          }
+
+          // Producer exited during our wait - proceed with restart
+          logs::log(logs::info, "[LOBBY] Video producer exited during check, proceeding with restart for lobby {}",
+                    lobby->id);
+          // Re-claim ownership
+          lobby->video_producer_running->store(true);
+        }
 
         // Start the pipewiresrc video producer
         auto ev_bus = app_state->event_bus;

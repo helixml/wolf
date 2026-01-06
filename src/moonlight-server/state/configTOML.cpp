@@ -140,11 +140,11 @@ PipelineDefaults compute_pipeline_defaults(const std::string &config_source) {
   // Apply same migrations as load_or_default (wolf-ui uses interpipesrc name formatting)
   if (default_gst_video_settings.default_source.find("name=interpipesrc") == std::string::npos) {
     default_gst_video_settings.default_source =
-        default_gst_video_settings.default_source.replace(0, 12, "interpipesrc name=interpipesrc_{}_video");
+        default_gst_video_settings.default_source.replace(0, 12, "interpipesrc name=interpipesrc_{consumer_id}_video");
   }
   if (default_gst_audio_settings.default_source.find("name=interpipesrc") == std::string::npos) {
     default_gst_audio_settings.default_source =
-        default_gst_audio_settings.default_source.replace(0, 12, "interpipesrc name=interpipesrc_{}_audio");
+        default_gst_audio_settings.default_source.replace(0, 12, "interpipesrc name=interpipesrc_{consumer_id}_audio");
   }
 
   // Determine zero-copy mode
@@ -450,12 +450,12 @@ Config load_or_default(const std::string &source,
   if (default_gst_video_settings.default_source.find("name=interpipesrc") == std::string::npos) {
     logs::log(logs::debug, "Found interpipesrc without name, adding it");
     default_gst_video_settings.default_source =
-        default_gst_video_settings.default_source.replace(0, 12, "interpipesrc name=interpipesrc_{}_video");
+        default_gst_video_settings.default_source.replace(0, 12, "interpipesrc name=interpipesrc_{consumer_id}_video");
   }
   if (default_gst_audio_settings.default_source.find("name=interpipesrc") == std::string::npos) {
     logs::log(logs::debug, "Found interpipesrc without name, adding it");
     default_gst_audio_settings.default_source =
-        default_gst_audio_settings.default_source.replace(0, 12, "interpipesrc name=interpipesrc_{}_audio");
+        default_gst_audio_settings.default_source.replace(0, 12, "interpipesrc name=interpipesrc_{consumer_id}_audio");
   }
 
   auto default_gst_encoder_settings = default_gst_video_settings.defaults;

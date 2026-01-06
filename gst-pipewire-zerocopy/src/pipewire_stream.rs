@@ -5,7 +5,8 @@ use pipewire::{context::Context, main_loop::MainLoop, properties::properties, st
 use smithay::backend::allocator::{Fourcc, Modifier};
 use smithay::backend::allocator::dmabuf::{Dmabuf, DmabufFlags};
 use std::os::fd::BorrowedFd;
-use std::sync::{atomic::{AtomicBool, Ordering}, mpsc, Arc};
+use std::sync::{atomic::{AtomicBool, Ordering}, mpsc};
+use std::sync::Arc;
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
@@ -15,6 +16,27 @@ pub enum FrameData {
     DmaBuf(Dmabuf),
     /// SHM fallback
     Shm { data: Vec<u8>, width: u32, height: u32, stride: u32, format: u32 },
+}
+
+/// Error type for frame receive operations
+#[derive(Debug, Clone)]
+pub enum RecvError {
+    /// Timeout waiting for frame (normal for damage-based GNOME ScreenCast)
+    Timeout,
+    /// Channel disconnected
+    Disconnected,
+    /// Other error with message
+    Error(String),
+}
+
+impl std::fmt::Display for RecvError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            RecvError::Timeout => write!(f, "timeout waiting for frame"),
+            RecvError::Disconnected => write!(f, "channel disconnected"),
+            RecvError::Error(msg) => write!(f, "{}", msg),
+        }
+    }
 }
 
 /// Video parameters from PipeWire format negotiation
@@ -65,15 +87,29 @@ impl PipeWireStream {
         Ok(PipeWireStream { thread: Some(thread), frame_rx, shutdown, video_info, error })
     }
 
-    pub fn recv_frame(&self) -> Result<FrameData, String> {
+    /// Receive a frame with the default timeout (30 seconds).
+    /// For GNOME ScreenCast damage-based delivery, use `recv_frame_timeout` with keepalive.
+    pub fn recv_frame(&self) -> Result<FrameData, RecvError> {
+        self.recv_frame_timeout(Duration::from_secs(30))
+    }
+
+    /// Receive a frame with a configurable timeout.
+    ///
+    /// Returns `RecvError::Timeout` if no frame arrives within the timeout.
+    /// This is normal for GNOME 49+ damage-based ScreenCast - static desktops
+    /// produce no frames. Callers should implement keepalive by resending the
+    /// last buffer when timeout occurs.
+    ///
+    /// See: design/2026-01-06-pipewire-keepalive-mechanism.md
+    pub fn recv_frame_timeout(&self, timeout: Duration) -> Result<FrameData, RecvError> {
         if let Some(err) = self.error.lock().take() {
-            return Err(err);
+            return Err(RecvError::Error(err));
         }
-        // 30s timeout: GNOME ScreenCast only sends frames when there's damage (screen changes).
-        // A static desktop can have long gaps between frames, so we need a generous timeout.
-        // See: design/2026-01-05-screenshot-video-pipeline-interference.md
-        self.frame_rx.recv_timeout(Duration::from_secs(30))
-            .map_err(|e| format!("Failed to receive frame: {}", e))
+        self.frame_rx.recv_timeout(timeout)
+            .map_err(|e| match e {
+                mpsc::RecvTimeoutError::Timeout => RecvError::Timeout,
+                mpsc::RecvTimeoutError::Disconnected => RecvError::Disconnected,
+            })
     }
 
     #[allow(dead_code)]
@@ -222,12 +258,37 @@ fn run_pipewire_loop(
             params.modifier = modifier;
         })
         .process(move |stream, _| {
+            // Use a static counter for frame stats logging
+            use std::sync::atomic::{AtomicU64, AtomicBool, Ordering};
+            static FRAME_COUNT: AtomicU64 = AtomicU64::new(0);
+            static LAST_LOG: AtomicU64 = AtomicU64::new(0);
+            static LOGGED_START: AtomicBool = AtomicBool::new(false);
+
             if let Some(mut buffer) = stream.dequeue_buffer() {
                 let datas = buffer.datas_mut();
                 if datas.is_empty() { return; }
 
                 let params = video_info.lock().clone();
                 if let Some(frame) = extract_frame(datas, &params) {
+                    let count = FRAME_COUNT.fetch_add(1, Ordering::Relaxed) + 1;
+
+                    // Log first frame
+                    if !LOGGED_START.swap(true, Ordering::Relaxed) {
+                        tracing::warn!("[PIPEWIRE_FRAME] First frame received from PipeWire ({}x{})",
+                            params.width, params.height);
+                    }
+
+                    // Log every 100th frame or every 5 seconds
+                    let now = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map(|d| d.as_secs())
+                        .unwrap_or(0);
+                    let last = LAST_LOG.load(Ordering::Relaxed);
+                    if count % 100 == 0 || (now > last + 5) {
+                        LAST_LOG.store(now, Ordering::Relaxed);
+                        tracing::warn!("[PIPEWIRE_FRAME] Frame #{} received from PipeWire", count);
+                    }
+
                     let _ = frame_tx_process.lock().try_send(frame);
                 }
             }

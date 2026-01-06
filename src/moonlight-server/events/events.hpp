@@ -213,6 +213,14 @@ struct Lobby {
       std::make_shared<immer::atom<std::optional<unsigned int>>>(std::nullopt);
 
   /**
+   * Tracks whether the PipeWire video producer is currently running.
+   * When the producer exits (e.g., due to no consumers), this is set to false.
+   * When a new consumer joins, Wolf will restart the producer if needed.
+   */
+  std::shared_ptr<immer::atom<bool>> video_producer_running =
+      std::make_shared<immer::atom<bool>>(false);
+
+  /**
    * Input bridge for RemoteDesktop input mode.
    * Provides input injection via the container's RemoteDesktop D-Bus API.
    * Only used when video_settings.video_source_mode == "pipewire".

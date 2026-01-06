@@ -6,7 +6,7 @@
 //! - We respond to context queries from downstream elements
 //! - Fallback: if no context pushed, acquire via new_from_gstreamer()
 
-use crate::pipewire_stream::{FrameData, PipeWireStream};
+use crate::pipewire_stream::{FrameData, PipeWireStream, RecvError};
 use gst::glib;
 use gst::prelude::*;
 use gst::subclass::prelude::*;
@@ -22,6 +22,7 @@ use smithay::backend::egl::{EGLDevice, EGLDisplay};
 use smithay::backend::egl::ffi::egl::types::EGLDisplay as RawEGLDisplay;
 use std::sync::atomic::AtomicPtr;
 use std::sync::Arc;
+use std::time::Duration;
 
 // Reuse battle-tested CUDA code from waylanddisplaycore
 use waylanddisplaycore::utils::allocator::cuda::{
@@ -104,6 +105,13 @@ pub struct Settings {
     render_node: Option<String>,
     output_mode: OutputMode,
     cuda_device_id: i32,
+    /// Keepalive time in milliseconds. When no frame arrives from PipeWire within
+    /// this time, the last buffer is resent with updated timestamps. This handles
+    /// GNOME 49+ damage-based ScreenCast which only sends frames when screen changes.
+    /// 0 = disabled (wait forever), recommended: 100 (10 FPS minimum during static screens)
+    keepalive_time_ms: u32,
+    /// Whether to resend the last buffer on EOS
+    resend_last: bool,
     /// CUDA context received from Wolf via set_context() or acquired via GStreamer
     cuda_context: Option<Arc<std::sync::Mutex<CUDAContext>>>,
     /// Raw pointer for GStreamer CUDA context interop - used by Wolf's context sharing
@@ -117,6 +125,9 @@ impl Default for Settings {
             render_node: Some("/dev/dri/renderD128".into()),
             output_mode: OutputMode::Auto,
             cuda_device_id: -1,
+            // Default: 100ms keepalive for GNOME damage-based ScreenCast (10 FPS minimum)
+            keepalive_time_ms: 100,
+            resend_last: false,
             cuda_context: None,
             cuda_raw_ptr: AtomicPtr::new(std::ptr::null_mut()),
         }
@@ -130,11 +141,22 @@ pub struct State {
     buffer_pool: Option<CUDABufferPool>,
     actual_output_mode: OutputMode,
     frame_count: u64,
+    /// Last buffer for keepalive - resent when PipeWire doesn't deliver frames
+    /// (normal for GNOME 49+ damage-based ScreenCast with static screens)
+    last_buffer: Option<gst::Buffer>,
 }
 
 impl Default for State {
     fn default() -> Self {
-        Self { stream: None, video_info: None, egl_display: None, buffer_pool: None, actual_output_mode: OutputMode::System, frame_count: 0 }
+        Self {
+            stream: None,
+            video_info: None,
+            egl_display: None,
+            buffer_pool: None,
+            actual_output_mode: OutputMode::System,
+            frame_count: 0,
+            last_buffer: None,
+        }
     }
 }
 
@@ -163,6 +185,21 @@ impl ObjectImpl for PipeWireZeroCopySrc {
             glib::ParamSpecString::builder("render-node").nick("DRM Render Node").blurb("DRM render node").default_value(Some("/dev/dri/renderD128")).construct().build(),
             glib::ParamSpecString::builder("output-mode").nick("Output Mode").blurb("auto, cuda, dmabuf, or system").default_value(Some("auto")).construct().build(),
             glib::ParamSpecInt::builder("cuda-device-id").nick("CUDA Device ID").blurb("CUDA device ID (-1 for auto)").minimum(-1).maximum(16).default_value(-1).construct().build(),
+            // Keepalive properties for GNOME 49+ damage-based ScreenCast
+            glib::ParamSpecUInt::builder("keepalive-time")
+                .nick("Keepalive Time")
+                .blurb("Periodically resend last buffer (in milliseconds, 0=disabled). Handles GNOME damage-based ScreenCast where frames only arrive when screen changes.")
+                .minimum(0)
+                .maximum(60000)
+                .default_value(100)  // 10 FPS minimum during static screens
+                .construct()
+                .build(),
+            glib::ParamSpecBoolean::builder("resend-last")
+                .nick("Resend Last")
+                .blurb("Resend last buffer on EOS")
+                .default_value(false)
+                .construct()
+                .build(),
         ]);
         PROPERTIES.as_ref()
     }
@@ -174,6 +211,8 @@ impl ObjectImpl for PipeWireZeroCopySrc {
             "render-node" => s.render_node = value.get().unwrap(),
             "output-mode" => s.output_mode = value.get::<Option<String>>().unwrap().as_deref().map(OutputMode::from_str).unwrap_or_default(),
             "cuda-device-id" => s.cuda_device_id = value.get().unwrap(),
+            "keepalive-time" => s.keepalive_time_ms = value.get().unwrap(),
+            "resend-last" => s.resend_last = value.get().unwrap(),
             _ => {}
         }
     }
@@ -185,6 +224,8 @@ impl ObjectImpl for PipeWireZeroCopySrc {
             "render-node" => s.render_node.clone().unwrap_or_else(|| "/dev/dri/renderD128".into()).to_value(),
             "output-mode" => match s.output_mode { OutputMode::Auto => "auto", OutputMode::Cuda => "cuda", OutputMode::DmaBuf => "dmabuf", OutputMode::System => "system" }.to_value(),
             "cuda-device-id" => s.cuda_device_id.to_value(),
+            "keepalive-time" => s.keepalive_time_ms.to_value(),
+            "resend-last" => s.resend_last.to_value(),
             _ => unreachable!(),
         }
     }
@@ -453,14 +494,71 @@ impl BaseSrcImpl for PipeWireZeroCopySrc {
 
 impl PushSrcImpl for PipeWireZeroCopySrc {
     fn create(&self, _buffer: Option<&mut gst::BufferRef>) -> Result<CreateSuccess, gst::FlowError> {
-        // Get shared CUDA context from settings (cloning the Arc, not the context)
-        let cuda_context = self.settings.lock().cuda_context.clone();
+        // Get shared CUDA context and keepalive settings (cloning the Arc, not the context)
+        let (cuda_context, keepalive_time_ms) = {
+            let settings = self.settings.lock();
+            (settings.cuda_context.clone(), settings.keepalive_time_ms)
+        };
 
         let mut g = self.state.lock();
         let state = g.as_mut().ok_or(gst::FlowError::Eos)?;
         let stream = state.stream.as_ref().ok_or(gst::FlowError::Error)?;
 
-        let frame = stream.recv_frame().map_err(|e| { gst::error!(CAT, imp = self, "Frame: {}", e); gst::FlowError::Error })?;
+        // Use keepalive timeout if configured, otherwise wait with default timeout
+        let timeout = if keepalive_time_ms > 0 {
+            Duration::from_millis(keepalive_time_ms as u64)
+        } else {
+            Duration::from_secs(30)  // Default timeout
+        };
+
+        // Try to receive a frame with timeout
+        let frame_result = stream.recv_frame_timeout(timeout);
+
+        let frame = match frame_result {
+            Ok(frame) => frame,
+            Err(RecvError::Timeout) if keepalive_time_ms > 0 => {
+                // Timeout with keepalive enabled: resend last buffer with updated timestamps
+                // This is normal for GNOME 49+ damage-based ScreenCast with static screens
+                if let Some(ref last_buf) = state.last_buffer {
+                    gst::debug!(CAT, imp = self, "Keepalive: resending last buffer (no new frame from PipeWire)");
+
+                    // Clone the buffer and update timestamps
+                    let mut buf = last_buf.copy();
+                    if let Some(buf_ref) = buf.get_mut() {
+                        // Update PTS/DTS to current pipeline time
+                        if let Some(clock) = self.obj().clock() {
+                            let base_time = self.obj().base_time();
+                            if let (Some(now), Some(base)) = (clock.time(), base_time) {
+                                let running_time = now.saturating_sub(base);
+                                buf_ref.set_pts(running_time);
+                                buf_ref.set_dts(running_time);
+                            }
+                        }
+                    }
+
+                    state.frame_count += 1;
+                    drop(g);
+                    return Ok(CreateSuccess::NewBuffer(buf));
+                } else {
+                    // No last buffer yet - first frame hasn't arrived
+                    gst::warning!(CAT, imp = self, "Keepalive timeout but no last buffer available (waiting for first frame)");
+                    return Err(gst::FlowError::Error);
+                }
+            }
+            Err(RecvError::Timeout) => {
+                // Timeout without keepalive - this is an error
+                gst::error!(CAT, imp = self, "Frame receive timeout (keepalive disabled)");
+                return Err(gst::FlowError::Error);
+            }
+            Err(RecvError::Disconnected) => {
+                gst::error!(CAT, imp = self, "PipeWire stream disconnected");
+                return Err(gst::FlowError::Eos);
+            }
+            Err(RecvError::Error(e)) => {
+                gst::error!(CAT, imp = self, "Frame receive error: {}", e);
+                return Err(gst::FlowError::Error);
+            }
+        };
 
         let (buffer, actual_format, width, height) = match frame {
             FrameData::DmaBuf(dmabuf) if state.actual_output_mode == OutputMode::Cuda => {
@@ -577,6 +675,11 @@ impl PushSrcImpl for PipeWireZeroCopySrc {
                 state.video_info = Some(info);
             }
 
+            // Store buffer for keepalive (before dropping lock)
+            if keepalive_time_ms > 0 {
+                state.last_buffer = Some(buffer.clone());
+            }
+
             // Release state lock before calling set_caps (it may need the lock)
             drop(g);
 
@@ -587,6 +690,10 @@ impl PushSrcImpl for PipeWireZeroCopySrc {
                 gst::warning!(CAT, imp = self, "Failed to push new caps event");
             }
         } else {
+            // Store buffer for keepalive
+            if keepalive_time_ms > 0 {
+                state.last_buffer = Some(buffer.clone());
+            }
             state.frame_count += 1;
             drop(g);
         }

@@ -226,13 +226,17 @@ void start_pipewire_video_producer(const std::string &session_id,
   // CRITICAL: Add queue before interpipesink to decouple producer from consumer timing.
   // Without queue, GStreamer warns "Pipeline construction is invalid, please add queues"
   // and the pipeline can deadlock when interpipesrc switches sources.
+  // GNOME 49+ uses damage-based frame delivery - only sends frames when screen changes.
+  // keepalive-time=100 ensures we resend the last frame every 100ms (10 FPS minimum)
+  // when no new frames arrive. Without this, static desktops cause stream timeout.
+  // See: design/2026-01-06-pipewire-keepalive-mechanism.md
   auto pipeline = fmt::format(
-      "pipewirezerocopysrc pipewire-node-id={node_id} render-node={render_node} output-mode={output_mode} ! "
+      "pipewirezerocopysrc pipewire-node-id={node_id} render-node={render_node} output-mode={output_mode} keepalive-time=100 ! "
       "{buffer_caps} ! "
       "cudaconvertscale ! "
       "{buffer_caps}, format=NV12, width={width}, height={height}, framerate={fps}/1 ! "
       "queue max-size-buffers=5 leaky=downstream ! "
-      "interpipesink sync=true async=false name={session_id}_video max-buffers=5",
+      "interpipesink sync=false async=false name={session_id}_video max-buffers=5",
       fmt::arg("node_id", pipewire_node_id),
       fmt::arg("render_node", render_node),
       fmt::arg("output_mode", output_mode),
@@ -565,7 +569,12 @@ void start_streaming_video(immer::box<events::VideoSession> video_session,
               interpipe_source_id);
   }
 
+  // consumer_id = Moonlight session_id (unique per connection, for interpipesrc element name)
+  // session_id = lobby_id or session_id (for interpipesink listen-to)
+  // This ensures each Moonlight connection gets a unique interpipesrc element,
+  // preventing GStreamer naming conflicts on reconnection.
   auto pipeline = fmt::format(fmt::runtime(video_session->gst_pipeline),
+                              fmt::arg("consumer_id", video_session->session_id),
                               fmt::arg("session_id", interpipe_source_id),
                               fmt::arg("width", video_session->display_mode.width),
                               fmt::arg("height", video_session->display_mode.height),
@@ -799,8 +808,11 @@ void start_streaming_audio(immer::box<events::AudioSession> audio_session,
               interpipe_source_id);
   }
 
+  // consumer_id = Moonlight session_id (unique per connection, for interpipesrc element name)
+  // session_id = lobby_id or session_id (for interpipesink listen-to)
   auto pipeline = fmt::format(
       fmt::runtime(audio_session->gst_pipeline),
+      fmt::arg("consumer_id", audio_session->session_id),
       fmt::arg("session_id", interpipe_source_id),
       fmt::arg("channels", audio_session->audio_mode.channels),
       fmt::arg("bitrate", audio_session->audio_mode.bitrate),
