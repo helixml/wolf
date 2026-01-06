@@ -213,6 +213,12 @@ struct Lobby {
       std::make_shared<immer::atom<std::optional<unsigned int>>>(std::nullopt);
 
   /**
+   * Tracks whether the video producer (GStreamer pipeline) is currently running.
+   * Used to prevent duplicate pipeline starts and ensure proper cleanup.
+   */
+  std::shared_ptr<std::atomic_bool> video_producer_running = std::make_shared<std::atomic_bool>(false);
+
+  /**
    * Input bridge for RemoteDesktop input mode.
    * Provides input injection via the container's RemoteDesktop D-Bus API.
    * Only used when video_settings.video_source_mode == "pipewire".
