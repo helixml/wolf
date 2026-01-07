@@ -127,13 +127,18 @@ void start_video_producer(const std::string &session_id,
   // CRITICAL: Add queue before interpipesink to decouple producer from consumer timing.
   // Without queue, GStreamer warns "Pipeline construction is invalid, please add queues"
   // and the pipeline can deadlock when interpipesrc switches sources.
+
+  // Use videoconvert for software rendering (no GPU), cudaconvertscale for hardware
+  std::string converter = (buffer_format.find("CUDAMemory") == std::string::npos) ? "videoconvert" : "cudaconvertscale";
+
   auto pipeline = fmt::format("waylanddisplaysrc name=wolf_wayland_source render_node={render_node} ! "
                               "{buffer_format} ! "
-                              "cudaconvertscale ! "
+                              "{converter} ! "
                               "{buffer_format}, format=NV12, width={width}, height={height}, framerate={fps}/1 ! "
                               "queue max-size-buffers=5 leaky=downstream ! "
                               "interpipesink sync=true async=false name={session_id}_video max-buffers=5",
                               fmt::arg("buffer_format", buffer_format),
+                              fmt::arg("converter", converter),
                               fmt::arg("render_node", render_node),
                               fmt::arg("session_id", session_id),
                               fmt::arg("width", display_mode.width),
@@ -230,16 +235,21 @@ void start_pipewire_video_producer(const std::string &session_id,
   // keepalive-time=100 ensures we resend the last frame every 100ms (10 FPS minimum)
   // when no new frames arrive. Without this, static desktops cause stream timeout.
   // See: design/2026-01-06-pipewire-keepalive-mechanism.md
+
+  // Use videoconvert for software rendering (no GPU), cudaconvertscale for hardware
+  std::string converter = (output_mode == "system") ? "videoconvert" : "cudaconvertscale";
+
   auto pipeline = fmt::format(
       "pipewirezerocopysrc pipewire-node-id={node_id} render-node={render_node} output-mode={output_mode} keepalive-time=100 ! "
       "{buffer_caps} ! "
-      "cudaconvertscale ! "
+      "{converter} ! "
       "{buffer_caps}, format=NV12, width={width}, height={height}, framerate={fps}/1 ! "
       "queue max-size-buffers=5 leaky=downstream ! "
       "interpipesink sync=false async=false name={session_id}_video max-buffers=5",
       fmt::arg("node_id", pipewire_node_id),
       fmt::arg("render_node", render_node),
       fmt::arg("output_mode", output_mode),
+      fmt::arg("converter", converter),
       fmt::arg("buffer_caps", buffer_caps),
       fmt::arg("width", display_mode.width),
       fmt::arg("height", display_mode.height),
