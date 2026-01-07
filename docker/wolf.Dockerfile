@@ -51,7 +51,11 @@ RUN git clone https://github.com/games-on-whales/gst-wayland-display.git && \
     git checkout fd620860f260f051fd731bb9feaac8632cbe3c9e && \
     sed -i 's/^cuda = \[\]/cuda = ["wayland-display-core\/cuda"]/' gst-plugin-wayland-display/Cargo.toml
 WORKDIR /tmp/gst-wayland-display
-RUN cargo install cargo-c && \
+# Cache Cargo registry, git deps, and build artifacts for offline builds
+RUN --mount=type=cache,target=/root/.cargo/registry \
+    --mount=type=cache,target=/root/.cargo/git \
+    --mount=type=cache,target=/tmp/gst-wayland-display/target \
+    cargo install cargo-c && \
     cargo cinstall -p gst-plugin-wayland-display --features cuda --prefix=/usr/local/lib/x86_64-linux-gnu/ --libdir=/usr/local/lib/x86_64-linux-gnu/gstreamer-1.0
 
 # Build gst-pipewire-zerocopy - unified PipeWire source with zero-copy GPU output
@@ -68,9 +72,16 @@ WORKDIR /wolf
 # Build gst-pipewire-zerocopy GStreamer plugin
 # This provides pipewirezerocopysrc element for unified PipeWire capture
 # Run unit tests first to catch issues early (tests pure logic, no GPU needed)
+# Cache Cargo registry, git deps, and build artifacts for offline builds
 WORKDIR /wolf/gst-pipewire-zerocopy
-RUN cargo test --lib -- --nocapture
-RUN cargo cinstall --features cuda --prefix=/usr/local/lib/x86_64-linux-gnu/ --libdir=/usr/local/lib/x86_64-linux-gnu/gstreamer-1.0
+RUN --mount=type=cache,target=/root/.cargo/registry \
+    --mount=type=cache,target=/root/.cargo/git \
+    --mount=type=cache,target=/wolf/gst-pipewire-zerocopy/target \
+    cargo test --lib -- --nocapture
+RUN --mount=type=cache,target=/root/.cargo/registry \
+    --mount=type=cache,target=/root/.cargo/git \
+    --mount=type=cache,target=/wolf/gst-pipewire-zerocopy/target \
+    cargo cinstall --features cuda --prefix=/usr/local/lib/x86_64-linux-gnu/ --libdir=/usr/local/lib/x86_64-linux-gnu/gstreamer-1.0
 
 WORKDIR /wolf
 
