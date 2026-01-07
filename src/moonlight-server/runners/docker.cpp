@@ -85,13 +85,34 @@ void RunDocker::run(std::string_view session_id,
 
   // PipeWire socket sharing - allows Wolf to connect to PipeWire running inside the container
   // This is needed for PipeWire ScreenCast video capture mode (GNOME 49+)
+  // IMPORTANT: Only override XDG_RUNTIME_DIR for pipewire mode!
+  // For wayland mode (Sway/KDE), XDG_RUNTIME_DIR must remain /tmp/sockets where Wolf's
+  // gst-wayland-display compositor creates the wayland socket.
   auto pipewire_base_path = std::filesystem::path(app_state_folder) / "pipewire";
   std::filesystem::create_directories(pipewire_base_path);
   logs::log(logs::debug, "[DOCKER] PipeWire socket path: {}", pipewire_base_path.string());
-  // Mount at /run/user/1000 where PipeWire daemon creates its socket (pipewire-0)
-  mounts.push_back(MountPoint{.source = pipewire_base_path.string(), .destination = "/run/user/1000", .mode = "rw"});
-  // Set XDG_RUNTIME_DIR in container to match the mount point
-  full_env.push_back("XDG_RUNTIME_DIR=/run/user/1000");
+
+  // Check if we're in pipewire mode by looking at WOLF_VIDEO_SOURCE_MODE in env_variables
+  bool use_pipewire_mode = false;
+  if (auto mode_it = env_variables.find("WOLF_VIDEO_SOURCE_MODE")) {
+    use_pipewire_mode = (*mode_it == "pipewire");
+    logs::log(logs::debug, "[DOCKER] Video source mode: {}, use_pipewire_mode: {}", *mode_it, use_pipewire_mode);
+  }
+
+  if (use_pipewire_mode) {
+    // Mount at /run/user/1000 where PipeWire daemon creates its socket (pipewire-0)
+    mounts.push_back(MountPoint{.source = pipewire_base_path.string(), .destination = "/run/user/1000", .mode = "rw"});
+    // Set XDG_RUNTIME_DIR in container to match the mount point
+    // This overrides the /tmp/sockets value from common.cpp, which is correct for pipewire mode
+    full_env.push_back("XDG_RUNTIME_DIR=/run/user/1000");
+    logs::log(logs::debug, "[DOCKER] Pipewire mode: XDG_RUNTIME_DIR=/run/user/1000");
+  } else {
+    // For wayland mode (Sway/KDE), do NOT override XDG_RUNTIME_DIR
+    // The correct value (/tmp/sockets) is already set by common.cpp, and that's where
+    // Wolf's gst-wayland-display creates the wayland socket for nested compositors.
+    // Still create the pipewire directory in case it's needed later, but don't mount it
+    logs::log(logs::debug, "[DOCKER] Wayland mode: keeping XDG_RUNTIME_DIR from common.cpp (should be /tmp/sockets)");
+  }
 
   // Per-lobby socket mounting - provides isolated API for multi-tenant security
   // The lobby.sock is created by LobbySocketServer in the same app_state_folder
