@@ -79,7 +79,9 @@ ENV CMAKE_BUILD_DIR=/cache/cmake-build
 ARG BUILD_JOBS=8
 # DEBUG BUILD (current) - Full debug symbols for deadlock investigation
 # WOLF_CUSTOM_INPUTTINO_SRC uses our vendored inputtino with bugfix for RHEL keyboard issues
+# Cache both ccache AND cmake-build to avoid re-downloading Boost FetchContent on every build
 RUN --mount=type=cache,target=/cache/ccache \
+    --mount=type=cache,target=/cache/cmake-build \
     cmake -B$CMAKE_BUILD_DIR \
     -DCMAKE_BUILD_TYPE=Debug \
     -DCMAKE_CXX_STANDARD=17 \
@@ -99,7 +101,9 @@ RUN --mount=type=cache,target=/cache/ccache \
     cp $CMAKE_BUILD_DIR/src/fake-udev/fake-udev /wolf/fake-udev
 
 # RELEASE BUILD (commented out) - Use for production when debugging complete
+# Cache both ccache AND cmake-build to avoid re-downloading Boost FetchContent on every build
 # RUN --mount=type=cache,target=/cache/ccache \
+#     --mount=type=cache,target=/cache/cmake-build \
 #     cmake -B$CMAKE_BUILD_DIR \
 #     -DCMAKE_BUILD_TYPE=RelWithDebInfo \
 #     -DCMAKE_CXX_STANDARD=17 \
