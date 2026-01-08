@@ -1,4 +1,5 @@
 #include "input_bridge.hpp"
+#include <cerrno>
 #include <cstdio>
 #include <cstring>
 #include <fmt/format.h>
@@ -128,12 +129,30 @@ void InputBridge::disconnect() {
 
 void InputBridge::send(const std::string &json) {
   if (socket_fd_ < 0) {
+    fprintf(stderr, "[INPUT_BRIDGE] send() called but socket_fd_ < 0\n");
+    fflush(stderr);
     return;
   }
 
   std::lock_guard<std::mutex> lock(send_mutex_);
   std::string msg = json + "\n";
-  ::send(socket_fd_, msg.c_str(), msg.size(), MSG_NOSIGNAL);
+
+  // Debug: log every message being sent
+  fprintf(stderr, "[INPUT_BRIDGE] SENDING: %s", msg.c_str());
+  fflush(stderr);
+
+  ssize_t result = ::send(socket_fd_, msg.c_str(), msg.size(), MSG_NOSIGNAL);
+  if (result < 0) {
+    fprintf(stderr, "[INPUT_BRIDGE] send() FAILED: errno=%d (%s), socket_fd=%d\n",
+            errno, strerror(errno), socket_fd_);
+    fflush(stderr);
+  } else if (static_cast<size_t>(result) != msg.size()) {
+    fprintf(stderr, "[INPUT_BRIDGE] send() partial: sent %zd of %zu bytes\n", result, msg.size());
+    fflush(stderr);
+  } else {
+    fprintf(stderr, "[INPUT_BRIDGE] send() OK: %zd bytes\n", result);
+    fflush(stderr);
+  }
 }
 
 // Mouse methods
