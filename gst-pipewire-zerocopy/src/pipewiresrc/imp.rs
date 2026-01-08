@@ -62,7 +62,7 @@ fn drm_fourcc_to_video_format(fourcc: DrmFourcc) -> VideoFormat {
                 DrmFourcc::Rgbx8888 => VideoFormat::Rgbx,
                 DrmFourcc::Bgrx8888 => VideoFormat::Bgrx,
                 _ => {
-                    tracing::warn!("Unknown DRM fourcc {:?}, falling back to Bgra", fourcc);
+                    eprintln!("Unknown DRM fourcc {:?}, falling back to Bgra", fourcc);
                     VideoFormat::Bgra
                 }
             }
@@ -282,6 +282,7 @@ impl ElementImpl for PipeWireZeroCopySrc {
     /// Receive CUDA context from Wolf via GStreamer's context mechanism.
     /// Wolf creates the context and pushes it to elements via gst_element_set_context().
     fn set_context(&self, context: &gst::Context) {
+        eprintln!("[PIPEWIRESRC_DEBUG] set_context called, context_type={:?}", context.context_type());
         let elem = self.obj().upcast_ref::<gst::Element>().to_owned();
 
         // Get raw pointer for GStreamer CUDA interop
@@ -296,11 +297,13 @@ impl ElementImpl for PipeWireZeroCopySrc {
             Ok(ctx) => {
                 let mut settings = self.settings.lock();
                 if settings.cuda_context.is_none() {
+                    eprintln!("[PIPEWIRESRC_DEBUG] Received CUDA context via set_context - SUCCESS");
                     gst::info!(CAT, imp = self, "Received CUDA context from pipeline (via set_context)");
                     settings.cuda_context = Some(Arc::new(std::sync::Mutex::new(ctx)));
                 }
             }
             Err(e) => {
+                eprintln!("[PIPEWIRESRC_DEBUG] set_context failed: {}", e);
                 gst::debug!(CAT, imp = self, "set_context: not a CUDA context or failed: {}", e);
             }
         }
@@ -321,6 +324,7 @@ impl BaseSrcImpl for PipeWireZeroCopySrc {
             (node_id, settings.render_node.clone(), settings.output_mode, settings.cuda_device_id)
         };
 
+        eprintln!("[PIPEWIRESRC_DEBUG] start() called: node_id={}, render_node={:?}, output_mode={:?}", node_id, render_node, output_mode);
         gst::info!(CAT, imp = self, "Starting for node {}", node_id);
 
         let mut state = State::default();
@@ -328,17 +332,27 @@ impl BaseSrcImpl for PipeWireZeroCopySrc {
 
         // Try CUDA mode using Wolf's context sharing pattern
         if output_mode == OutputMode::Auto || output_mode == OutputMode::Cuda {
+            eprintln!("[PIPEWIRESRC_DEBUG] Trying CUDA mode...");
+            match init_cuda() {
+                Ok(()) => eprintln!("[PIPEWIRESRC_DEBUG] init_cuda() succeeded"),
+                Err(e) => {
+                    eprintln!("[PIPEWIRESRC_DEBUG] init_cuda() failed: {:?}", e);
+                }
+            }
             if let Ok(()) = init_cuda() {
                 // Check if we already received a CUDA context via set_context()
                 let have_cuda_context = self.settings.lock().cuda_context.is_some();
+                eprintln!("[PIPEWIRESRC_DEBUG] have_cuda_context={}", have_cuda_context);
 
                 if !have_cuda_context {
                     // No context pushed by Wolf - try to acquire one from the pipeline
                     // This matches waylandsrc's fallback behavior
+                    eprintln!("[PIPEWIRESRC_DEBUG] No CUDA context from set_context, acquiring via new_from_gstreamer...");
                     gst::info!(CAT, imp = self, "No CUDA context from set_context, acquiring from pipeline");
                     let cuda_raw_ptr = self.settings.lock().cuda_raw_ptr.as_ptr();
                     match CUDAContext::new_from_gstreamer(&elem, device_id, cuda_raw_ptr) {
                         Ok(ctx) => {
+                            eprintln!("[PIPEWIRESRC_DEBUG] new_from_gstreamer succeeded!");
                             let mut settings = self.settings.lock();
                             if settings.cuda_context.is_none() {
                                 gst::info!(CAT, imp = self, "Acquired CUDA context via new_from_gstreamer");
@@ -355,12 +369,14 @@ impl BaseSrcImpl for PipeWireZeroCopySrc {
                                 // Use mem::forget to prevent the double-unref. The minor memory
                                 // leak (16 bytes for CUDAContext + potential stream handle) is
                                 // acceptable to prevent a crash.
+                                eprintln!("[PIPEWIRESRC_DEBUG] Context already set via set_context, using mem::forget");
                                 gst::info!(CAT, imp = self,
                                     "Context already set via set_context, using mem::forget to prevent double-unref");
                                 std::mem::forget(ctx);
                             }
                         }
                         Err(e) => {
+                            eprintln!("[PIPEWIRESRC_DEBUG] new_from_gstreamer failed: {}", e);
                             gst::warning!(CAT, imp = self, "Failed to acquire CUDA context: {}", e);
                         }
                     }
@@ -368,30 +384,49 @@ impl BaseSrcImpl for PipeWireZeroCopySrc {
 
                 // Now check if we have a context and set up EGL/buffer pool
                 let settings = self.settings.lock();
+                let has_context = settings.cuda_context.is_some();
+                eprintln!("[PIPEWIRESRC_DEBUG] After context acquisition: has_context={}, render_node={:?}", has_context, render_node);
                 if let Some(ref cuda_context) = settings.cuda_context {
                     if let Some(ref node_path) = render_node {
+                        eprintln!("[PIPEWIRESRC_DEBUG] Creating EGL display for {}...", node_path);
                         match create_egl_display(node_path) {
                             Ok(display) => {
+                                eprintln!("[PIPEWIRESRC_DEBUG] EGL display created, creating buffer pool...");
                                 let cuda_ctx = cuda_context.lock().unwrap();
-                                if let Ok(pool) = CUDABufferPool::new(&cuda_ctx) {
-                                    gst::info!(CAT, imp = self, "Using CUDA mode with shared context");
-                                    state.egl_display = Some(Arc::new(display));
-                                    state.buffer_pool = Some(pool);
-                                    state.actual_output_mode = OutputMode::Cuda;
+                                match CUDABufferPool::new(&cuda_ctx) {
+                                    Ok(pool) => {
+                                        eprintln!("[PIPEWIRESRC_DEBUG] Buffer pool created - CUDA MODE ENABLED!");
+                                        gst::info!(CAT, imp = self, "Using CUDA mode with shared context");
+                                        state.egl_display = Some(Arc::new(display));
+                                        state.buffer_pool = Some(pool);
+                                        state.actual_output_mode = OutputMode::Cuda;
+                                    }
+                                    Err(e) => {
+                                        eprintln!("[PIPEWIRESRC_DEBUG] Buffer pool creation failed: {}", e);
+                                    }
                                 }
                             }
-                            Err(e) => gst::warning!(CAT, imp = self, "EGL display failed: {}", e),
+                            Err(e) => {
+                                eprintln!("[PIPEWIRESRC_DEBUG] EGL display failed: {}", e);
+                                gst::warning!(CAT, imp = self, "EGL display failed: {}", e);
+                            }
                         }
+                    } else {
+                        eprintln!("[PIPEWIRESRC_DEBUG] render_node is None, can't create EGL display");
                     }
                 }
             }
+        } else {
+            eprintln!("[PIPEWIRESRC_DEBUG] Not trying CUDA (output_mode={:?})", output_mode);
         }
 
+        eprintln!("[PIPEWIRESRC_DEBUG] Final actual_output_mode={:?}", state.actual_output_mode);
         if state.actual_output_mode == OutputMode::System {
             if output_mode == OutputMode::DmaBuf {
                 state.actual_output_mode = OutputMode::DmaBuf;
                 gst::info!(CAT, imp = self, "Using DMA-BUF mode");
             } else {
+                eprintln!("[PIPEWIRESRC_DEBUG] Using SYSTEM MEMORY mode (not CUDA!)");
                 gst::info!(CAT, imp = self, "Using system memory mode");
             }
         }
@@ -560,10 +595,32 @@ impl PushSrcImpl for PipeWireZeroCopySrc {
             }
         };
 
+        // Debug: trace which frame type we received and what mode we're in
+        eprintln!("[PIPEWIRESRC_DEBUG] create(): actual_output_mode={:?}, has_cuda_context={}, has_egl_display={}, has_buffer_pool={}",
+            state.actual_output_mode,
+            cuda_context.is_some(),
+            state.egl_display.is_some(),
+            state.buffer_pool.is_some());
+
+        match &frame {
+            FrameData::DmaBuf(dmabuf) => {
+                eprintln!("[PIPEWIRESRC_DEBUG] Received DmaBuf frame: {}x{} fourcc=0x{:x}",
+                    dmabuf.width(), dmabuf.height(), dmabuf.format().code as u32);
+            }
+            FrameData::Shm { width, height, format, .. } => {
+                eprintln!("[PIPEWIRESRC_DEBUG] Received SHM frame: {}x{} format=0x{:x}",
+                    width, height, format);
+            }
+        }
+
         let (buffer, actual_format, width, height) = match frame {
             FrameData::DmaBuf(dmabuf) if state.actual_output_mode == OutputMode::Cuda => {
+                eprintln!("[PIPEWIRESRC_DEBUG] Processing DmaBuf in CUDA mode");
                 // Use waylanddisplaycore's battle-tested CUDA conversion with shared context
-                let cuda_context_arc = cuda_context.as_ref().ok_or(gst::FlowError::Error)?;
+                let cuda_context_arc = cuda_context.as_ref().ok_or_else(|| {
+                    eprintln!("[PIPEWIRESRC_DEBUG] ERROR: cuda_context is None!");
+                    gst::FlowError::Error
+                })?;
                 let cuda_ctx = cuda_context_arc.lock().unwrap();
                 let egl_display = state.egl_display.as_ref().ok_or(gst::FlowError::Error)?;
 
@@ -575,19 +632,18 @@ impl PushSrcImpl for PipeWireZeroCopySrc {
 
                 // Debug logging for CUDA conversion
                 let drm_fmt = dmabuf.format();
-                gst::warning!(CAT, imp = self,
-                    "[PIPEWIRE_DEBUG] CUDA path: dmabuf {}x{} fourcc={:?} modifier=0x{:x}",
+                eprintln!("[PIPEWIRESRC_DEBUG] CUDA path: dmabuf {}x{} fourcc={:?} modifier=0x{:x}",
                     w, h, drm_fmt.code, u64::from(drm_fmt.modifier));
 
                 let egl_image = EGLImage::from(&dmabuf, &raw_display)
-                    .map_err(|e| { gst::error!(CAT, imp = self, "EGLImage: {}", e); gst::FlowError::Error })?;
+                    .map_err(|e| { eprintln!("[PIPEWIRESRC_DEBUG] EGLImage error: {}", e); gst::FlowError::Error })?;
 
-                gst::warning!(CAT, imp = self, "[PIPEWIRE_DEBUG] EGLImage created successfully");
+                eprintln!("[PIPEWIRESRC_DEBUG] EGLImage created successfully");
 
                 let cuda_image = CUDAImage::from(egl_image, &cuda_ctx)
-                    .map_err(|e| { gst::error!(CAT, imp = self, "CUDAImage: {}", e); gst::FlowError::Error })?;
+                    .map_err(|e| { eprintln!("[PIPEWIRESRC_DEBUG] CUDAImage error: {}", e); gst::FlowError::Error })?;
 
-                gst::warning!(CAT, imp = self, "[PIPEWIRE_DEBUG] CUDAImage created successfully");
+                eprintln!("[PIPEWIRESRC_DEBUG] CUDAImage created successfully");
 
                 // Derive VideoFormat from DMA-BUF's fourcc (matches waylanddisplaycore pattern)
                 let drm_format = dmabuf.format();
@@ -602,7 +658,9 @@ impl PushSrcImpl for PipeWireZeroCopySrc {
                 let dma_video_info = VideoInfoDmaDrm::new(base_info, fourcc, modifier);
 
                 let buf = cuda_image.to_gst_buffer(dma_video_info, &cuda_ctx, state.buffer_pool.as_ref())
-                    .map_err(|e| { gst::error!(CAT, imp = self, "CUDA buffer: {}", e); gst::FlowError::Error })?;
+                    .map_err(|e| { eprintln!("[PIPEWIRESRC_DEBUG] to_gst_buffer error: {}", e); gst::FlowError::Error })?;
+
+                eprintln!("[PIPEWIRESRC_DEBUG] CUDA buffer created successfully!");
 
                 // Get the actual format from the buffer's VideoMeta (set by to_gst_buffer)
                 // This is the format that gst_video_info_dma_drm_to_video_info() produced
@@ -613,6 +671,7 @@ impl PushSrcImpl for PipeWireZeroCopySrc {
                 (buf, actual_fmt, w, h)
             }
             FrameData::DmaBuf(dmabuf) => {
+                eprintln!("[PIPEWIRESRC_DEBUG] Processing DmaBuf in FALLBACK (non-CUDA) mode");
                 let w = dmabuf.width() as u32;
                 let h = dmabuf.height() as u32;
                 let video_format = drm_fourcc_to_video_format(dmabuf.format().code);
