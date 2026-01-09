@@ -145,8 +145,9 @@ struct VideoSettings {
    * Video source mode: "wayland" (default) or "pipewire"
    * - "wayland": Use waylanddisplaysrc nested compositor (Sway/KDE)
    * - "pipewire": Use pipewiresrc to read from PipeWire ScreenCast (GNOME 49+)
+   * Optional for JSON deserialization - defaults to "wayland" when not present.
    */
-  std::string video_source_mode = "wayland";
+  std::optional<std::string> video_source_mode;
 };
 
 struct AudioSettings {

@@ -200,6 +200,13 @@ fn run_pipewire_loop(
     let video_info_param = video_info.clone();
     let frame_tx_process = frame_tx.clone();
 
+    // Per-stream flag to track if we've called update_params for buffer types.
+    // CRITICAL: This must be per-stream (Arc), not static, because Wolf runs
+    // multiple sessions in one process. A static flag would cause the first
+    // session to set it, and subsequent sessions would skip update_params entirely.
+    let buffer_params_set = Arc::new(AtomicBool::new(false));
+    let buffer_params_set_clone = buffer_params_set.clone();
+
     let _listener = stream
         .add_local_listener_with_user_data(spa::param::video::VideoInfoRaw::default())
         .state_changed(|_, _, old, new| {
@@ -224,7 +231,7 @@ fn run_pipewire_loop(
                 }
             };
 
-            tracing::warn!("[PIPEWIRE_DEBUG] media_type={:?} media_subtype={:?}", media_type, media_subtype);
+            eprintln!("[PIPEWIRE_DEBUG] media_type={:?} media_subtype={:?}", media_type, media_subtype);
 
             // We only handle video/raw
             if media_type != spa::param::format::MediaType::Video
@@ -244,7 +251,7 @@ fn run_pipewire_loop(
             let height = user_data.size().height;
             let format_raw = user_data.format().as_raw();
 
-            tracing::warn!(
+            eprintln!(
                 "[PIPEWIRE_DEBUG] PipeWire video format: {}x{} format={} ({:?}) framerate={}/{}",
                 width,
                 height,
@@ -259,7 +266,7 @@ fn run_pipewire_loop(
             // See: https://pipewire.pages.freedesktop.org/pipewire/group__spa__param.html
             let drm_fourcc = spa_video_format_to_drm_fourcc(user_data.format());
             let modifier = user_data.modifier();
-            tracing::warn!(
+            eprintln!(
                 "[PIPEWIRE_DEBUG] Converted to DRM fourcc: 0x{:x}, modifier: 0x{:x}",
                 drm_fourcc, modifier
             );
@@ -270,18 +277,43 @@ fn run_pipewire_loop(
             params.modifier = modifier;
             drop(params); // Release lock before update_params
 
-            // Tell PipeWire we accept DMA-BUF buffers (like OBS does in on_param_changed_cb)
-            // Without this, PipeWire defaults to SHM (MemPtr) frames which break CUDA path
-            let buffer_params = build_buffer_params();
-            if !buffer_params.is_empty() {
-                if let Some(pod) = Pod::from_bytes(&buffer_params) {
-                    eprintln!("[PIPEWIRE_DEBUG] Calling update_params to request DMA-BUF buffers");
-                    if let Err(e) = stream.update_params(&mut [pod]) {
-                        eprintln!("[PIPEWIRE_DEBUG] update_params failed: {:?}", e);
+            // After format negotiation, we MUST call update_params with buffer/meta params.
+            // This is REQUIRED for GNOME ScreenCast to transition from Paused to Streaming.
+            // Without this, the stream never starts sending frames!
+            // OBS does this in on_param_changed_cb: builds meta/buffer params and calls pw_stream_update_params.
+            if !buffer_params_set_clone.swap(true, Ordering::SeqCst) {
+                let negotiation_params = build_negotiation_params();
+                if !negotiation_params.is_empty() {
+                    // Convert byte buffers to Pod references
+                    // Pod::from_bytes returns Option<&Pod>, so we collect references
+                    let mut pod_refs: Vec<&Pod> = negotiation_params.iter()
+                        .filter_map(|bytes| Pod::from_bytes(bytes))
+                        .collect();
+
+                    if !pod_refs.is_empty() {
+                        eprintln!("[PIPEWIRE_DEBUG] Calling update_params with {} negotiation params (meta + buffers)", pod_refs.len());
+                        if let Err(e) = stream.update_params(&mut pod_refs) {
+                            tracing::error!("[PIPEWIRE_DEBUG] update_params failed: {}", e);
+                        } else {
+                            eprintln!("[PIPEWIRE_DEBUG] update_params succeeded");
+                            // CRITICAL: OBS calls pw_stream_set_active(true) AFTER update_params to transition to Streaming.
+                            // Without this, GNOME ScreenCast keeps the stream in Paused state indefinitely.
+                            // See: obs_pipewire_stream_show() in obs-studio/plugins/linux-pipewire/pipewire.c
+                            eprintln!("[PIPEWIRE_DEBUG] Calling set_active(true) after update_params to request Streaming state");
+                            if let Err(e) = stream.set_active(true) {
+                                tracing::error!("[PIPEWIRE_DEBUG] set_active failed: {}", e);
+                            } else {
+                                eprintln!("[PIPEWIRE_DEBUG] set_active(true) succeeded - stream should now transition to Streaming");
+                            }
+                        }
                     } else {
-                        eprintln!("[PIPEWIRE_DEBUG] update_params succeeded - DMA-BUF buffers requested");
+                        tracing::warn!("[PIPEWIRE_DEBUG] No valid negotiation params pods - stream may not start");
                     }
+                } else {
+                    tracing::warn!("[PIPEWIRE_DEBUG] No negotiation params built - stream may not start");
                 }
+            } else {
+                eprintln!("[PIPEWIRE_DEBUG] Skipping update_params (already set for this stream)");
             }
         })
         .process(move |stream, _| {
@@ -323,13 +355,20 @@ fn run_pipewire_loop(
         .register()
         .map_err(|e| format!("Listener: {}", e))?;
 
-    // Build format params with framerate range (like OBS does)
-    // This tells PipeWire we accept video/raw with framerate 0-360 fps
-    // Without this, PipeWire may throttle to a lower framerate
-    let format_params = build_video_format_params();
-    let params_pod = Pod::from_bytes(&format_params)
-        .ok_or_else(|| "Failed to create Pod from format params".to_string())?;
-    let mut params = [params_pod];
+    // Build format params like OBS: first WITH modifiers (DMA-BUF), then WITHOUT (SHM fallback)
+    // This is CRITICAL for GNOME ScreenCast negotiation - it needs both options.
+    // OBS does this in build_format_params() lines 392-409.
+    let format_with_modifier = build_video_format_params();
+    let format_no_modifier = build_video_format_params_no_modifier();
+
+    let pod_with_mod = Pod::from_bytes(&format_with_modifier)
+        .ok_or_else(|| "Failed to create Pod from format params (with modifier)".to_string())?;
+    let pod_no_mod = Pod::from_bytes(&format_no_modifier)
+        .ok_or_else(|| "Failed to create Pod from format params (no modifier)".to_string())?;
+
+    // OBS order: formats WITH modifiers first, then formats WITHOUT modifiers
+    let mut params = [pod_with_mod, pod_no_mod];
+    eprintln!("[PIPEWIRE_DEBUG] Submitting 2 format pods (WITH modifier + WITHOUT modifier for SHM fallback)");
 
     tracing::info!("Connecting to PipeWire node {} with framerate range 0-360fps", node_id);
 
@@ -341,6 +380,10 @@ fn run_pipewire_loop(
     ).map_err(|e| format!("Connect to node {}: {}", node_id, e))?;
 
     tracing::info!("Connected to PipeWire node {}", node_id);
+
+    // Note: set_active(true) is called in param_changed callback AFTER update_params succeeds.
+    // This ensures proper sequencing: connect -> param_changed -> update_params -> set_active.
+    // OBS does the same in obs_pipewire_stream_show() which is called after negotiation.
 
     while !shutdown.load(Ordering::SeqCst) {
         mainloop.loop_().iterate(Duration::from_millis(50));
@@ -354,49 +397,148 @@ pub fn spa_format_to_drm_fourcc(format: spa::param::video::VideoFormat) -> u32 {
     spa_video_format_to_drm_fourcc(format)
 }
 
-/// Build buffer params to request DMA-BUF buffer support.
-/// Without this, PipeWire sends SHM (MemPtr) frames which break CUDA zero-copy path.
-/// OBS does the same in on_param_changed_cb - it tells PipeWire to send DMA-BUF buffers.
+/// Build negotiation params like OBS does in on_param_changed_cb.
+/// Returns a list of param byte buffers: [VideoCrop, Cursor, Buffers, Header]
+/// OBS sends all 4 meta params for GNOME ScreenCast to complete negotiation.
 /// See: https://github.com/obsproject/obs-studio/blob/master/plugins/linux-pipewire/pipewire.c
-fn build_buffer_params() -> Vec<u8> {
-    // SPA_PARAM_BUFFERS_dataType property key (from spa/param/buffers.h)
-    // enum spa_param_buffers: START=0, buffers=1, blocks=2, size=3, stride=4, align=5, dataType=6
+fn build_negotiation_params() -> Vec<Vec<u8>> {
+    let mut params = Vec::new();
+
+    // Constants from spa/param/buffers.h (enum spa_param_meta)
+    // These are simple enum values starting from 0:
+    //   SPA_PARAM_META_START = 0
+    //   SPA_PARAM_META_type = 1  (type of metadata)
+    //   SPA_PARAM_META_size = 2  (expected max size)
+    const SPA_PARAM_META_TYPE: u32 = 1;
+    const SPA_PARAM_META_SIZE: u32 = 2;
+
+    // Meta types from spa/buffer/meta.h
+    const SPA_META_HEADER: u32 = 1;      // struct spa_meta_header (24 bytes)
+    const SPA_META_VIDEOCROP: u32 = 2;   // struct spa_meta_region (16 bytes)
+    const SPA_META_CURSOR: u32 = 5;      // struct spa_meta_cursor + bitmap
+
+    // Sizes
+    const SPA_META_HEADER_SIZE: i32 = 24;    // sizeof(struct spa_meta_header)
+    const SPA_META_REGION_SIZE: i32 = 16;    // sizeof(struct spa_meta_region) = 4 ints
+
+    // Cursor meta size: sizeof(spa_meta_cursor) + sizeof(spa_meta_bitmap) + pixels
+    // OBS uses CURSOR_META_SIZE(64, 64) as default = 24 + 20 + 64*64*4 = 16428
+    const CURSOR_META_SIZE_64: i32 = 16428;
+    const CURSOR_META_SIZE_1: i32 = 48;       // minimum
+    const CURSOR_META_SIZE_1024: i32 = 4194348; // maximum
+
+    // 1. VideoCrop meta (like OBS)
+    let videocrop_obj = Object {
+        type_: SpaTypes::ObjectParamMeta.as_raw(),
+        id: ParamType::Meta.as_raw(),
+        properties: vec![
+            Property {
+                key: SPA_PARAM_META_TYPE,
+                flags: PropertyFlags::empty(),
+                value: Value::Id(Id(SPA_META_VIDEOCROP)),
+            },
+            Property {
+                key: SPA_PARAM_META_SIZE,
+                flags: PropertyFlags::empty(),
+                value: Value::Int(SPA_META_REGION_SIZE),
+            },
+        ],
+    };
+    if let Ok((cursor, _)) = PodSerializer::serialize(Cursor::new(Vec::new()), &Value::Object(videocrop_obj)) {
+        params.push(cursor.into_inner());
+    }
+
+    // 2. Cursor meta with size range (like OBS)
+    let cursor_size_choice = Choice(
+        ChoiceFlags::empty(),
+        ChoiceEnum::Range {
+            default: CURSOR_META_SIZE_64,
+            min: CURSOR_META_SIZE_1,
+            max: CURSOR_META_SIZE_1024,
+        },
+    );
+    let cursor_obj = Object {
+        type_: SpaTypes::ObjectParamMeta.as_raw(),
+        id: ParamType::Meta.as_raw(),
+        properties: vec![
+            Property {
+                key: SPA_PARAM_META_TYPE,
+                flags: PropertyFlags::empty(),
+                value: Value::Id(Id(SPA_META_CURSOR)),
+            },
+            Property {
+                key: SPA_PARAM_META_SIZE,
+                flags: PropertyFlags::empty(),
+                value: Value::Choice(ChoiceValue::Int(cursor_size_choice)),
+            },
+        ],
+    };
+    if let Ok((cursor, _)) = PodSerializer::serialize(Cursor::new(Vec::new()), &Value::Object(cursor_obj)) {
+        params.push(cursor.into_inner());
+    }
+
+    // 3. Buffers param - dataType (like OBS)
+    // SPA_PARAM_BUFFERS_dataType from spa/param/buffers.h (enum spa_param_buffers)
+    // These are simple enum values starting from 0:
+    //   SPA_PARAM_BUFFERS_START = 0
+    //   SPA_PARAM_BUFFERS_buffers = 1
+    //   SPA_PARAM_BUFFERS_blocks = 2
+    //   SPA_PARAM_BUFFERS_size = 3
+    //   SPA_PARAM_BUFFERS_stride = 4
+    //   SPA_PARAM_BUFFERS_align = 5
+    //   SPA_PARAM_BUFFERS_dataType = 6
     const SPA_PARAM_BUFFERS_DATATYPE: u32 = 6;
 
     // Buffer type bitmask (from spa/buffer/buffer.h):
     // SPA_DATA_MemPtr = 1 (pointer to memory)
     // SPA_DATA_DmaBuf = 3 (DMA-BUF fd)
-    // Bitmask: (1 << 1) | (1 << 3) = 2 | 8 = 10
+    // Bitmask: (1 << 1) | (1 << 3) = 2 | 8 = 10 (MemPtr + DmaBuf)
     let buffer_types: i32 = (1 << 1) | (1 << 3);
 
-    // Create property for dataType
-    let mut properties = Vec::new();
-    properties.push(Property {
-        key: SPA_PARAM_BUFFERS_DATATYPE,
-        flags: PropertyFlags::empty(),
-        value: Value::Int(buffer_types),
-    });
-
-    // Create the buffers param object
-    let obj = Object {
+    let buffer_obj = Object {
         type_: SpaTypes::ObjectParamBuffers.as_raw(),
         id: ParamType::Buffers.as_raw(),
-        properties,
+        properties: vec![
+            Property {
+                key: SPA_PARAM_BUFFERS_DATATYPE,
+                flags: PropertyFlags::empty(),
+                value: Value::Int(buffer_types),
+            },
+        ],
     };
-
-    // Serialize to bytes
-    let result = PodSerializer::serialize(
-        Cursor::new(Vec::new()),
-        &Value::Object(obj),
-    );
-
-    match result {
-        Ok((cursor, _len)) => cursor.into_inner(),
-        Err(e) => {
-            eprintln!("[PIPEWIRE_DEBUG] Failed to serialize buffer params: {:?}", e);
-            Vec::new()
-        }
+    if let Ok((cursor, _)) = PodSerializer::serialize(Cursor::new(Vec::new()), &Value::Object(buffer_obj)) {
+        params.push(cursor.into_inner());
     }
+
+    // 4. Header meta (like OBS - REQUIRED for GNOME to complete negotiation)
+    let header_meta_obj = Object {
+        type_: SpaTypes::ObjectParamMeta.as_raw(),
+        id: ParamType::Meta.as_raw(),
+        properties: vec![
+            Property {
+                key: SPA_PARAM_META_TYPE,
+                flags: PropertyFlags::empty(),
+                value: Value::Id(Id(SPA_META_HEADER)),
+            },
+            Property {
+                key: SPA_PARAM_META_SIZE,
+                flags: PropertyFlags::empty(),
+                value: Value::Int(SPA_META_HEADER_SIZE),
+            },
+        ],
+    };
+    if let Ok((cursor, _)) = PodSerializer::serialize(Cursor::new(Vec::new()), &Value::Object(header_meta_obj)) {
+        params.push(cursor.into_inner());
+    }
+
+    eprintln!("[PIPEWIRE_DEBUG] Built {} negotiation params (VideoCrop + Cursor + Buffers + Header)", params.len());
+    params
+}
+
+/// Legacy function for backward compatibility - builds just Buffers param
+fn build_buffer_params() -> Vec<u8> {
+    let params = build_negotiation_params();
+    params.into_iter().next().unwrap_or_default()
 }
 
 /// Build a single format pod (like OBS's build_format function).
@@ -484,43 +626,240 @@ fn build_single_format_pod(format: u32, with_modifier: bool) -> Vec<u8> {
     }
 }
 
-/// Build video format params following OBS's pattern.
-/// Creates multiple format pods: first with modifiers (DMA-BUF), then without (SHM fallback).
-/// Returns a list of serialized pods that can be concatenated and passed to stream.connect().
+/// Build video format params with multiple formats as an enum choice.
+/// This allows PipeWire to negotiate ANY format we support with what GNOME offers.
 fn build_video_format_params() -> Vec<u8> {
-    // Supported formats (same as OBS's supported_formats_sync)
-    // SPA_VIDEO_FORMAT values from spa/param/video/format.h:
-    // BGRA=2, RGBA=4, BGRx=5, RGBx=6
-    const SPA_VIDEO_FORMAT_BGRA: u32 = 2;
-    const SPA_VIDEO_FORMAT_RGBA: u32 = 4;
-    const SPA_VIDEO_FORMAT_BGRX: u32 = 5;
-    const SPA_VIDEO_FORMAT_RGBX: u32 = 6;
+    // Use VideoFormat enum's as_raw() to get correct SPA format IDs
+    // PipeWire's actual values: BGRx=8, BGRA=12, RGBx=10, RGBA=14 (NOT 2,4,5,6!)
+    use spa::param::video::VideoFormat;
+    let spa_bgra = VideoFormat::BGRA.as_raw();
+    let spa_rgba = VideoFormat::RGBA.as_raw();
+    let spa_bgrx = VideoFormat::BGRx.as_raw();
+    let spa_rgbx = VideoFormat::RGBx.as_raw();
 
-    let formats = [
-        SPA_VIDEO_FORMAT_BGRA,
-        SPA_VIDEO_FORMAT_RGBA,
-        SPA_VIDEO_FORMAT_BGRX,
-        SPA_VIDEO_FORMAT_RGBX,
-    ];
+    eprintln!("[PIPEWIRE_DEBUG] SPA format IDs: BGRA={}, RGBA={}, BGRx={}, RGBx={}",
+        spa_bgra, spa_rgba, spa_bgrx, spa_rgbx);
 
-    // First, build pods WITH modifiers (DMA-BUF capable)
-    // Then, build pods WITHOUT modifiers (SHM fallback)
-    // PipeWire will try them in order and use the first one that works
+    let mut properties = Vec::new();
+
+    // Media type: Video
+    properties.push(Property {
+        key: FormatProperties::MediaType.as_raw(),
+        flags: PropertyFlags::empty(),
+        value: Value::Id(Id(MediaType::Video.as_raw())),
+    });
+
+    // Media subtype: Raw
+    properties.push(Property {
+        key: FormatProperties::MediaSubtype.as_raw(),
+        flags: PropertyFlags::empty(),
+        value: Value::Id(Id(MediaSubtype::Raw.as_raw())),
+    });
+
+    // Video format: Enum choice of all supported formats
+    // This tells PipeWire "I accept any of these formats, prefer BGRA"
+    // GNOME offers BGRx(8) and BGRA(12) with modifiers, so match those
+    let format_choice = Choice(
+        ChoiceFlags::empty(),
+        ChoiceEnum::Enum {
+            default: Id(spa_bgra),
+            alternatives: vec![
+                Id(spa_bgra),
+                Id(spa_rgba),
+                Id(spa_bgrx),
+                Id(spa_rgbx),
+            ],
+        },
+    );
+    properties.push(Property {
+        key: FormatProperties::VideoFormat.as_raw(),
+        flags: PropertyFlags::empty(),
+        value: Value::Choice(ChoiceValue::Id(format_choice)),
+    });
+
+    // Add modifier for DMA-BUF support
+    // GNOME offers formats with specific NVIDIA modifiers. We need to match at least one.
+    // Options:
+    // - DRM_FORMAT_MOD_LINEAR (0x0): Linear layout, widely supported
+    // - DRM_FORMAT_MOD_INVALID (0x00ffffffffffffff): Implicit modifier
     //
-    // NOTE: For now, we just build one simple format pod without modifiers
-    // to ensure basic negotiation works. We'll add modifier support after
-    // confirming the pipeline works.
+    // Use DONT_FIXATE flag (no MANDATORY) so negotiation can fall back if needed.
+    // This tells PipeWire "I prefer DmaBuf with linear, but can accept other modifiers"
+    const DRM_FORMAT_MOD_LINEAR: i64 = 0;
+    const DRM_FORMAT_MOD_INVALID: i64 = ((1i64 << 56) - 1);
 
-    // Build the first format with modifier (DMA-BUF)
-    let pod = build_single_format_pod(SPA_VIDEO_FORMAT_BGRX, true);
-    if !pod.is_empty() {
-        eprintln!("[PIPEWIRE_DEBUG] Built format pod for BGRx with modifier ({} bytes)", pod.len());
-        return pod;
+    // Use DONT_FIXATE without MANDATORY - allows fallback
+    let modifier_flags = PropertyFlags::from_bits_retain(0x10); // DONT_FIXATE only
+
+    // Build an enum choice with both linear and implicit modifiers
+    let modifier_choice = Choice(
+        ChoiceFlags::empty(),
+        ChoiceEnum::Enum {
+            default: DRM_FORMAT_MOD_LINEAR,
+            alternatives: vec![
+                DRM_FORMAT_MOD_LINEAR,
+                DRM_FORMAT_MOD_INVALID,
+            ],
+        },
+    );
+    properties.push(Property {
+        key: FormatProperties::VideoModifier.as_raw(),
+        flags: modifier_flags,
+        value: Value::Choice(ChoiceValue::Long(modifier_choice)),
+    });
+    eprintln!("[PIPEWIRE_DEBUG] Added modifiers: LINEAR(0x0) + INVALID(0x{:x}) with DONT_FIXATE", DRM_FORMAT_MOD_INVALID);
+
+    // Size: Range from 1x1 to 8192x4320 (like OBS does)
+    // This is REQUIRED for format negotiation with GNOME ScreenCast
+    use spa::utils::Rectangle;
+    let size_choice = Choice(
+        ChoiceFlags::empty(),
+        ChoiceEnum::Range {
+            default: Rectangle { width: 1920, height: 1080 },
+            min: Rectangle { width: 1, height: 1 },
+            max: Rectangle { width: 8192, height: 4320 },
+        },
+    );
+    properties.push(Property {
+        key: FormatProperties::VideoSize.as_raw(),
+        flags: PropertyFlags::empty(),
+        value: Value::Choice(ChoiceValue::Rectangle(size_choice)),
+    });
+
+    // Framerate: Range from 0/1 to 360/1, default 60/1
+    let framerate_choice = Choice(
+        ChoiceFlags::empty(),
+        ChoiceEnum::Range {
+            default: Fraction { num: 60, denom: 1 },
+            min: Fraction { num: 0, denom: 1 },
+            max: Fraction { num: 360, denom: 1 },
+        },
+    );
+    properties.push(Property {
+        key: FormatProperties::VideoFramerate.as_raw(),
+        flags: PropertyFlags::empty(),
+        value: Value::Choice(ChoiceValue::Fraction(framerate_choice)),
+    });
+
+    // Create the format object
+    let obj = Object {
+        type_: SpaTypes::ObjectParamFormat.as_raw(),
+        id: ParamType::EnumFormat.as_raw(),
+        properties,
+    };
+
+    // Serialize to bytes
+    match PodSerializer::serialize(Cursor::new(Vec::new()), &Value::Object(obj)) {
+        Ok((cursor, _len)) => {
+            let bytes = cursor.into_inner();
+            eprintln!("[PIPEWIRE_DEBUG] Built format pod with LINEAR+INVALID modifiers ({} bytes)", bytes.len());
+            bytes
+        }
+        Err(e) => {
+            eprintln!("[PIPEWIRE_DEBUG] ERROR: Failed to serialize format pod: {:?}", e);
+            Vec::new()
+        }
     }
+}
 
-    // Fallback: build without modifier (SHM)
-    eprintln!("[PIPEWIRE_DEBUG] Falling back to format pod without modifier");
-    build_single_format_pod(SPA_VIDEO_FORMAT_BGRX, false)
+/// Build video format params WITHOUT modifier (for SHM fallback).
+/// This is the second format pod in priority order - used when DmaBuf negotiation fails.
+/// OBS does the same: builds format pods first WITH modifiers, then WITHOUT.
+fn build_video_format_params_no_modifier() -> Vec<u8> {
+    use spa::param::video::VideoFormat;
+    let spa_bgra = VideoFormat::BGRA.as_raw();
+    let spa_rgba = VideoFormat::RGBA.as_raw();
+    let spa_bgrx = VideoFormat::BGRx.as_raw();
+    let spa_rgbx = VideoFormat::RGBx.as_raw();
+
+    let mut properties = Vec::new();
+
+    // Media type: Video
+    properties.push(Property {
+        key: FormatProperties::MediaType.as_raw(),
+        flags: PropertyFlags::empty(),
+        value: Value::Id(Id(MediaType::Video.as_raw())),
+    });
+
+    // Media subtype: Raw
+    properties.push(Property {
+        key: FormatProperties::MediaSubtype.as_raw(),
+        flags: PropertyFlags::empty(),
+        value: Value::Id(Id(MediaSubtype::Raw.as_raw())),
+    });
+
+    // Video format: Enum choice (same as with-modifier version)
+    let format_choice = Choice(
+        ChoiceFlags::empty(),
+        ChoiceEnum::Enum {
+            default: Id(spa_bgra),
+            alternatives: vec![
+                Id(spa_bgra),
+                Id(spa_rgba),
+                Id(spa_bgrx),
+                Id(spa_rgbx),
+            ],
+        },
+    );
+    properties.push(Property {
+        key: FormatProperties::VideoFormat.as_raw(),
+        flags: PropertyFlags::empty(),
+        value: Value::Choice(ChoiceValue::Id(format_choice)),
+    });
+
+    // NO MODIFIER - this is the key difference from build_video_format_params()
+    // This tells PipeWire we accept SHM (MemPtr) frames
+
+    // Size: Range from 1x1 to 8192x4320
+    use spa::utils::Rectangle;
+    let size_choice = Choice(
+        ChoiceFlags::empty(),
+        ChoiceEnum::Range {
+            default: Rectangle { width: 1920, height: 1080 },
+            min: Rectangle { width: 1, height: 1 },
+            max: Rectangle { width: 8192, height: 4320 },
+        },
+    );
+    properties.push(Property {
+        key: FormatProperties::VideoSize.as_raw(),
+        flags: PropertyFlags::empty(),
+        value: Value::Choice(ChoiceValue::Rectangle(size_choice)),
+    });
+
+    // Framerate: Range from 0/1 to 360/1
+    let framerate_choice = Choice(
+        ChoiceFlags::empty(),
+        ChoiceEnum::Range {
+            default: Fraction { num: 60, denom: 1 },
+            min: Fraction { num: 0, denom: 1 },
+            max: Fraction { num: 360, denom: 1 },
+        },
+    );
+    properties.push(Property {
+        key: FormatProperties::VideoFramerate.as_raw(),
+        flags: PropertyFlags::empty(),
+        value: Value::Choice(ChoiceValue::Fraction(framerate_choice)),
+    });
+
+    // Create the format object
+    let obj = Object {
+        type_: SpaTypes::ObjectParamFormat.as_raw(),
+        id: ParamType::EnumFormat.as_raw(),
+        properties,
+    };
+
+    // Serialize to bytes
+    match PodSerializer::serialize(Cursor::new(Vec::new()), &Value::Object(obj)) {
+        Ok((cursor, _len)) => {
+            let bytes = cursor.into_inner();
+            eprintln!("[PIPEWIRE_DEBUG] Built format pod WITHOUT modifier - SHM fallback ({} bytes)", bytes.len());
+            bytes
+        }
+        Err(e) => {
+            eprintln!("[PIPEWIRE_DEBUG] ERROR: Failed to serialize no-modifier format pod: {:?}", e);
+            Vec::new()
+        }
+    }
 }
 
 fn extract_frame(datas: &mut [pipewire::spa::buffer::Data], params: &VideoParams) -> Option<FrameData> {

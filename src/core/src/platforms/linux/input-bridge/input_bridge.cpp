@@ -205,23 +205,15 @@ void InputBridge::release(int button) {
 }
 
 void InputBridge::vertical_scroll(int amount) {
-  // Mutter's NotifyPointerAxis uses 10.0 = one discrete scroll step
-  //
-  // The Helix frontend already scales scroll values to target ~10-15 per notch:
-  //   - Mouse wheel: browser sends ~100-150px, frontend scales /10 → 10-15
-  //   - Trackpad: browser sends ~4px per event, frontend scales /2 → 2
-  //
-  // So the incoming 'amount' is already in a scale close to Mutter's expectation.
-  // We pass it through directly as a double for smooth scrolling.
-  //
-  // Negative = scroll up for both Moonlight and Mutter.
-  double mutter_dy = static_cast<double>(amount);
-  send(fmt::format(R"({{"type":"scroll_smooth","dx":0.0,"dy":{}}})", mutter_dy));
+  // Send raw Moonlight scroll values to the Go input bridge.
+  // The Go side (screenshot-server) handles conversion to Mutter's format.
+  // Moonlight sends Windows WHEEL_DELTA units (~120 per scroll notch).
+  send(fmt::format(R"({{"type":"scroll_smooth","dx":0.0,"dy":{}}})", amount));
 }
 
 void InputBridge::horizontal_scroll(int amount) {
-  double mutter_dx = static_cast<double>(amount);
-  send(fmt::format(R"({{"type":"scroll_smooth","dx":{},"dy":0.0}})", mutter_dx));
+  // Send raw Moonlight scroll values to the Go input bridge.
+  send(fmt::format(R"({{"type":"scroll_smooth","dx":{},"dy":0.0}})", amount));
 }
 
 // Keyboard methods

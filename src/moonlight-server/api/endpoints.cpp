@@ -552,7 +552,7 @@ void UnixSocketServer::endpoint_LobbySetPipeWireNodeId(const wolf::api::HTTPRequ
     }
 
     // Check if lobby is in pipewire mode
-    if (lobby->video_settings.video_source_mode != "pipewire") {
+    if (lobby->video_settings.video_source_mode.value_or("wayland") != "pipewire") {
       send_http(socket, 500, rfl::json::write(GenericErrorResponse{.error = "Lobby is not in pipewire mode"}));
       return;
     }

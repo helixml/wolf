@@ -1,4 +1,5 @@
 //! PipeWire ScreenCast source - reuses waylanddisplaycore's CUDA conversion
+//! Cache-bust: 2026-01-09T03:40Z - set_active + 30s first-frame timeout
 //!
 //! This element follows Wolf/gst-wayland-display's context sharing pattern:
 //! - Wolf creates the CUDA context and pushes it via set_context()
@@ -539,12 +540,26 @@ impl PushSrcImpl for PipeWireZeroCopySrc {
         let state = g.as_mut().ok_or(gst::FlowError::Eos)?;
         let stream = state.stream.as_ref().ok_or(gst::FlowError::Error)?;
 
-        // Use keepalive timeout if configured, otherwise wait with default timeout
-        let timeout = if keepalive_time_ms > 0 {
+        // Determine timeout based on whether we have a last buffer:
+        // - First frame: wait up to 30 seconds (GNOME ScreenCast may take time to start)
+        // - Subsequent frames with keepalive: use short timeout for responsive keepalive
+        // - Subsequent frames without keepalive: use default timeout
+        let has_last_buffer = state.last_buffer.is_some();
+        let timeout = if !has_last_buffer {
+            // First frame: wait longer because GNOME ScreenCast needs time to:
+            // 1. Complete format negotiation
+            // 2. Transition from Paused to Streaming state
+            // 3. Actually render and deliver the first frame
+            Duration::from_secs(30)
+        } else if keepalive_time_ms > 0 {
             Duration::from_millis(keepalive_time_ms as u64)
         } else {
             Duration::from_secs(30)  // Default timeout
         };
+
+        if !has_last_buffer {
+            gst::info!(CAT, imp = self, "Waiting for first frame from PipeWire (timeout: {:?})", timeout);
+        }
 
         // Try to receive a frame with timeout
         let frame_result = stream.recv_frame_timeout(timeout);
@@ -575,8 +590,11 @@ impl PushSrcImpl for PipeWireZeroCopySrc {
                     drop(g);
                     return Ok(CreateSuccess::NewBuffer(buf));
                 } else {
-                    // No last buffer yet - first frame hasn't arrived
+                    // No last buffer yet - first frame hasn't arrived within keepalive time
+                    // This shouldn't happen often since first frame uses longer timeout
                     gst::warning!(CAT, imp = self, "Keepalive timeout but no last buffer available (waiting for first frame)");
+                    // Don't error immediately - continue waiting in subsequent create() calls
+                    // The 30-second first-frame timeout above should handle this
                     return Err(gst::FlowError::Error);
                 }
             }

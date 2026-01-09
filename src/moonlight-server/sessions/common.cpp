@@ -35,7 +35,7 @@ void start_runner(std::shared_ptr<events::Runner> runner,
   full_env.set("GAMESCOPE_HEIGHT", std::to_string(args->video_settings.height));
   full_env.set("GAMESCOPE_REFRESH", std::to_string(args->video_settings.refresh_rate));
   full_env.set("WOLF_VIDEO_BUFFER_CAPS", args->video_settings.video_producer_buffer_caps);
-  full_env.set("WOLF_VIDEO_SOURCE_MODE", args->video_settings.video_source_mode);
+  full_env.set("WOLF_VIDEO_SOURCE_MODE", args->video_settings.video_source_mode.value_or("wayland"));
 
   if (auto w_display = args->wayland_display.get()) {
     auto socket_name = virtual_display::get_wayland_socket_name(*w_display);

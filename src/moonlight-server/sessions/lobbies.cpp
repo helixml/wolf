@@ -36,7 +36,7 @@ void leave_lobby(const std::shared_ptr<events::EventBusType> &ev_bus,
   });
 
   // Switch over mouse and keyboard to use the original session's input method
-  bool use_pipewire_mode = lobby.video_settings.video_source_mode == "pipewire";
+  bool use_pipewire_mode = lobby.video_settings.video_source_mode.value_or("wayland") == "pipewire";
 
   if (use_pipewire_mode) {
     // PipeWire mode: Clear input devices when leaving lobby
@@ -133,7 +133,7 @@ setup_lobbies_handlers(const immer::box<state::AppState> &app_state,
         lobby->lobby_socket_server = wolf::api::start_lobby_socket_server(socket_path, lobby->id, ev_bus);
         logs::log(logs::info, "[LOBBY] Started per-lobby socket server at {}", socket_path);
 
-        bool use_pipewire_mode = lobby_settings->video_settings.video_source_mode == "pipewire";
+        bool use_pipewire_mode = lobby_settings->video_settings.video_source_mode.value_or("wayland") == "pipewire";
 
         if (use_pipewire_mode) {
           // PipeWire mode: Start runner FIRST, wait for container to report node ID
@@ -336,7 +336,7 @@ setup_lobbies_handlers(const immer::box<state::AppState> &app_state,
         });
 
         // switch mouse and keyboard in session to use the lobby's input method
-        bool use_pipewire_mode = lobby->video_settings.video_source_mode == "pipewire";
+        bool use_pipewire_mode = lobby->video_settings.video_source_mode.value_or("wayland") == "pipewire";
 
         if (use_pipewire_mode) {
           // PipeWire mode: Use InputBridge for RemoteDesktop D-Bus input
@@ -542,7 +542,7 @@ setup_lobbies_handlers(const immer::box<state::AppState> &app_state,
           return;
         }
 
-        if (lobby->video_settings.video_source_mode != "pipewire") {
+        if (lobby->video_settings.video_source_mode.value_or("wayland") != "pipewire") {
           logs::log(logs::warning, "[LOBBY] SetPipeWireNodeIdEvent: lobby {} not in pipewire mode, ignoring",
                     node_id_event->lobby_id);
           return;
@@ -637,7 +637,7 @@ setup_lobbies_handlers(const immer::box<state::AppState> &app_state,
           return;
         }
 
-        if (lobby->video_settings.video_source_mode != "pipewire") {
+        if (lobby->video_settings.video_source_mode.value_or("wayland") != "pipewire") {
           logs::log(logs::warning, "[LOBBY] SetInputSocketEvent: lobby {} not in pipewire mode, ignoring",
                     input_socket_event->lobby_id);
           return;
