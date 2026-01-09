@@ -189,74 +189,130 @@ void start_pipewire_video_producer(const std::string &session_id,
                                    const wolf::core::virtual_display::DisplayMode &display_mode,
                                    std::shared_ptr<immer::atom<gst_video_context::gst_context_ptr>> video_context,
                                    std::shared_ptr<boost::promise<WaylandDisplayReady>> on_ready,
-                                   std::shared_ptr<events::EventBusType> event_bus) {
-  // Use pipewirezerocopysrc - our unified PipeWire source with zero-copy GPU output
-  // The element handles GPU detection internally and outputs the best format:
-  // - NVIDIA: video/x-raw(memory:CUDAMemory) via EGL→CUDA zero-copy
-  // - AMD/Intel: video/x-raw(memory:DMABuf) passthrough
-  // - Fallback: video/x-raw in system memory
-  //
-  // This replaces the fragile "pipewiresrc ! cudaupload" pipeline which had
-  // CUDA buffer sharing issues with multiple viewers in lobby mode.
-
-  // Set PIPEWIRE_REMOTE to the shared socket path
-  // pipewire_socket_path is the runner_state_folder_path (e.g., /wolf-state/agent-xxx)
-  // The container's XDG_RUNTIME_DIR is bind-mounted to <runner_state_folder_path>/pipewire/
-  // So the PipeWire socket is at <runner_state_folder_path>/pipewire/pipewire-0
-  // PIPEWIRE_REMOTE is the standard env var for connecting to a specific socket
-  auto pipewire_socket = std::filesystem::path(pipewire_socket_path) / "pipewire" / "pipewire-0";
-  setenv("PIPEWIRE_REMOTE", pipewire_socket.c_str(), 1);
-  logs::log(logs::info, "[GSTREAMER] PIPEWIRE_REMOTE set to: {}", pipewire_socket.string());
-
-  std::string output_mode;
-  if (buffer_caps.find("CUDAMemory") != std::string::npos) {
-    output_mode = "cuda";
-    logs::log(logs::info, "[GSTREAMER] PipeWire producer configured for CUDA output");
-  } else if (buffer_caps.find("DMABuf") != std::string::npos) {
-    output_mode = "dmabuf";
-    logs::log(logs::info, "[GSTREAMER] PipeWire producer configured for DMABuf output");
-  } else {
-    output_mode = "system";
-    logs::log(logs::info, "[GSTREAMER] PipeWire producer configured for system memory output");
-  }
-
-  // pipewirezerocopysrc outputs CUDA/DMABuf/system memory in PipeWire's native format (typically BGRA).
-  // GNOME's ScreenCast may provide a different resolution than requested (e.g., 1280x720 instead of 3840x2160).
-  // We use cudaconvertscale to:
-  // 1. Convert from BGRA to NV12 (required by the encoder)
-  // 2. Scale to the target resolution
-  // CRITICAL: The output format MUST be NV12 to match the test pattern producer format.
-  // Without explicit format=NV12, the encoder's interpipesrc gets a "segment format mismatch" error
-  // when switching from test pattern (NV12) to PipeWire (BGRA), causing the stream to hang.
-  // CRITICAL: Add queue before interpipesink to decouple producer from consumer timing.
-  // Without queue, GStreamer warns "Pipeline construction is invalid, please add queues"
-  // and the pipeline can deadlock when interpipesrc switches sources.
-  // GNOME 49+ uses damage-based frame delivery - only sends frames when screen changes.
-  // keepalive-time=100 ensures we resend the last frame every 100ms (10 FPS minimum)
-  // when no new frames arrive. Without this, static desktops cause stream timeout.
-  // See: design/2026-01-06-pipewire-keepalive-mechanism.md
+                                   std::shared_ptr<events::EventBusType> event_bus,
+                                   std::optional<std::string> shm_socket_path) {
+  std::string pipeline;
 
   // Use videoconvert for software rendering (no GPU), cudaconvertscale for hardware
-  std::string converter = (output_mode == "system") ? "videoconvert" : "cudaconvertscale";
+  bool use_cuda = buffer_caps.find("CUDAMemory") != std::string::npos;
+  std::string converter = use_cuda ? "cudaconvertscale" : "videoconvert";
+  std::string gpu_upload = use_cuda ? "cudaupload ! " : "";
 
-  auto pipeline = fmt::format(
-      "pipewirezerocopysrc pipewire-node-id={node_id} render-node={render_node} output-mode={output_mode} keepalive-time=100 ! "
-      "{buffer_caps} ! "
-      "{converter} ! "
-      "{buffer_caps}, format=NV12, width={width}, height={height}, framerate={fps}/1 ! "
-      "queue max-size-buffers=5 leaky=downstream ! "
-      "interpipesink sync=false async=false name={session_id}_video max-buffers=5",
-      fmt::arg("node_id", pipewire_node_id),
-      fmt::arg("render_node", render_node),
-      fmt::arg("output_mode", output_mode),
-      fmt::arg("converter", converter),
-      fmt::arg("buffer_caps", buffer_caps),
-      fmt::arg("width", display_mode.width),
-      fmt::arg("height", display_mode.height),
-      fmt::arg("fps", display_mode.refreshRate),
-      fmt::arg("session_id", session_id));
+  if (shm_socket_path.has_value()) {
+    // SHM MODE: Container runs pipewiresrc->shmsink, Wolf uses shmsrc
+    // This bypasses cross-container PipeWire authorization issues.
+    //
+    // The container's video forwarder captures frames via PipeWire inside the container
+    // and outputs them to a shared memory socket. Wolf reads from this socket using shmsrc.
+    //
+    // Pipeline: shmsrc -> cudaupload (if CUDA) -> cudaconvertscale -> interpipesink
+    //
+    // The shmsrc receives BGRx frames from the container's shmsink.
+    // We upload to GPU and convert to NV12 for the encoder.
 
-  logs::log(logs::debug, "[GSTREAMER] Starting PipeWire video producer: {}", pipeline);
+    // Translate container path to host-accessible path
+    // Container reports: /run/user/1000/helix-video.sock
+    // Host path is: <pipewire_socket_path>/pipewire/<filename>
+    std::string host_shm_path;
+    std::string container_path = shm_socket_path.value();
+    auto last_slash = container_path.rfind('/');
+    std::string socket_filename = (last_slash != std::string::npos) ?
+        container_path.substr(last_slash + 1) : "helix-video.sock";
+    host_shm_path = (std::filesystem::path(pipewire_socket_path) / "pipewire" / socket_filename).string();
+
+    logs::log(logs::info, "[GSTREAMER] SHM mode: container={} -> host={}", container_path, host_shm_path);
+
+    // shmsrc reads raw BGRx frames from the shared memory socket
+    // The container's shmsink writes: video/x-raw,format=BGRx
+    // We must specify FULL input caps (including dimensions and framerate) for cudaconvertscale
+    // to properly negotiate. Without input dimensions, the converter can't determine output format.
+    pipeline = fmt::format(
+        "shmsrc socket-path={shm_path} is-live=true do-timestamp=true ! "
+        "video/x-raw,format=BGRx,width={width},height={height},framerate={fps}/1 ! "
+        "{gpu_upload}"
+        "{converter} ! "
+        "{buffer_caps}, format=NV12, width={width}, height={height}, framerate={fps}/1 ! "
+        "queue max-size-buffers=5 leaky=downstream ! "
+        "interpipesink sync=false async=false name={session_id}_video max-buffers=5",
+        fmt::arg("shm_path", host_shm_path),
+        fmt::arg("gpu_upload", gpu_upload),
+        fmt::arg("converter", converter),
+        fmt::arg("buffer_caps", buffer_caps),
+        fmt::arg("width", display_mode.width),
+        fmt::arg("height", display_mode.height),
+        fmt::arg("fps", display_mode.refreshRate),
+        fmt::arg("session_id", session_id));
+
+    logs::log(logs::info, "[GSTREAMER] Starting SHM video producer for session {}", session_id);
+  } else {
+    // DIRECT MODE: Use pipewirezerocopysrc (may fail due to cross-container auth issues)
+    // Use pipewirezerocopysrc - our unified PipeWire source with zero-copy GPU output
+    // The element handles GPU detection internally and outputs the best format:
+    // - NVIDIA: video/x-raw(memory:CUDAMemory) via EGL→CUDA zero-copy
+    // - AMD/Intel: video/x-raw(memory:DMABuf) passthrough
+    // - Fallback: video/x-raw in system memory
+    //
+    // This replaces the fragile "pipewiresrc ! cudaupload" pipeline which had
+    // CUDA buffer sharing issues with multiple viewers in lobby mode.
+
+    // Set PIPEWIRE_REMOTE to the shared socket path
+    // pipewire_socket_path is the runner_state_folder_path (e.g., /wolf-state/agent-xxx)
+    // The container's XDG_RUNTIME_DIR is bind-mounted to <runner_state_folder_path>/pipewire/
+    // So the PipeWire socket is at <runner_state_folder_path>/pipewire/pipewire-0
+    // PIPEWIRE_REMOTE is the standard env var for connecting to a specific socket
+    auto pipewire_socket = std::filesystem::path(pipewire_socket_path) / "pipewire" / "pipewire-0";
+    setenv("PIPEWIRE_REMOTE", pipewire_socket.c_str(), 1);
+    logs::log(logs::info, "[GSTREAMER] PIPEWIRE_REMOTE set to: {}", pipewire_socket.string());
+
+    std::string output_mode;
+    if (buffer_caps.find("CUDAMemory") != std::string::npos) {
+      output_mode = "cuda";
+      logs::log(logs::info, "[GSTREAMER] PipeWire producer configured for CUDA output");
+    } else if (buffer_caps.find("DMABuf") != std::string::npos) {
+      output_mode = "dmabuf";
+      logs::log(logs::info, "[GSTREAMER] PipeWire producer configured for DMABuf output");
+    } else {
+      output_mode = "system";
+      logs::log(logs::info, "[GSTREAMER] PipeWire producer configured for system memory output");
+    }
+
+    // pipewirezerocopysrc outputs CUDA/DMABuf/system memory in PipeWire's native format (typically BGRA).
+    // GNOME's ScreenCast may provide a different resolution than requested (e.g., 1280x720 instead of 3840x2160).
+    // We use cudaconvertscale to:
+    // 1. Convert from BGRA to NV12 (required by the encoder)
+    // 2. Scale to the target resolution
+    // CRITICAL: The output format MUST be NV12 to match the test pattern producer format.
+    // Without explicit format=NV12, the encoder's interpipesrc gets a "segment format mismatch" error
+    // when switching from test pattern (NV12) to PipeWire (BGRA), causing the stream to hang.
+    // CRITICAL: Add queue before interpipesink to decouple producer from consumer timing.
+    // Without queue, GStreamer warns "Pipeline construction is invalid, please add queues"
+    // and the pipeline can deadlock when interpipesrc switches sources.
+    // GNOME 49+ uses damage-based frame delivery - only sends frames when screen changes.
+    // keepalive-time=100 ensures we resend the last frame every 100ms (10 FPS minimum)
+    // when no new frames arrive. Without this, static desktops cause stream timeout.
+    // See: design/2026-01-06-pipewire-keepalive-mechanism.md
+
+    pipeline = fmt::format(
+        "pipewirezerocopysrc pipewire-node-id={node_id} render-node={render_node} output-mode={output_mode} keepalive-time=100 ! "
+        "{buffer_caps} ! "
+        "{converter} ! "
+        "{buffer_caps}, format=NV12, width={width}, height={height}, framerate={fps}/1 ! "
+        "queue max-size-buffers=5 leaky=downstream ! "
+        "interpipesink sync=false async=false name={session_id}_video max-buffers=5",
+        fmt::arg("node_id", pipewire_node_id),
+        fmt::arg("render_node", render_node),
+        fmt::arg("output_mode", output_mode),
+        fmt::arg("converter", converter),
+        fmt::arg("buffer_caps", buffer_caps),
+        fmt::arg("width", display_mode.width),
+        fmt::arg("height", display_mode.height),
+        fmt::arg("fps", display_mode.refreshRate),
+        fmt::arg("session_id", session_id));
+
+    logs::log(logs::info, "[GSTREAMER] Starting direct PipeWire video producer for session {}", session_id);
+  }
+
+  logs::log(logs::debug, "[GSTREAMER] Pipeline: {}", pipeline);
 
   auto bus_data_ptr =
       std::make_shared<GstBusData>(GstBusData{.on_ready = std::move(on_ready), .wayland_plugin = nullptr});

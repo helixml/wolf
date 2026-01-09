@@ -548,10 +548,16 @@ setup_lobbies_handlers(const immer::box<state::AppState> &app_state,
           return;
         }
 
-        // Store the node ID
+        // Store the node ID and SHM socket path
         lobby->pipewire_node_id->store(node_id_event->node_id);
-        logs::log(logs::info, "[LOBBY] PipeWire node ID {} received for lobby {}, starting pipewiresrc video producer",
-                  node_id_event->node_id, lobby->id);
+        if (node_id_event->shm_socket_path.has_value()) {
+          lobby->shm_socket_path->store(node_id_event->shm_socket_path.value());
+          logs::log(logs::info, "[LOBBY] PipeWire node ID {} with SHM socket {} received for lobby {}",
+                    node_id_event->node_id, node_id_event->shm_socket_path.value(), lobby->id);
+        } else {
+          logs::log(logs::info, "[LOBBY] PipeWire node ID {} received for lobby {} (direct mode - no SHM)",
+                    node_id_event->node_id, lobby->id);
+        }
 
         // Atomically try to start the producer - prevents race condition where
         // producer is exiting but flag is still true. Uses update() with atomic
@@ -582,16 +588,20 @@ setup_lobbies_handlers(const immer::box<state::AppState> &app_state,
           lobby->video_producer_running->store(true);
         }
 
-        // Start the pipewiresrc video producer
+        // Start the video producer (SHM mode if shm_socket_path is set, otherwise direct PipeWire)
         auto ev_bus = app_state->event_bus;
         auto gst_context = app_state->gst_context;
         auto video_settings = lobby->video_settings;
         auto video_producer_running = lobby->video_producer_running;
 
+        // Get SHM socket path if available (set by video forwarder in container)
+        auto shm_path_box = lobby->shm_socket_path->load();
+        std::optional<std::string> shm_path = *shm_path_box;
+
         std::thread([lobby_id = lobby->id, node_id = node_id_event->node_id, video_settings, ev_bus, gst_context,
-                     pipewire_socket_path = lobby->runner_state_folder_path, video_producer_running]() {
+                     pipewire_socket_path = lobby->runner_state_folder_path, video_producer_running, shm_path]() {
           try {
-            // Create a promise that we won't use (pipewiresrc doesn't need wayland display setup)
+            // Create a promise that we won't use (video producer doesn't need wayland display setup)
             std::shared_ptr<boost::promise<streaming::WaylandDisplayReady>> on_ready =
                 std::make_shared<boost::promise<streaming::WaylandDisplayReady>>();
 
@@ -605,11 +615,12 @@ setup_lobbies_handlers(const immer::box<state::AppState> &app_state,
                                                       .refreshRate = video_settings.refresh_rate},
                                                      gst_context,
                                                      on_ready,
-                                                     ev_bus);
+                                                     ev_bus,
+                                                     shm_path);
           } catch (const std::exception &e) {
-            logs::log(logs::error, "[LOBBY] PipeWire video producer thread exception: {}", e.what());
+            logs::log(logs::error, "[LOBBY] Video producer thread exception: {}", e.what());
           } catch (...) {
-            logs::log(logs::error, "[LOBBY] PipeWire video producer thread unknown exception");
+            logs::log(logs::error, "[LOBBY] Video producer thread unknown exception");
           }
 
           // Mark producer as stopped so it can be restarted when new consumers connect

@@ -16,6 +16,10 @@ using boost::asio::local::stream_protocol;
 // context is implicit (per-lobby socket).
 struct LobbySetNodeIdRequest {
   unsigned int node_id;
+  // Optional: SHM socket path for in-container video forwarding.
+  // When set, Wolf uses shmsrc instead of pipewiresrc to receive video frames.
+  // This bypasses cross-container PipeWire authorization issues.
+  std::optional<std::string> shm_socket_path;
 };
 
 struct SetInputSocketRequest {
@@ -174,19 +178,27 @@ void LobbySocketServer::handle_request(const std::string &request,
     send_response(socket, 200, rfl::json::write(resp));
 
   } else if (method == "POST" && path == "/set-pipewire-node-id") {
-    // Set PipeWire node ID
+    // Set PipeWire node ID (and optionally SHM socket path for in-container forwarding)
     auto parsed = rfl::json::read<LobbySetNodeIdRequest>(body);
     if (!parsed) {
       send_response(socket, 400, rfl::json::write(ErrorResponse{.error = "Invalid JSON: " + parsed.error().what()}));
       return;
     }
 
-    logs::log(logs::info, "[LOBBY_SOCKET] Setting PipeWire node ID {} for lobby {}",
-              parsed->node_id, lobby_id_);
+    if (parsed->shm_socket_path.has_value()) {
+      logs::log(logs::info, "[LOBBY_SOCKET] Setting PipeWire node ID {} with SHM socket {} for lobby {}",
+                parsed->node_id, parsed->shm_socket_path.value(), lobby_id_);
+    } else {
+      logs::log(logs::info, "[LOBBY_SOCKET] Setting PipeWire node ID {} for lobby {}",
+                parsed->node_id, lobby_id_);
+    }
 
-    // Fire event to trigger pipewiresrc video producer startup
+    // Fire event to trigger video producer startup
+    // If shm_socket_path is set, Wolf will use shmsrc instead of pipewiresrc
     event_bus_->fire_event(immer::box<events::SetPipeWireNodeIdEvent>(
-        events::SetPipeWireNodeIdEvent{.lobby_id = lobby_id_, .node_id = parsed->node_id}));
+        events::SetPipeWireNodeIdEvent{.lobby_id = lobby_id_,
+                                       .node_id = parsed->node_id,
+                                       .shm_socket_path = parsed->shm_socket_path}));
 
     send_response(socket, 200, rfl::json::write(SuccessResponse{}));
 

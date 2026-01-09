@@ -83,16 +83,24 @@ void start_test_audio_producer(const std::string &session_id,
 
 /**
  * Start a PipeWire video producer pipeline for GNOME 49+ desktops.
- * Creates: pipewiresrc path={node_id} ! [gpu_upload] ! interpipesink name={session_id}_video
+ *
+ * Two capture modes:
+ * 1. SHM mode (preferred): Container runs pipewiresrc->shmsink, Wolf uses shmsrc.
+ *    Creates: shmsrc socket-path={shm_socket_path} ! [convert] ! interpipesink
+ *    This bypasses cross-container PipeWire authorization issues.
+ *
+ * 2. Direct mode (fallback): Wolf connects to PipeWire directly via pipewiresrc.
+ *    Creates: pipewiresrc path={node_id} ! [gpu_upload] ! interpipesink
+ *    May fail due to portal FD authorization requirements.
  *
  * GNOME 49 removed --nested mode for Mutter. Instead, GNOME runs with --devkit (Mutter SDK)
- * which produces frames via PipeWire ScreenCast API. Wolf reads these frames directly using
- * pipewiresrc, bypassing the need for a nested Wayland compositor.
+ * which produces frames via PipeWire ScreenCast API.
  *
  * The container must:
  * 1. Start gnome-shell with ScreenCast session (creates PipeWire node)
- * 2. Report the PipeWire node ID back to Wolf
- * 3. Wolf starts this pipeline to read frames from the container's PipeWire
+ * 2. Start video forwarder (pipewiresrc->shmsink) inside container
+ * 3. Report the PipeWire node ID and SHM socket path back to Wolf
+ * 4. Wolf starts this pipeline to read frames from the SHM socket
  *
  * This approach supports DMA-BUF zero-copy if the GPU driver supports it.
  */
@@ -104,7 +112,8 @@ void start_pipewire_video_producer(const std::string &session_id,
                                    const wolf::core::virtual_display::DisplayMode &display_mode,
                                    std::shared_ptr<immer::atom<gst_video_context::gst_context_ptr>> video_context,
                                    std::shared_ptr<boost::promise<WaylandDisplayReady>> on_ready,
-                                   std::shared_ptr<events::EventBusType> event_bus);
+                                   std::shared_ptr<events::EventBusType> event_bus,
+                                   std::optional<std::string> shm_socket_path = std::nullopt);
 
 void start_streaming_video(immer::box<events::VideoSession> video_session,
                            const std::shared_ptr<events::EventBusType> &event_bus,

@@ -1199,28 +1199,29 @@ void UnixSocketServer::endpoint_KeyboardState(const HTTPRequest &req, std::share
               state.device_node = nodes[0];
             }
 
+            // TODO: Keyboard introspection disabled - methods not yet implemented in inputtino
             // Layer 2: Inputtino's internal cur_press_keys vector
-            auto inputtino_keys = keyboard.get_pressed_keys();
-            for (short key : inputtino_keys) {
-              state.inputtino_state.pressed_keys.push_back(static_cast<int32_t>(key));
-              state.inputtino_state.pressed_key_names.push_back(wolf::control::moonlight_key_to_name(key));
-            }
-            std::set<short> inputtino_set(inputtino_keys.begin(), inputtino_keys.end());
-            state.inputtino_state.modifier_state.shift = wolf::control::is_shift_pressed(inputtino_set);
-            state.inputtino_state.modifier_state.ctrl = wolf::control::is_ctrl_pressed(inputtino_set);
-            state.inputtino_state.modifier_state.alt = wolf::control::is_alt_pressed(inputtino_set);
-            state.inputtino_state.modifier_state.meta = wolf::control::is_meta_pressed(inputtino_set);
+            // auto inputtino_keys = keyboard.get_pressed_keys();
+            // for (short key : inputtino_keys) {
+            //   state.inputtino_state.pressed_keys.push_back(static_cast<int32_t>(key));
+            //   state.inputtino_state.pressed_key_names.push_back(wolf::control::moonlight_key_to_name(key));
+            // }
+            // std::set<short> inputtino_set(inputtino_keys.begin(), inputtino_keys.end());
+            // state.inputtino_state.modifier_state.shift = wolf::control::is_shift_pressed(inputtino_set);
+            // state.inputtino_state.modifier_state.ctrl = wolf::control::is_ctrl_pressed(inputtino_set);
+            // state.inputtino_state.modifier_state.alt = wolf::control::is_alt_pressed(inputtino_set);
+            // state.inputtino_state.modifier_state.meta = wolf::control::is_meta_pressed(inputtino_set);
 
             // Layer 3: Evdev/kernel state (Linux keycodes)
-            auto evdev_keys = keyboard.get_evdev_pressed_keys();
-            for (int key : evdev_keys) {
-              state.evdev_state.pressed_keys.push_back(static_cast<int32_t>(key));
-              state.evdev_state.pressed_key_names.push_back(wolf::control::linux_key_to_name(key));
-            }
-            state.evdev_state.modifier_state.shift = wolf::control::is_shift_pressed_linux(evdev_keys);
-            state.evdev_state.modifier_state.ctrl = wolf::control::is_ctrl_pressed_linux(evdev_keys);
-            state.evdev_state.modifier_state.alt = wolf::control::is_alt_pressed_linux(evdev_keys);
-            state.evdev_state.modifier_state.meta = wolf::control::is_meta_pressed_linux(evdev_keys);
+            // auto evdev_keys = keyboard.get_evdev_pressed_keys();
+            // for (int key : evdev_keys) {
+            //   state.evdev_state.pressed_keys.push_back(static_cast<int32_t>(key));
+            //   state.evdev_state.pressed_key_names.push_back(wolf::control::linux_key_to_name(key));
+            // }
+            // state.evdev_state.modifier_state.shift = wolf::control::is_shift_pressed_linux(evdev_keys);
+            // state.evdev_state.modifier_state.ctrl = wolf::control::is_ctrl_pressed_linux(evdev_keys);
+            // state.evdev_state.modifier_state.alt = wolf::control::is_alt_pressed_linux(evdev_keys);
+            // state.evdev_state.modifier_state.meta = wolf::control::is_meta_pressed_linux(evdev_keys);
           } else {
             logs::log(logs::debug, "[KEYBOARD] Using WaylandKeyboard - NO introspection available");
           }

@@ -214,6 +214,15 @@ struct Lobby {
       std::make_shared<immer::atom<std::optional<unsigned int>>>(std::nullopt);
 
   /**
+   * SHM socket path for in-container video forwarding (GNOME 49+).
+   * When set, Wolf uses shmsrc to read frames from this socket instead of
+   * connecting directly to PipeWire. This bypasses cross-container authorization issues.
+   * The container runs: pipewiresrc -> shmsink at this socket path.
+   */
+  std::shared_ptr<immer::atom<std::optional<std::string>>> shm_socket_path =
+      std::make_shared<immer::atom<std::optional<std::string>>>(std::nullopt);
+
+  /**
    * Tracks whether the PipeWire video producer is currently running.
    * When the producer exits (e.g., due to no consumers), this is set to false.
    * When a new consumer joins, Wolf will restart the producer if needed.
@@ -238,11 +247,20 @@ struct Lobby {
 
 /**
  * Event fired when a container reports its PipeWire ScreenCast node ID.
- * This triggers Wolf to start the pipewiresrc video producer for the lobby.
+ * This triggers Wolf to start the video producer for the lobby.
+ *
+ * Two capture modes:
+ * 1. SHM mode (preferred): Container runs pipewiresrc->shmsink, Wolf uses shmsrc.
+ *    This bypasses cross-container PipeWire authorization issues.
+ * 2. Direct mode (fallback): Wolf connects to PipeWire directly via pipewiresrc.
+ *    May fail due to portal FD authorization requirements.
  */
 struct SetPipeWireNodeIdEvent {
   std::string lobby_id;
   unsigned int node_id;
+  // Optional: SHM socket path for in-container video forwarding.
+  // When set, Wolf uses shmsrc instead of pipewiresrc to receive frames.
+  std::optional<std::string> shm_socket_path;
 };
 
 /**
